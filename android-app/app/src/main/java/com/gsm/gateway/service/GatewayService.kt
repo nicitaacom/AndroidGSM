@@ -1,61 +1,80 @@
-package com.gsm.gateway.service
-
 import android.app.Service
 import android.content.Intent
+import android.net.Uri
 import android.os.IBinder
-import android.app.PendingIntent
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.os.Build
+import android.telecom.Call
+import android.telecom.TelecomManager
 import android.util.Log
+import com.pusher.client.Pusher
+import com.pusher.client.channel.PrivateChannelEventListener
+import com.pusher.client.PusherOptions
 
-class GatewayService : Service() {
+class MyForegroundService : Service() {
+    private lateinit var telecomManager: TelecomManager
+    private var currentCall: Call? = null
+    private lateinit var pusher: Pusher
 
     override fun onCreate() {
         super.onCreate()
-        Log.d("GatewayService", "Service created")
-        createNotificationChannel()
+        telecomManager = getSystemService(TELECOM_SERVICE) as TelecomManager
+        setupPusher()
+    }
+
+    private fun setupPusher() {
+        val options = PusherOptions()
+        options.setCluster("your-cluster")
+        pusher = Pusher("your-app-key", options)
+        pusher.connect()
+
+        val channel = pusher.subscribe("private-channel-name")
+        channel.bind("event-name") { event ->
+            handlePusherEvent(event.data)
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification())
+        val notification = createNotification()
+        startForeground(NOTIFICATION_ID, notification)
         return START_STICKY
     }
 
-    private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID, 
-                "GSM Gateway Service", 
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager.createNotificationChannel(channel)
+    private fun createNotification(): android.app.Notification {
+        // Реализация уведомления
+        // ...
+    }
+
+    private fun startCall(phoneNumber: String) {
+        val uri = Uri.parse("tel:")
+        telecomManager.placeCall(uri, null)
+        Log.d("GSM", "Starting call to: ")
+    }
+
+    private fun endCall() {
+        currentCall?.disconnect()
+        Log.d("GSM", "Ending call")
+    }
+
+    private fun handlePusherEvent(data: String) {
+        when {
+            data.startsWith("CALL_START") -> {
+                val phoneNumber = data.split(" ").last()
+                startCall(phoneNumber)
+            }
+            data.startsWith("CALL_END") -> {
+                endCall()
+            }
+            data.startsWith("SEND_DTMF") -> {
+                val dtmf = data.split(" ").last()
+                sendDtmf(dtmf)
+            }
         }
     }
 
-    private fun createNotification(): Notification {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Notification.Builder(this, CHANNEL_ID)
-                .setContentTitle("GSM Gateway")
-                .setContentText("Service is running")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .build()
-        } else {
-            @Suppress("DEPRECATION")
-            Notification.Builder(this)
-                .setContentTitle("GSM Gateway")
-                .setContentText("Service is running")
-                .setSmallIcon(android.R.drawable.ic_dialog_info)
-                .build()
-        }
+    private fun sendDtmf(dtmf: String) {
+        Log.d("GSM", "Sending DTMF: ")
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    companion object {
-        const val CHANNEL_ID = "GSMGatewayServiceChannel"
-        const val NOTIFICATION_ID = 1
+    override fun onBind(intent: Intent?): IBinder? {
+        return null
     }
 }
