@@ -1,0 +1,7 @@
+{
+  "languages": ["kotlin"],
+  "frameworks": ["android", "webrtc", "okhttp"],
+  "projectType": "android",
+  "ignoreDirs": ["build", ".gradle", "out"],
+  "contextFiles": ["app/src/main/java/com/nicitaacom/androidgsm/**/*"]
+}
