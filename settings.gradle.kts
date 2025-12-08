@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Android(GSM"
+rootProject.name = "AndroidGSM"
 include(":app")

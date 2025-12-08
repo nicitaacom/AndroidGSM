@@ -34,7 +34,7 @@ class GsmService : Service() {
         // gsmDialer = GsmDialer(this)
         // webRtcManager = WebRtcManager(this)
 
-        wsClient?.connect(BuildConfig.WS_URL)
+//        wsClient?.connect(BuildConfig.WS_URL)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
