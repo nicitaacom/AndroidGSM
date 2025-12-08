@@ -18,14 +18,11 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
-
-    <!-- Permission for auto-start on device boot -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
 
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
-
-
 
     <application
             android:allowBackup="true"
@@ -44,11 +41,20 @@
                 android:exported="false"
                 android:foregroundServiceType="phoneCall" />
 
+        <service
+            android:name=".GsmConnectionService"
+            android:permission="android.permission.BIND_CONNECTION_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+
         <!-- Auto-start receiver on device boot -->
         <receiver
-                android:name=".BootReceiver"
-                android:enabled="true"
-                android:exported="true">
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>

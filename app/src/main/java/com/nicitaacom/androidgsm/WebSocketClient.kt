@@ -2,40 +2,25 @@ package com.nicitaacom.androidgsm
 
 import android.util.Log
 import okhttp3.*
-import org.json.JSONObject
-import java.util.concurrent.TimeUnit
-
+import okio.ByteString
 // WebSocket client - connects to backend and handles commands
 class WebSocketClient(private val service: GsmService) {
 
-    private var client: OkHttpClient? = null
+    private val client = OkHttpClient()
     private var webSocket: WebSocket? = null
-    private var reconnectAttempts = 0
-    private var isManualDisconnect = false
-
     companion object {
         private const val TAG = "WebSocketClient"
-        private const val MAX_RECONNECT_ATTEMPTS = 10
     }
 
-    fun connect(url: String) {
-        isManualDisconnect = false
-
-        client = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .pingInterval(30, TimeUnit.SECONDS)
-            .build()
-
+    fun connect(url: String, authKey: String) {
         val request = Request.Builder()
             .url(url)
+            .addHeader("Authorization", authKey)
             .build()
 
-        webSocket = client?.newWebSocket(request, object : WebSocketListener() {
+        webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "WebSocket connected")
-                reconnectAttempts = 0
-                sendStatus("connected")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
@@ -43,26 +28,19 @@ class WebSocketClient(private val service: GsmService) {
                 handleMessage(text)
             }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.e(TAG, "WebSocket error: ${t.message}")
-                if (!isManualDisconnect) {
-                    scheduleReconnect(url)
-                }
+            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {}
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "Closing: $reason")
             }
 
-            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "WebSocket closed: $reason")
-                if (!isManualDisconnect) {
-                    scheduleReconnect(url)
-                }
+            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                Log.e(TAG, "Error: ${t.message}")
             }
         })
     }
 
     fun disconnect() {
-        isManualDisconnect = true
-        webSocket?.close(1000, "Service stopped")
-        client?.dispatcher?.executorService?.shutdown()
+        webSocket?.close(1000, "Shutdown")
     }
 
     // Parse incoming JSON commands from backend
@@ -104,21 +82,5 @@ class WebSocketClient(private val service: GsmService) {
         } catch (e: Exception) {
             Log.e(TAG, "Failed to send status: ${e.message}")
         }
-    }
-
-    // Exponential backoff reconnect
-    private fun scheduleReconnect(url: String) {
-        if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "Max reconnect attempts reached")
-            return
-        }
-
-        val delay = (1 shl reconnectAttempts) * 1000L // 1s, 2s, 4s, 8s, 16s...
-        reconnectAttempts++
-
-        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-            Log.d(TAG, "Reconnecting... attempt $reconnectAttempts")
-            connect(url)
-        }, delay)
     }
 }

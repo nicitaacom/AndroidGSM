@@ -5,50 +5,43 @@ plugins {
 
 android {
     namespace = "com.nicitaacom.androidgsm"
-    compileSdk = 35
-
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.nicitaacom.androidgsm"
         minSdk = 24
-        targetSdk = 35
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
-        buildConfigField("String", "WS_URL", "\"ws://:3000\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
-    buildFeatures {
-        buildConfig = true
-    }
-
     buildTypes {
-        debug {
-            // Development build
-            buildConfigField("String", "WS_URL", "\"ws://192.168.178.20:3000\"")
-        }
         release {
-            // Production build
-            buildConfigField("String", "WS_URL", "\"wss://www.outreach-tool.com\"")
-            isMinifyEnabled = true
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            isMinifyEnabled = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_11
-        targetCompatibility = JavaVersion.VERSION_11
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
     }
     kotlinOptions {
-        jvmTarget = "11"
+        jvmTarget = "1.8"
     }
 }
 
 dependencies {
-    implementation(libs.okhttp)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
+    implementation(libs.okhttp)
+    implementation(libs.gson)
+    implementation(libs.webrtc)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)

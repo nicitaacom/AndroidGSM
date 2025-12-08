@@ -14,9 +14,9 @@ class GsmService : Service() {
 
     private lateinit var wakeLock: PowerManager.WakeLock
     private var wsClient: WebSocketClient? = null
-    // TODO: uncomment after creating GsmDialer and WebRtcManager
-    // private var gsmDialer: GsmDialer? = null
-    // private var webRtcManager: WebRtcManager? = null
+    private var gsmDialer: GsmDialer? = null
+    private var webRtcManager: WebRtcManager? = null
+    private lateinit var config: Config
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -30,11 +30,13 @@ class GsmService : Service() {
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
         wakeLock.acquire()
 
-        wsClient = WebSocketClient(this)
-        // gsmDialer = GsmDialer(this)
-        // webRtcManager = WebRtcManager(this)
+        config = ConfigReader.readConfig(this)
+        gsmDialer = GsmDialer(this)
+        webRtcManager = WebRtcManager(this)
+        webRtcManager?.initializePeerConnection(config.ICE_SERVERS.map { PeerConnection.IceServer.builder(it["urls"]).createIceServer() })
 
-//        wsClient?.connect(BuildConfig.WS_URL)
+        wsClient = WebSocketClient(this)
+        wsClient?.connect(config.WS_URL, config.BACKEND_AUTH_KEY)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -48,8 +50,8 @@ class GsmService : Service() {
             wakeLock.release()
         }
         wsClient?.disconnect()
-        // gsmDialer?.cleanup()
-        // webRtcManager?.cleanup()
+        gsmDialer = null
+        webRtcManager?.cleanup()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -73,17 +75,18 @@ class GsmService : Service() {
     }
 
     fun handleCommand(type: String, data: Map<String, Any>) {
-        // TODO: uncomment after creating GsmDialer
-        // when (type) {
-        //     "CALL_START" -> {
-        //         val number = data["number"] as? String ?: return
-        //         gsmDialer?.startCall(number)
-        //     }
-        //     "CALL_END" -> gsmDialer?.endCall()
-        //     "SEND_DTMF" -> {
-        //         val digit = data["digit"] as? String ?: return
-        //         gsmDialer?.sendDtmf(digit[0])
-        //     }
-        // }
+        when (type) {
+            "CALL_START" -> {
+                val number = data["number"] as? String ?: return
+                gsmDialer?.startCall(number)
+                // Bridge audio: Send GSM audio to WebRTC track
+            }
+            "CALL_END" -> gsmDialer?.endCall()
+            "SEND_DTMF" -> {
+                val digit = data["digit"] as? String ?: return
+                gsmDialer?.sendDtmf(digit[0])
+            }
+            // Add WebRTC signaling handlers
+        }
     }
 }
