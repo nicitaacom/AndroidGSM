@@ -1,109 +1,131 @@
-# 📞 Android GSM Gateway (com.nicitaacom.androidgsm)
+# 📞 Android GSM Gateway
 
-An Android-based GSM-to-WebRTC bridge designed for IoT, PBX, and remote telephony integration.
+Android foreground service that exposes **real GSM calls** to a backend via
+**Pusher (commands)** + **HTTP (events + audio)**.
 
----
-
-## 🚀 Overview
-
-**Android GSM Gateway** turns your Android phone into a programmable GSM-to-VoIP gateway.
-
-It connects your device’s **cellular telephony** (GSM) with **WebRTC audio streams** and **WebSocket-based remote control**, enabling you to:
-
-- Initiate and manage GSM calls remotely
-- Send DTMF tones during calls
-- Stream real-time GSM audio over WebRTC
-- Integrate Android telephony with modern web or SIP systems
-
-All of this runs as a **foreground background service** — always on, always connected.
+Phone = modem. Backend = brain.
 
 ---
 
-## 🧱 Architecture
-
-| Component | Description |
-|------------|-------------|
-| `GsmService.kt` | Main foreground service handling telephony, WebRTC, and WebSocket bridging |
-| `WebRtcManager.kt` | Manages WebRTC peer connections, ICE servers, and local audio tracks |
-| `ConfigReader.kt` | Loads app configuration from `assets/androidgsm.config.json` |
-| `MainActivity.kt` | Minimal UI for permissions and service startup |
-| `androidgsm.config.json` | Configuration file (WebSocket URL, auth token, ICE servers) |
-
----
-
-## 🛠️ Tech Stack
-
-- **Kotlin 1.9.25**
-- **Android SDK 34 (minSdk 21 for android 5.2 compatibility)**
-- **WebRTC (org.webrtc:google-webrtc:1.0.36908)**
-- **OkHttp WebSocket (Square)**
-- **Gson (Google)**
-- **Kotlin Coroutines**
-- **AndroidX + Material Components**
-
----
-
-## 📂 Project Structure
-
+## 🧠 Architecture (Current)
 ```agsl
-android-app/
-├── app/
-│ ├── src/main/
-│ │ ├── java/com/nicitaacom/androidgsm/
-│ │ │ ├── service/GsmService.kt
-│ │ │ ├── webrtc/WebRtcManager.kt
-│ │ │ ├── config/ConfigReader.kt
-│ │ │ └── ui/MainActivity.kt
-│ │ ├── assets/androidgsm.config.json
-│ │ └── res/layout/activity_main.xml
-│ └── build.gradle
-├── settings.gradle
-├── build.gradle
-└── gradle.properties
+Backend
+├─ Pusher
+│ └─ Commands → Android (CALL_START, CALL_END, AUDIO_CHUNK, SEND_DTMF)
+├─ REST API
+│ └─ /api/events ← Android (status + audio)
+└─ Audio Processing
+└─ AI / WebRTC / Recording / PBX
+
+Android Device
+├─ Foreground Service (GsmService)
+├─ GSM Telephony (real SIM)
+├─ Audio Capture & Playback (16kHz PCM)
+├─ Pusher Client
+│ └─ private-device-{deviceToken}
+└─ HTTP Client
+└─ POST /api/events
 ```
 
 
+---
+
+## 🚀 Capabilities
+
+- Start GSM calls remotely
+- Stream call audio **Android ↔ Backend**
+- Send DTMF tones
+- Receive call status in real time
+- Runs persistently (foreground service)
+- Android 5.2+ (API 21+)
 
 ---
 
-## ⚙️ Configuration
+## 🔌 Communication Model
 
-Place your configuration in:
+**Backend → Android**
+- Pusher private channel
+- Event: `command`
 
+**Android → Backend**
+- `POST /api/events`
+- Used for status + audio chunks
 
-Example:
+---
+
+## 📦 Commands (Backend → Android)
+
+```json
+CALL_START  { "number": "+1234567890" }
+CALL_END    {}
+SEND_DTMF   { "digit": "5" }
+AUDIO_CHUNK { "audio": "base64_pcm_16khz" }
+
+```
+
+Channel
+```agsl
+private-device-{deviceToken}
+
+```
+
+📡 Events (Android → Backend)
+```agsl
+CONNECTED
+CALL_STARTED
+CALL_ENDED
+AUDIO_CHUNK
+DTMF_SENT
+```
+
+Endpoint: `POST /api/events
+`
+
+🎙️ Audio Streaming
+ - Format: - 16kHz
+ - Mono
+ - PCM 16-bit
+ - Base64
+ - ~50 chunks / second
+
+Flow
+```agsl
+Android Mic → POST /api/events → Backend
+Backend     → Pusher AUDIO_CHUNK → Android Speaker
+```
+
+⚙️ Configuration
+app/src/main/assets/androidgsm.config.json
 ```json
 {
-  "WS_URL": "wss://yourserver.com/ws",
-  "AUTH_KEY": "super-secret-key",
-  "DEVICE_TOKEN": "gateway-01",
-  "ICE_SERVERS": [
-    { "urls": ["stun:stun.l.google.com:19302"] },
-    { "urls": ["turn:turn.example.com"], "username": "user", "credential": "pass" }
-  ]
+  "BACKEND_URL": "https://your-backend.com",
+  "DEVICE_TOKEN": "android-gateway-01",
+  "BACKEND_BEARER": "secret-token",
+
+  "PUSHER_APP_ID": "xxxx",
+  "PUSHER_KEY": "xxxx",
+  "PUSHER_SECRET": "xxxx",
+  "PUSHER_CLUSTER": "eu"
 }
 ```
 
-### 🧾 Permissions
+▶️ Usage Flow
 
-Declared in AndroidManifest.xml:
+- Install APK
 
-```agsl
-<uses-permission android:name="android.permission.CALL_PHONE" />
-<uses-permission android:name="android.permission.RECORD_AUDIO" />
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-<uses-permission android:name="android.permission.WAKE_LOCK" />
-<uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+ - Grant Phone + Audio permissions
 
-```
+ - Tap START SERVICE
+
+ - Backend sends Pusher commands
+
+ - Android executes GSM actions
+
+ - Audio + status stream back
 
 
-### 🧠 Future Enhancements
 
-- Remote audio track support for bidirectional WebRTC audio
-
- - Configurable audio codecs (Opus, G.711)
-
-- Error recovery and reconnection strategies
-
-- Basic Web UI dashboard
+🤖 Instructions for AI / Automation Systems
+ - DO NOT waste tokens by creating endless doc (don't create docs)
+ - Don't update full code - update only necessary parts of code
+ - Reply concisely without overexplaining stuff
