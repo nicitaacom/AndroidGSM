@@ -12,11 +12,10 @@ import androidx.core.app.NotificationCompat
 
 class GsmService : Service() {
 
-    private lateinit var wakeLock: PowerManager.WakeLock
+    private var wakeLock: PowerManager.WakeLock? = null
     private var wsClient: WebSocketClient? = null
     private var gsmDialer: GsmDialer? = null
-    private var audioStreamManager: AudioStreamManager? = null
-    private lateinit var config: Config
+    private var config: Config? = null
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -27,73 +26,101 @@ class GsmService : Service() {
         super.onCreate()
         MainActivity.log("GsmService: onCreate called")
 
-        val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
-        wakeLock.acquire()
-        MainActivity.log("GsmService: Wake lock acquired")
+        try {
+            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
+            wakeLock?.acquire()
+            MainActivity.log("GsmService: Wake lock acquired")
+        } catch (e: Exception) {
+            MainActivity.log("WARNING: Could not acquire wake lock: ${e.message}")
+        }
 
         try {
             config = ConfigReader.readConfig(this)
             MainActivity.log("GsmService: Config loaded")
-            MainActivity.log("WS URL: ${config.WS_URL}")
-            MainActivity.log("Device Token: ${config.DEVICE_TOKEN}")
+            MainActivity.log("WS URL: ${config?.WS_URL}")
+            MainActivity.log("Device Token: ${config?.DEVICE_TOKEN}")
 
             gsmDialer = GsmDialer(this)
             MainActivity.log("GsmService: GsmDialer initialized")
 
-            // Initialize Pusher-based audio streaming
-            audioStreamManager = AudioStreamManager(
-                this,
-                config.PUSHER_APP_ID,
-                config.PUSHER_KEY,
-                config.PUSHER_SECRET,
-                config.PUSHER_CLUSTER
-            )
-            audioStreamManager?.initialize(config.DEVICE_TOKEN)
-            MainActivity.log("GsmService: AudioStreamManager initialized")
-
-            // Initialize WebSocket for commands
-            wsClient = WebSocketClient(this)
-            wsClient?.connect(config.WS_URL, config.BACKEND_AUTH_KEY)
-            MainActivity.log("GsmService: WebSocket connecting...")
+            try {
+                // Initialize WebSocket for commands
+                wsClient = WebSocketClient(this)
+                config?.let {
+                    wsClient?.connect(it.WS_URL, it.BACKEND_AUTH_KEY)
+                    MainActivity.log("GsmService: WebSocket connecting...")
+                }
+            } catch (e: Exception) {
+                MainActivity.log("WARNING: WebSocket failed: ${e.message}")
+            }
         } catch (e: Exception) {
             MainActivity.log("ERROR in GsmService.onCreate: ${e.message}")
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, createNotification())
+        try {
+            MainActivity.log("GsmService: onStartCommand called")
+            // Android 8.0+ requires foreground service notification
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForeground(NOTIFICATION_ID, createNotification())
+                MainActivity.log("GsmService: Foreground notification created")
+            } else {
+                // Android 5.x doesn't require foreground notification
+                MainActivity.log("GsmService: Running as background service (Android < 8)")
+            }
+        } catch (e: Exception) {
+            MainActivity.log("ERROR in onStartCommand: ${e.message}")
+        }
         return START_STICKY
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::wakeLock.isInitialized && wakeLock.isHeld) {
-            wakeLock.release()
+        try {
+            wakeLock?.let {
+                if (it.isHeld) {
+                    it.release()
+                    MainActivity.log("Wake lock released")
+                }
+            }
+        } catch (e: Exception) {
+            MainActivity.log("Error releasing wake lock: ${e.message}")
         }
         wsClient?.disconnect()
         gsmDialer = null
-        audioStreamManager?.cleanup()
+        MainActivity.log("GsmService: Destroyed")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotification(): Notification {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "GSM Gateway Service",
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
-        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "GSM Gateway Service",
+                    NotificationManager.IMPORTANCE_LOW
+                )
+                channel.description = "GSM Gateway background service"
+                val manager = getSystemService(NotificationManager::class.java)
+                manager?.createNotificationChannel(channel)
+                MainActivity.log("Notification channel created")
+            }
 
-        return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("GSM Gateway Active")
-            .setContentText("Waiting for calls...")
-            .setSmallIcon(android.R.drawable.ic_menu_call)
-            .build()
+            val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setContentTitle("GSM Gateway Active")
+                .setContentText("Waiting for calls...")
+                .setSmallIcon(android.R.drawable.ic_menu_call)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setOngoing(true)
+
+            return builder.build()
+        } catch (e: Exception) {
+            MainActivity.log("ERROR creating notification: ${e.message}")
+            throw e
+        }
     }
 
     fun handleCommand(type: String, data: Map<String, Any>) {
@@ -103,13 +130,11 @@ class GsmService : Service() {
                 val number = data["number"] as? String ?: return
                 MainActivity.log("Starting call to: $number")
                 gsmDialer?.startCall(number)
-                audioStreamManager?.startAudioCapture()
                 wsClient?.sendStatus("CALL_STARTED", mapOf("number" to number))
             }
             "CALL_END" -> {
                 MainActivity.log("Ending call")
                 gsmDialer?.endCall()
-                audioStreamManager?.stopAudioCapture()
                 wsClient?.sendStatus("CALL_ENDED")
             }
             "SEND_DTMF" -> {

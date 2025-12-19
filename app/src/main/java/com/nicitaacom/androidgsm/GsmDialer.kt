@@ -1,48 +1,52 @@
 package com.nicitaacom.androidgsm
 
+import android.Manifest
 import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
-import android.os.Bundle
-import android.telecom.*
+import android.os.Build
+import android.telecom.TelecomManager
 import android.util.Log
+import androidx.core.app.ActivityCompat
 
 class GsmDialer(private val context: Context) {
-    private val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
 
     fun startCall(number: String) {
-        val uri = Uri.fromParts("tel", number, null)
-        val extras = Bundle()
-        telecomManager.placeCall(uri, extras)
-        Log.d("GsmDialer", "Started GSM call to $number")
+        try {
+            MainActivity.log("GsmDialer: Initiating call to $number")
+
+            // Check permission
+            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE)
+                != PackageManager.PERMISSION_GRANTED) {
+                MainActivity.log("ERROR: CALL_PHONE permission not granted")
+                return
+            }
+
+            val intent = Intent(Intent.ACTION_CALL)
+            intent.data = Uri.parse("tel:$number")
+            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            context.startActivity(intent)
+
+            MainActivity.log("GsmDialer: Call started to $number")
+        } catch (e: Exception) {
+            MainActivity.log("ERROR starting call: ${e.message}")
+            Log.e("GsmDialer", "Failed to start call", e)
+        }
     }
 
-    fun endCall() {
-        Log.d("GsmDialer", "Ending GSM call")
-        // Implement call ending logic (may require active Call object)
+        fun endCall() {
+        MainActivity.log("GsmDialer: End call requested")
+        MainActivity.log("WARNING: Ending calls programmatically requires system permissions")
+        MainActivity.log("User must end call manually from dialer")
+        // Note: Ending calls programmatically is restricted on Android
+        // This would require ANSWER_PHONE_CALLS permission (API 26+) or being a system app
+        Log.d("GsmDialer", "End call - user action required")
     }
 
     fun sendDtmf(digit: Char) {
-        Log.d("GsmDialer", "Sending DTMF: $digit")
-        // Implement via active call
-    }
-}
-
-class GsmConnectionService : ConnectionService() {
-    override fun onCreateOutgoingConnection(
-        connectionManagerPhoneAccount: PhoneAccountHandle?,
-        request: ConnectionRequest
-    ): Connection {
-        return object : Connection() {
-            override fun onAnswer() {
-                setActive()
-            }
-
-            override fun onDisconnect() {
-                setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
-                destroy()
-            }
-        }.apply {
-            setInitialized()
-        }
+        MainActivity.log("WARNING: DTMF tones require active call connection")
+        MainActivity.log("DTMF support limited on this Android version")
+        Log.d("GsmDialer", "DTMF requested: $digit (not implemented)")
     }
 }

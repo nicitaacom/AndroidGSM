@@ -17,10 +17,10 @@ import java.util.*
 class MainActivity : AppCompatActivity() {
     private lateinit var logTextView: TextView
     private lateinit var scrollView: ScrollView
-    private lateinit var startButton: Button
-    private lateinit var stopButton: Button
+    private lateinit var toggleButton: Button
     private lateinit var statusTextView: TextView
-    
+    private var isServiceRunning = false
+
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     
@@ -41,18 +41,19 @@ class MainActivity : AppCompatActivity() {
         
         logTextView = findViewById(R.id.logTextView)
         scrollView = findViewById(R.id.scrollView)
-        startButton = findViewById(R.id.startButton)
-        stopButton = findViewById(R.id.stopButton)
+        toggleButton = findViewById(R.id.toggleButton)
         statusTextView = findViewById(R.id.statusTextView)
         
-        startButton.setOnClickListener {
-            requestPermissionsAndStart()
+        toggleButton.setOnClickListener {
+            if (isServiceRunning) {
+                stopService()
+            } else {
+                requestPermissionsAndStart()
+            }
         }
         
-        stopButton.setOnClickListener {
-            stopService()
-        }
-        
+        updateButtonState()
+
         addLog("App started")
         addLog("Android version: ${Build.VERSION.RELEASE}")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
@@ -61,10 +62,22 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun checkServiceStatus() {
-        // Check if service is running
         statusTextView.text = "Status: Ready"
+        updateButtonState()
     }
     
+    private fun updateButtonState() {
+        if (isServiceRunning) {
+            toggleButton.text = "STOP SERVICE"
+            toggleButton.setBackgroundColor(resources.getColor(android.R.color.holo_red_dark))
+            statusTextView.text = "Status: Active"
+        } else {
+            toggleButton.text = "START SERVICE"
+            toggleButton.setBackgroundColor(resources.getColor(android.R.color.holo_green_dark))
+            statusTextView.text = "Status: Inactive"
+        }
+    }
+
     private fun requestPermissionsAndStart() {
         val permissions = mutableListOf(
             Manifest.permission.CALL_PHONE,
@@ -80,6 +93,10 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.FOREGROUND_SERVICE)
         }
         
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        }
+
         val missingPermissions = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -107,11 +124,9 @@ class MainActivity : AppCompatActivity() {
                 startService(intent)
             }
             
-            statusTextView.text = "Status: Service Running"
+            isServiceRunning = true
+            updateButtonState()
             addLog("Service started successfully!")
-            
-            startButton.isEnabled = false
-            stopButton.isEnabled = true
         } catch (e: Exception) {
             addLog("ERROR starting service: ${e.message}")
         }
@@ -123,11 +138,9 @@ class MainActivity : AppCompatActivity() {
             val intent = Intent(this, GsmService::class.java)
             stopService(intent)
             
-            statusTextView.text = "Status: Service Stopped"
+            isServiceRunning = false
+            updateButtonState()
             addLog("Service stopped successfully!")
-            
-            startButton.isEnabled = true
-            stopButton.isEnabled = false
         } catch (e: Exception) {
             addLog("ERROR stopping service: ${e.message}")
         }

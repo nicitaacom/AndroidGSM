@@ -14,23 +14,21 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Permissions for foreground service and wake lock -->
+    <!-- Permissions for service and wake lock -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
-    <uses-permission android:name="android.permission.PROCESS_OUTGOING_CALLS" />
 
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
     <application
             android:allowBackup="true"
-            android:label="GSM Gateway"
+            android:fullBackupContent="@xml/backup_rules"
+            android:dataExtractionRules="@xml/data_extraction_rules"
+            android:label="@string/app_name"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:supportsRtl="true"
-            android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+            android:theme="@style/Theme.AndroidGSM">
 
         <!-- Main Activity -->
         <activity
@@ -43,23 +41,14 @@
             </intent-filter>
         </activity>
 
-        <!-- Foreground Service for GSM gateway -->
+        <!-- Background Service for GSM gateway -->
         <service
                 android:name=".GsmService"
                 android:enabled="true"
-                android:exported="false"
-                android:foregroundServiceType="phoneCall" />
+                android:exported="false" />
 
-        <service
-            android:name=".GsmConnectionService"
-            android:permission="android.permission.BIND_CONNECTION_SERVICE"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.telecom.ConnectionService" />
-            </intent-filter>
-        </service>
-
-        <!-- Auto-start receiver on device boot -->
+        <!-- Auto-start receiver on device boot (optional) -->
+        <!--
         <receiver
             android:name=".BootReceiver"
             android:enabled="true"
@@ -68,6 +57,7 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
+        -->
 
     </application>
 
