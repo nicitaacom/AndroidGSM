@@ -32,8 +32,8 @@ class GsmService : Service() {
 
         config = ConfigReader.readConfig(this)
         gsmDialer = GsmDialer(this)
-        webRtcManager = WebRtcManager(this)
-        webRtcManager?.initializePeerConnection(config.ICE_SERVERS.map { PeerConnection.IceServer.builder(it["urls"]).createIceServer() })
+        // webRtcManager = WebRtcManager(this)
+        // webRtcManager?.initializePeerConnection(config.ICE_SERVERS.map { PeerConnection.IceServer.builder(it["urls"]).createIceServer() }) // Commented out due to WebRTC dependency issue
 
         wsClient = WebSocketClient(this)
         wsClient?.connect(config.WS_URL, config.BACKEND_AUTH_KEY)
@@ -51,7 +51,7 @@ class GsmService : Service() {
         }
         wsClient?.disconnect()
         gsmDialer = null
-        webRtcManager?.cleanup()
+        // webRtcManager?.cleanup()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null

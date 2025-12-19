@@ -2,12 +2,14 @@ package com.nicitaacom.androidgsm
 
 import android.util.Log
 import okhttp3.*
-import okio.ByteString
+import org.json.JSONObject
+
 // WebSocket client - connects to backend and handles commands
 class WebSocketClient(private val service: GsmService) {
 
     private val client = OkHttpClient()
     private var webSocket: WebSocket? = null
+
     companion object {
         private const val TAG = "WebSocketClient"
     }
@@ -28,9 +30,8 @@ class WebSocketClient(private val service: GsmService) {
                 handleMessage(text)
             }
 
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {}
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                Log.d(TAG, "Closing: $reason")
+            override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+                Log.d(TAG, "Closed: $reason")
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {

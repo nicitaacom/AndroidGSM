@@ -1,9 +1,11 @@
 package com.nicitaacom.androidgsm
 
 import android.content.Context
-import org.webrtc.*
+// import org.webrtc.* // WebRTC disabled temporarily
 
 class WebRtcManager(private val context: Context) {
+    // WebRTC functionality disabled - network issue with dependency
+    /*
     private var peerConnectionFactory: PeerConnectionFactory? = null
     private var peerConnection: PeerConnection? = null
     private var localAudioTrack: AudioTrack? = null
@@ -37,8 +39,9 @@ class WebRtcManager(private val context: Context) {
         localAudioTrack = peerConnectionFactory?.createAudioTrack("local_audio", audioSource)
         peerConnection?.addTrack(localAudioTrack)
     }
+    */
 
     fun cleanup() {
-        peerConnection?.close()
+        // peerConnection?.close()
     }
 }

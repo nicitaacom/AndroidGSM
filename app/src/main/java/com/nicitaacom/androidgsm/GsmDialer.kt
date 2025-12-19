@@ -3,10 +3,7 @@ package com.nicitaacom.androidgsm
 import android.content.Context
 import android.net.Uri
 import android.os.Bundle
-import android.telecom.Connection
-import android.telecom.ConnectionService
-import android.telecom.PhoneAccountHandle
-import android.telecom.TelecomManager
+import android.telecom.*
 import android.util.Log
 
 class GsmDialer(private val context: Context) {
@@ -33,10 +30,19 @@ class GsmDialer(private val context: Context) {
 class GsmConnectionService : ConnectionService() {
     override fun onCreateOutgoingConnection(
         connectionManagerPhoneAccount: PhoneAccountHandle?,
-        request: Connection.Request?
+        request: ConnectionRequest
     ): Connection {
-        val connection = Connection.createSuccessfulConnection(request)
-        // Setup audio for bridging
-        return connection
+        return object : Connection() {
+            override fun onAnswer() {
+                setActive()
+            }
+
+            override fun onDisconnect() {
+                setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
+                destroy()
+            }
+        }.apply {
+            setInitialized()
+        }
     }
 }
