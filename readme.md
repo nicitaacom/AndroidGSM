@@ -34,7 +34,7 @@ All of this runs as a **foreground background service** — always on, always co
 ## 🛠️ Tech Stack
 
 - **Kotlin 1.9.25**
-- **Android SDK 34 (minSdk 24)**
+- **Android SDK 34 (minSdk 21 for android 5.2 compatibility)**
 - **WebRTC (org.webrtc:google-webrtc:1.0.36908)**
 - **OkHttp WebSocket (Square)**
 - **Gson (Google)**
