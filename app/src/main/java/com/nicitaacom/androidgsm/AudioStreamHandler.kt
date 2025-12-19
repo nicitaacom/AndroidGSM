@@ -93,7 +93,7 @@ class AudioStreamHandler(
                     val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
 
                     // Send to backend
-                    pusherClient.sendAudioChunk(base64Audio)
+                    pusherClient.sendEvent("AUDIO_CHUNK", mapOf("audio" to base64Audio))
 
                     chunkCount++
                     if (chunkCount % 50 == 0) {

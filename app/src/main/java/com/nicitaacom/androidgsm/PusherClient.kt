@@ -31,8 +31,8 @@ class PusherClient(
         val options = PusherOptions().apply {
             setCluster(config.PUSHER_CLUSTER)
             // 1. custom authorizer for private channels
-            setAuthorizer { channelName, socketId ->
-                authPrivateChannel(channelName, socketId)
+            authorizer = com.pusher.client.util.HttpAuthorizer("${config.BACKEND_URL}/pusher/auth").apply {
+                setHeaders(mapOf("Authorization" to "Bearer ${config.BACKEND_BEARER}"))
             }
         }
 
