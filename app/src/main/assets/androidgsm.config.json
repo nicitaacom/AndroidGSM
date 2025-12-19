@@ -1,6 +1,9 @@
 {
-  "WS_URL": "",
-  "DEVICE_TOKEN": "",
-  "BACKEND_AUTH_KEY": "",
-  "ICE_SERVERS": []
+  "WS_URL": "wss://www.outreach-tool.com/api/ws",
+  "DEVICE_TOKEN": "android-gateway-01",
+  "BACKEND_AUTH_KEY": "43a11a3d28d58fc14bae",
+  "PUSHER_APP_ID": "2093123",
+  "PUSHER_KEY": "1ce1dcec8fd97743a14f",
+  "PUSHER_SECRET": "43a11a3d28d58fc14bae",
+  "PUSHER_CLUSTER": "eu"
 }

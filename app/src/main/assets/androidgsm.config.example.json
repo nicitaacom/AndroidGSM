@@ -1,0 +1,9 @@
+{
+  "WS_URL": "wss://example.com/api/ws",
+  "DEVICE_TOKEN": "your_device_token_here",
+  "BACKEND_AUTH_KEY": "your_backend_auth_key_here",
+  "PUSHER_APP_ID": "your_pusher_app_id",
+  "PUSHER_KEY": "your_pusher_key_here",
+  "PUSHER_SECRET": "your_pusher_secret_here",
+  "PUSHER_CLUSTER": "your_pusher_cluster"
+}

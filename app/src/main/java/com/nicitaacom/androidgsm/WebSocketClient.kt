@@ -23,19 +23,23 @@ class WebSocketClient(private val service: GsmService) {
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 Log.d(TAG, "WebSocket connected")
+                MainActivity.log("✅ WebSocket connected to backend")
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 Log.d(TAG, "Received: $text")
+                MainActivity.log("📨 Message received: $text")
                 handleMessage(text)
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 Log.d(TAG, "Closed: $reason")
+                MainActivity.log("❌ WebSocket closed: $reason")
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 Log.e(TAG, "Error: ${t.message}")
+                MainActivity.log("⚠️ WebSocket error: ${t.message}")
             }
         })
     }

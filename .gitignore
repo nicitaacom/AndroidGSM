@@ -14,5 +14,10 @@
 .cxx
 local.properties
 
+# Environment variables
 .env.local
+.env
 *.local
+
+# Config files with sensitive data
+app/src/main/assets/androidgsm.config.json

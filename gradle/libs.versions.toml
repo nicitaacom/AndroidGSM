@@ -8,8 +8,8 @@ espressoCore = "3.6.1"
 appcompat = "1.7.0"
 material = "1.12.0"
 okhttp = "4.12.0"
-gson = "2.11.0"
-webrtc = "1.0.+"
+pusher = "2.4.4"
+coroutines = "1.7.3"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -19,8 +19,9 @@ androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-co
 androidx-appcompat = { group = "androidx.appcompat", name = "appcompat", version.ref = "appcompat" }
 material = { group = "com.google.android.material", name = "material", version.ref = "material" }
 okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
-gson = { group = "com.google.code.gson", name = "gson", version.ref = "gson" }
-webrtc = { group = "org.webrtc", name = "google-webrtc", version.ref = "webrtc" }
+pusher = { group = "com.pusher", name = "pusher-java-client", version.ref = "pusher" }
+coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
+coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "coroutines" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
