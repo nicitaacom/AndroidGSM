@@ -1,9 +1,0 @@
-// app/src/main/assets
-{
-  "WS_URL": "wss://example.com/ws",
-  "DEVICE_TOKEN": "fake_token_123",
-  "BACKEND_AUTH_KEY": "fake_auth_key_abc",
-  "ICE_SERVERS": [
-    {"urls": "stun:stun.l.google.com:19302"}
-  ]
-}

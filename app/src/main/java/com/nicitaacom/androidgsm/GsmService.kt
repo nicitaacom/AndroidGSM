@@ -13,8 +13,9 @@ import androidx.core.app.NotificationCompat
 class GsmService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
-    private var wsClient: WebSocketClient? = null
+    private var pusherClient: PusherClient? = null
     private var gsmDialer: GsmDialer? = null
+    private var audioStreamHandler: AudioStreamHandler? = null
     private var config: Config? = null
 
     companion object {
@@ -38,21 +39,23 @@ class GsmService : Service() {
         try {
             config = ConfigReader.readConfig(this)
             MainActivity.log("GsmService: Config loaded")
-            MainActivity.log("WS URL: ${config?.WS_URL}")
+            MainActivity.log("Backend URL: ${config?.BACKEND_URL}")
             MainActivity.log("Device Token: ${config?.DEVICE_TOKEN}")
 
             gsmDialer = GsmDialer(this)
             MainActivity.log("GsmService: GsmDialer initialized")
 
             try {
-                // Initialize WebSocket for commands
-                wsClient = WebSocketClient(this)
-                config?.let {
-                    wsClient?.connect(it.WS_URL, it.BACKEND_AUTH_KEY)
-                    MainActivity.log("GsmService: WebSocket connecting...")
-                }
+                // Initialize Pusher client for bi-directional communication
+                pusherClient = PusherClient(this, config!!)
+                pusherClient?.connect()
+                MainActivity.log("GsmService: Pusher connecting...")
+
+                // Initialize audio handler for call audio
+                audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
+                MainActivity.log("GsmService: AudioStreamHandler initialized")
             } catch (e: Exception) {
-                MainActivity.log("WARNING: WebSocket failed: ${e.message}")
+                MainActivity.log("WARNING: Pusher/Audio failed: ${e.message}")
             }
         } catch (e: Exception) {
             MainActivity.log("ERROR in GsmService.onCreate: ${e.message}")
@@ -88,7 +91,8 @@ class GsmService : Service() {
         } catch (e: Exception) {
             MainActivity.log("Error releasing wake lock: ${e.message}")
         }
-        wsClient?.disconnect()
+        pusherClient?.disconnect()
+        audioStreamHandler?.cleanup()
         gsmDialer = null
         MainActivity.log("GsmService: Destroyed")
     }
@@ -130,18 +134,28 @@ class GsmService : Service() {
                 val number = data["number"] as? String ?: return
                 MainActivity.log("Starting call to: $number")
                 gsmDialer?.startCall(number)
-                wsClient?.sendStatus("CALL_STARTED", mapOf("number" to number))
+                // Start audio capture for call
+                audioStreamHandler?.startAudioCapture()
+                pusherClient?.sendEvent("CALL_STARTED", mapOf("number" to number))
             }
             "CALL_END" -> {
                 MainActivity.log("Ending call")
                 gsmDialer?.endCall()
-                wsClient?.sendStatus("CALL_ENDED")
+                // Stop audio
+                audioStreamHandler?.stopAudioCapture()
+                audioStreamHandler?.stopAudioPlayback()
+                pusherClient?.sendEvent("CALL_ENDED", emptyMap())
             }
             "SEND_DTMF" -> {
                 val digit = data["digit"] as? String ?: return
                 MainActivity.log("Sending DTMF: $digit")
                 gsmDialer?.sendDtmf(digit[0])
-                wsClient?.sendStatus("DTMF_SENT", mapOf("digit" to digit))
+                pusherClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
+            }
+            "AUDIO_CHUNK" -> {
+                // Receive audio from backend and play it
+                val audioData = data["audio"] as? String ?: return
+                audioStreamHandler?.playAudioChunk(audioData)
             }
         }
     }
