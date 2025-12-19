@@ -1,3 +1,4 @@
+// app/src/main/assets
 {
   "WS_URL": "wss://example.com/ws",
   "DEVICE_TOKEN": "fake_token_123",

@@ -1,5 +1,5 @@
 {
-  "WS_URL": "wss://www.outreach-tool.com/api/ws",
+  "WS_URL": "wss://gsm.outreach-tool.com/api/ws",
   "DEVICE_TOKEN": "android-gateway-01",
   "BACKEND_AUTH_KEY": "43a11a3d28d58fc14bae",
   "PUSHER_APP_ID": "2093123",
