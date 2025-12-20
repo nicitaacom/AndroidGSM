@@ -167,7 +167,8 @@ class GsmService : Service() {
                 MainActivity.log("Starting call to: $number")
                 gsmDialer?.startCall(number)
                 audioStreamHandler?.startAudioCapture()
-                pusherClient?.sendEvent("CALL_STARTED", mapOf("number" to number))
+                // don't need this line because it cause infinity loops (keep it commented to prevent doing this again)
+                // pusherClient?.sendEvent("CALL_STARTED", mapOf("number" to number))
             }
 
             // only 1 type to avoid confusion
