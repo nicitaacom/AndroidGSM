@@ -91,36 +91,31 @@ class PusherClient(
         try {
             val channelName = "private-device-${config.DEVICE_TOKEN}"
             MainActivity.log("Pusher: subscribing to $channelName")
-            val channel = pusher?.subscribePrivate(channelName, object : PrivateChannelEventListener {
-                override fun onAuthenticationFailure(message: String, error: Exception?) {
-                    MainActivity.log("Private channel auth failed: $message")
-                    error?.printStackTrace()
-                }
 
-                override fun onSubscriptionSucceeded(channelName: String) {
-                    MainActivity.log("Pusher subscribed to $channelName")
-                }
-
-                override fun onEvent(event: com.pusher.client.channel.PusherEvent) {
-                    try {
-                        MainActivity.log("Pusher event: ${event.eventName} -> ${event.data}")
-                        if (event.eventName == "command") handleCommand(event.data)
-                    } catch (error: Exception) {
-                        MainActivity.log("ERROR in onEvent: ${error.message}")
-                        error.printStackTrace()
+            val channel = pusher?.subscribePrivate(
+                channelName,
+                object : PrivateChannelEventListener {
+                    override fun onAuthenticationFailure(message: String, error: Exception?) {
+                        MainActivity.log("Private channel auth failed: $message")
+                        error?.printStackTrace()
                     }
-                }
-            })
 
-            channel?.bind("command") { event ->
-                try {
-                    MainActivity.log("Bound command event -> ${event}")
-                    handleCommand(event.data)
-                } catch (error: Exception) {
-                    MainActivity.log("ERROR in bound command: ${error.message}")
-                    error.printStackTrace()
-                }
-            }
+                    override fun onSubscriptionSucceeded(channelName: String) {
+                        MainActivity.log("Pusher subscribed to $channelName")
+                    }
+
+                    override fun onEvent(event: com.pusher.client.channel.PusherEvent) {
+                        try {
+                            MainActivity.log("Pusher event: ${event.eventName} -> ${event.data}")
+                            if (event.eventName == "command") handleCommand(event.data)
+                        } catch (error: Exception) {
+                            MainActivity.log("ERROR in onEvent: ${error.message}")
+                            error.printStackTrace()
+                        }
+                    }
+                },
+                "command" // Bind to command event during subscription
+            )
         } catch (error: Exception) {
             MainActivity.log("ERROR in subscribeToChannels: ${error.message}")
             error.printStackTrace()
