@@ -111,20 +111,18 @@ class PusherClient(
             dataObj.keys().forEach { key -> dataMap[key] = dataObj.get(key) }
 
             when (type) {
-                "MAKE_CALL", "CALL_START" -> {
+                "CALL_STARTED" -> {
                     val number = dataMap["number"]?.toString() ?: dataObj.optString("number")
                     if (!number.isNullOrEmpty()) {
-                        MainActivity.log("COMMAND -> MAKE_CALL $number")
-                        service.handleCommand("MAKE_CALL", mapOf("number" to number))
-                    } else MainActivity.log("MAKE_CALL missing number")
+                        MainActivity.log("COMMAND -> CALL_STARTED $number")
+                        service.handleCommand("CALL_STARTED", mapOf("number" to number))
+                    } else MainActivity.log("CALL_STARTED missing number")
                 }
-                "SEND_DTMF" -> {
-                    service.handleCommand("SEND_DTMF", dataMap)
-                }
+                "SEND_DTMF" -> service.handleCommand("SEND_DTMF", dataMap)
                 else -> MainActivity.log("Unknown command type: $type")
             }
-        } catch (e: Exception) {
-            MainActivity.log("Command parse error: ${e.message}")
+        } catch (error: Exception) {
+            MainActivity.log("Command parse error: ${error.message}")
         }
     }
 
