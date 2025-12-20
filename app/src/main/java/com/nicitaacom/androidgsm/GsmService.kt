@@ -27,7 +27,20 @@ class GsmService : Service() {
         super.onCreate()
         MainActivity.log("GsmService: onCreate called")
 
-        // acquire wake lock if possible
+        // 1. Create notification channel FIRST
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                CHANNEL_ID,
+                "GSM Gateway Service",
+                NotificationManager.IMPORTANCE_LOW
+            )
+            channel.description = "GSM Gateway background service"
+            val manager = getSystemService(NotificationManager::class.java)
+            manager?.createNotificationChannel(channel)
+            MainActivity.log("Notification channel created")
+        }
+
+        // 2. acquire wake lock if possible
         try {
             val powerManager = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
@@ -37,7 +50,7 @@ class GsmService : Service() {
             MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
         }
 
-        // load config
+        // 3. load config
         try {
             config = ConfigReader.readConfig(this)
             if (config == null) {
@@ -56,43 +69,46 @@ class GsmService : Service() {
             MainActivity.log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
             return
         }
-
-        // init pusher + audio if pusher config present
-        try {
-            val hasPusherCreds = !config?.PUSHER_KEY.isNullOrBlank() &&
-                    !config?.PUSHER_CLUSTER.isNullOrBlank() &&
-                    !config?.BACKEND_BEARER.isNullOrBlank() &&
-                    !config?.BACKEND_URL.isNullOrBlank()
-
-            if (!hasPusherCreds) {
-                MainActivity.log("WARNING: Missing Pusher/Backend config - realtime features disabled")
-                return
-            }
-
-            // create pusher client and connect
-            pusherClient = PusherClient(this, config!!)
-            pusherClient?.connect()
-            MainActivity.log("GsmService: Pusher connecting...")
-
-            // audio handler depends on pusher for events
-            audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
-            MainActivity.log("GsmService: AudioStreamHandler initialized")
-        } catch (error: Exception) {
-            MainActivity.log("WARNING: Pusher/Audio failed: ${error.message}")
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             MainActivity.log("GsmService: onStartCommand called")
+
+            // 1. Start foreground IMMEDIATELY - before any async work
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundSafely()
+                startForeground(NOTIFICATION_ID, createNotification())
                 MainActivity.log("GsmService: Foreground notification created")
-            } else {
-                MainActivity.log("GsmService: Running as background service (Android < 8)")
             }
+
+            // 2. Init pusher + audio in background thread with error handling
+            Thread {
+                try {
+                    val hasPusherCreds = !config?.PUSHER_KEY.isNullOrBlank() &&
+                            !config?.PUSHER_CLUSTER.isNullOrBlank() &&
+                            !config?.BACKEND_BEARER.isNullOrBlank() &&
+                            !config?.BACKEND_URL.isNullOrBlank()
+
+                    if (!hasPusherCreds) {
+                        MainActivity.log("WARNING: Missing Pusher/Backend config - realtime features disabled")
+                        return@Thread
+                    }
+
+                    pusherClient = PusherClient(this, config!!)
+                    pusherClient?.connect()
+                    MainActivity.log("GsmService: Pusher connecting...")
+
+                    audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
+                    MainActivity.log("GsmService: AudioStreamHandler initialized")
+                } catch (error: Exception) {
+                    MainActivity.log("WARNING: Pusher/Audio failed: ${error.message}")
+                    error.printStackTrace()
+                }
+            }.start()
+
         } catch (error: Exception) {
             MainActivity.log("ERROR in onStartCommand: ${error.message}")
+            error.printStackTrace()
         }
         return START_STICKY
     }
@@ -126,31 +142,14 @@ class GsmService : Service() {
     }
 
     private fun createNotification(): Notification {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    "GSM Gateway Service",
-                    NotificationManager.IMPORTANCE_LOW
-                )
-                channel.description = "GSM Gateway background service"
-                val manager = getSystemService(NotificationManager::class.java)
-                manager?.createNotificationChannel(channel)
-                MainActivity.log("Notification channel created")
-            }
+        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+            .setContentTitle("GSM Gateway Active")
+            .setContentText("Waiting for calls...")
+            .setSmallIcon(R.mipmap.ic_launcher) // Changed from android.R.drawable.ic_menu_call
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setOngoing(true)
 
-            val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("GSM Gateway Active")
-                .setContentText("Waiting for calls...")
-                .setSmallIcon(android.R.drawable.ic_menu_call)
-                .setPriority(NotificationCompat.PRIORITY_LOW)
-                .setOngoing(true)
-
-            return builder.build()
-        } catch (error: Exception) {
-            MainActivity.log("ERROR creating notification: ${error.message}")
-            throw error
-        }
+        return builder.build()
     }
 
     // central command dispatcher - single entrypoint
