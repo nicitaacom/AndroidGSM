@@ -130,7 +130,7 @@ class GsmService : Service() {
     fun handleCommand(type: String, data: Map<String, Any>) {
         MainActivity.log("Command received: $type")
         when (type) {
-            "CALL_START" -> {
+            "CALL_STARTED" -> {
                 val number = data["number"] as? String ?: return
                 MainActivity.log("Starting call to: $number")
                 gsmDialer?.startCall(number)

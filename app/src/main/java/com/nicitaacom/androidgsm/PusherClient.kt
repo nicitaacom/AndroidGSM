@@ -77,40 +77,52 @@ class PusherClient(
 
     private fun subscribeToChannels() {
         val channelName = "private-device-${config.DEVICE_TOKEN}"
+        MainActivity.log("Pusher: subscribing to $channelName")
         val channel = pusher?.subscribePrivate(channelName, object : PrivateChannelEventListener {
             override fun onAuthenticationFailure(message: String, e: Exception?) {
                 MainActivity.log("Private channel auth failed: $message")
             }
 
             override fun onSubscriptionSucceeded(channelName: String) {
-                MainActivity.log("Subscribed to $channelName")
+                MainActivity.log("Pusher subscribed to $channelName")
             }
 
             override fun onEvent(event: com.pusher.client.channel.PusherEvent) {
-                if (event.eventName == "command") {
-                    handleCommand(event.data)
-                }
+                MainActivity.log("Pusher event: ${event.eventName} -> ${event.data}")
+                if (event.eventName == "command") handleCommand(event.data)
             }
         })
 
-        // 3. bind specifically to command event
         channel?.bind("command") { event ->
+            MainActivity.log("Bound command event -> ${event}")
             handleCommand(event.data)
         }
     }
 
+
+
     private fun handleCommand(jsonData: String) {
         try {
+            MainActivity.log("Command received raw: $jsonData")
             val json = JSONObject(jsonData)
-            val type = json.getString("type")
+            val type = json.optString("type")
             val dataObj = if (json.has("data")) json.getJSONObject("data") else JSONObject()
-
             val dataMap = mutableMapOf<String, Any>()
-            dataObj.keys().forEach { key ->
-                dataMap[key] = dataObj.get(key)
-            }
+            dataObj.keys().forEach { key -> dataMap[key] = dataObj.get(key) }
 
-            service.handleCommand(type, dataMap)
+            when (type) {
+                "MAKE_CALL", "CALL_START" -> {
+                    val number = dataMap["number"]?.toString() ?: dataObj.optString("number")
+                    if (!number.isNullOrEmpty()) {
+                        MainActivity.log("COMMAND -> MAKE_CALL $number")
+                        service.handleCommand("MAKE_CALL", mapOf("number" to number))
+                    } else MainActivity.log("MAKE_CALL missing number")
+                }
+                "SEND_DTMF" -> {
+                    service.handleCommand("SEND_DTMF", dataMap)
+                }
+                else -> MainActivity.log("Unknown command type: $type")
+            }
         } catch (e: Exception) {
             MainActivity.log("Command parse error: ${e.message}")
         }
