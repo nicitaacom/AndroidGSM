@@ -135,11 +135,7 @@ class GsmService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    // build and show notification (separate tiny helper)
-    private fun startForegroundSafely() {
-        val notification = createNotification()
-        startForeground(NOTIFICATION_ID, notification)
-    }
+
 
     private fun createNotification(): Notification {
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)

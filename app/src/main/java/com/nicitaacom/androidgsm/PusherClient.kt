@@ -28,29 +28,40 @@ class PusherClient(
         .build()
 
     fun connect() {
-        val options = PusherOptions().apply {
-            setCluster(config.PUSHER_CLUSTER)
-            // 1. custom authorizer for private channels
-            authorizer = com.pusher.client.util.HttpAuthorizer("${config.BACKEND_URL}/pusher/auth").apply {
-                setHeaders(mapOf("Authorization" to "Bearer ${config.BACKEND_BEARER}"))
-            }
-        }
-
-        pusher = Pusher(config.PUSHER_KEY, options)
-
-        pusher?.connect(object : ConnectionEventListener {
-            override fun onConnectionStateChange(change: ConnectionStateChange) {
-                MainActivity.log("Pusher: ${change.previousState} → ${change.currentState}")
-                if (change.currentState == ConnectionState.CONNECTED) {
-                    subscribeToChannels()
-                    sendEvent("CONNECTED") // 2. tell backend we're online
+        try {
+            val options = PusherOptions().apply {
+                setCluster(config.PUSHER_CLUSTER)
+                // 1. custom authorizer for private channels
+                authorizer = com.pusher.client.util.HttpAuthorizer("${config.BACKEND_URL}/pusher/auth").apply {
+                    setHeaders(mapOf("Authorization" to "Bearer ${config.BACKEND_BEARER}"))
                 }
             }
 
-            override fun onError(message: String, code: String?, e: Exception?) {
-                MainActivity.log("Pusher error: $message $code")
-            }
-        }, ConnectionState.ALL)
+            pusher = Pusher(config.PUSHER_KEY, options)
+
+            pusher?.connect(object : ConnectionEventListener {
+                override fun onConnectionStateChange(change: ConnectionStateChange) {
+                    try {
+                        MainActivity.log("Pusher: ${change.previousState} → ${change.currentState}")
+                        if (change.currentState == ConnectionState.CONNECTED) {
+                            subscribeToChannels()
+                            sendEvent("CONNECTED") // 2. tell backend we're online
+                        }
+                    } catch (error: Exception) {
+                        MainActivity.log("ERROR in onConnectionStateChange: ${error.message}")
+                        error.printStackTrace()
+                    }
+                }
+
+                override fun onError(message: String, code: String?, error: Exception?) {
+                    MainActivity.log("Pusher error: $message $code")
+                    error?.printStackTrace()
+                }
+            }, ConnectionState.ALL)
+        } catch (error: Exception) {
+            MainActivity.log("ERROR in Pusher.connect(): ${error.message}")
+            error.printStackTrace()
+        }
     }
 
     private fun authPrivateChannel(channelName: String, socketId: String): String {
@@ -69,37 +80,52 @@ class PusherClient(
 
             val response = httpClient.newCall(request).execute()
             response.body?.string() ?: ""
-        } catch (e: Exception) {
-            MainActivity.log("Pusher auth failed: ${e.message}")
+        } catch (error: Exception) {
+            MainActivity.log("Pusher auth failed: ${error.message}")
+            error.printStackTrace()
             ""
         }
     }
 
     private fun subscribeToChannels() {
-        val channelName = "private-device-${config.DEVICE_TOKEN}"
-        MainActivity.log("Pusher: subscribing to $channelName")
-        val channel = pusher?.subscribePrivate(channelName, object : PrivateChannelEventListener {
-            override fun onAuthenticationFailure(message: String, e: Exception?) {
-                MainActivity.log("Private channel auth failed: $message")
-            }
+        try {
+            val channelName = "private-device-${config.DEVICE_TOKEN}"
+            MainActivity.log("Pusher: subscribing to $channelName")
+            val channel = pusher?.subscribePrivate(channelName, object : PrivateChannelEventListener {
+                override fun onAuthenticationFailure(message: String, error: Exception?) {
+                    MainActivity.log("Private channel auth failed: $message")
+                    error?.printStackTrace()
+                }
 
-            override fun onSubscriptionSucceeded(channelName: String) {
-                MainActivity.log("Pusher subscribed to $channelName")
-            }
+                override fun onSubscriptionSucceeded(channelName: String) {
+                    MainActivity.log("Pusher subscribed to $channelName")
+                }
 
-            override fun onEvent(event: com.pusher.client.channel.PusherEvent) {
-                MainActivity.log("Pusher event: ${event.eventName} -> ${event.data}")
-                if (event.eventName == "command") handleCommand(event.data)
-            }
-        })
+                override fun onEvent(event: com.pusher.client.channel.PusherEvent) {
+                    try {
+                        MainActivity.log("Pusher event: ${event.eventName} -> ${event.data}")
+                        if (event.eventName == "command") handleCommand(event.data)
+                    } catch (error: Exception) {
+                        MainActivity.log("ERROR in onEvent: ${error.message}")
+                        error.printStackTrace()
+                    }
+                }
+            })
 
-        channel?.bind("command") { event ->
-            MainActivity.log("Bound command event -> ${event}")
-            handleCommand(event.data)
+            channel?.bind("command") { event ->
+                try {
+                    MainActivity.log("Bound command event -> ${event}")
+                    handleCommand(event.data)
+                } catch (error: Exception) {
+                    MainActivity.log("ERROR in bound command: ${error.message}")
+                    error.printStackTrace()
+                }
+            }
+        } catch (error: Exception) {
+            MainActivity.log("ERROR in subscribeToChannels: ${error.message}")
+            error.printStackTrace()
         }
     }
-
-
 
     private fun handleCommand(jsonData: String) {
         try {
@@ -123,6 +149,7 @@ class PusherClient(
             }
         } catch (error: Exception) {
             MainActivity.log("Command parse error: ${error.message}")
+            error.printStackTrace()
         }
     }
 
@@ -147,14 +174,20 @@ class PusherClient(
                 if (!response.isSuccessful) {
                     MainActivity.log("Event send failed: ${response.code}")
                 }
-            } catch (e: Exception) {
-                MainActivity.log("Send event error: ${e.message}")
+            } catch (error: Exception) {
+                MainActivity.log("Send event error: ${error.message}")
+                error.printStackTrace()
             }
         }
     }
 
     fun disconnect() {
-        pusher?.disconnect()
-        scope.cancel()
+        try {
+            pusher?.disconnect()
+            scope.cancel()
+        } catch (error: Exception) {
+            MainActivity.log("ERROR in disconnect: ${error.message}")
+            error.printStackTrace()
+        }
     }
 }
