@@ -27,54 +27,72 @@ class GsmService : Service() {
         super.onCreate()
         MainActivity.log("GsmService: onCreate called")
 
+        // acquire wake lock if possible
         try {
             val powerManager = getSystemService(POWER_SERVICE) as PowerManager
             wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
             wakeLock?.acquire()
             MainActivity.log("GsmService: Wake lock acquired")
-        } catch (e: Exception) {
-            MainActivity.log("WARNING: Could not acquire wake lock: ${e.message}")
+        } catch (error: Exception) {
+            MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
         }
 
+        // load config
         try {
             config = ConfigReader.readConfig(this)
+            if (config == null) {
+                MainActivity.log("ERROR: ConfigReader returned null - service will run in degraded mode")
+                return
+            }
+
             MainActivity.log("GsmService: Config loaded")
             MainActivity.log("Backend URL: ${config?.BACKEND_URL}")
             MainActivity.log("Device Token: ${config?.DEVICE_TOKEN}")
 
+            // init dialer
             gsmDialer = GsmDialer(this)
             MainActivity.log("GsmService: GsmDialer initialized")
+        } catch (error: Exception) {
+            MainActivity.log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
+            return
+        }
 
-            try {
-                // Initialize Pusher client for bi-directional communication
-                pusherClient = PusherClient(this, config!!)
-                pusherClient?.connect()
-                MainActivity.log("GsmService: Pusher connecting...")
+        // init pusher + audio if pusher config present
+        try {
+            val hasPusherCreds = !config?.PUSHER_KEY.isNullOrBlank() &&
+                    !config?.PUSHER_CLUSTER.isNullOrBlank() &&
+                    !config?.BACKEND_BEARER.isNullOrBlank() &&
+                    !config?.BACKEND_URL.isNullOrBlank()
 
-                // Initialize audio handler for call audio
-                audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
-                MainActivity.log("GsmService: AudioStreamHandler initialized")
-            } catch (e: Exception) {
-                MainActivity.log("WARNING: Pusher/Audio failed: ${e.message}")
+            if (!hasPusherCreds) {
+                MainActivity.log("WARNING: Missing Pusher/Backend config - realtime features disabled")
+                return
             }
-        } catch (e: Exception) {
-            MainActivity.log("ERROR in GsmService.onCreate: ${e.message}")
+
+            // create pusher client and connect
+            pusherClient = PusherClient(this, config!!)
+            pusherClient?.connect()
+            MainActivity.log("GsmService: Pusher connecting...")
+
+            // audio handler depends on pusher for events
+            audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
+            MainActivity.log("GsmService: AudioStreamHandler initialized")
+        } catch (error: Exception) {
+            MainActivity.log("WARNING: Pusher/Audio failed: ${error.message}")
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             MainActivity.log("GsmService: onStartCommand called")
-            // Android 8.0+ requires foreground service notification
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForeground(NOTIFICATION_ID, createNotification())
+                startForegroundSafely()
                 MainActivity.log("GsmService: Foreground notification created")
             } else {
-                // Android 5.x doesn't require foreground notification
                 MainActivity.log("GsmService: Running as background service (Android < 8)")
             }
-        } catch (e: Exception) {
-            MainActivity.log("ERROR in onStartCommand: ${e.message}")
+        } catch (error: Exception) {
+            MainActivity.log("ERROR in onStartCommand: ${error.message}")
         }
         return START_STICKY
     }
@@ -82,15 +100,17 @@ class GsmService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         try {
-            wakeLock?.let {
-                if (it.isHeld) {
-                    it.release()
+            wakeLock?.let { lock ->
+                if (lock.isHeld) {
+                    lock.release()
                     MainActivity.log("Wake lock released")
                 }
             }
-        } catch (e: Exception) {
-            MainActivity.log("Error releasing wake lock: ${e.message}")
+        } catch (error: Exception) {
+            MainActivity.log("Error releasing wake lock: ${error.message}")
         }
+
+        // cleanup clients
         pusherClient?.disconnect()
         audioStreamHandler?.cleanup()
         gsmDialer = null
@@ -98,6 +118,12 @@ class GsmService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    // build and show notification (separate tiny helper)
+    private fun startForegroundSafely() {
+        val notification = createNotification()
+        startForeground(NOTIFICATION_ID, notification)
+    }
 
     private fun createNotification(): Notification {
         try {
@@ -121,42 +147,62 @@ class GsmService : Service() {
                 .setOngoing(true)
 
             return builder.build()
-        } catch (e: Exception) {
-            MainActivity.log("ERROR creating notification: ${e.message}")
-            throw e
+        } catch (error: Exception) {
+            MainActivity.log("ERROR creating notification: ${error.message}")
+            throw error
         }
     }
 
+    // central command dispatcher - single entrypoint
     fun handleCommand(type: String, data: Map<String, Any>) {
         MainActivity.log("Command received: $type")
-        when (type) {
+
+        // handle both server and legacy names
+        val normalizedType = when (type) {
+            "MAKE_CALL", "CALL_START" -> "CALL_STARTED"
+            else -> type
+        }
+
+        when (normalizedType) {
             "CALL_STARTED" -> {
-                val number = data["number"] as? String ?: return
+                val number = data["number"] as? String ?: run {
+                    MainActivity.log("CALL_STARTED ignored: missing number")
+                    return
+                }
                 MainActivity.log("Starting call to: $number")
                 gsmDialer?.startCall(number)
-                // Start audio capture for call
                 audioStreamHandler?.startAudioCapture()
                 pusherClient?.sendEvent("CALL_STARTED", mapOf("number" to number))
             }
-            "CALL_END" -> {
+
+            // only 1 type to avoid confusion
+            "CALL_ENDED" -> {
                 MainActivity.log("Ending call")
                 gsmDialer?.endCall()
-                // Stop audio
                 audioStreamHandler?.stopAudioCapture()
                 audioStreamHandler?.stopAudioPlayback()
                 pusherClient?.sendEvent("CALL_ENDED", emptyMap())
             }
+
             "SEND_DTMF" -> {
-                val digit = data["digit"] as? String ?: return
+                val digit = data["digit"] as? String ?: run {
+                    MainActivity.log("SEND_DTMF ignored: missing digit")
+                    return
+                }
                 MainActivity.log("Sending DTMF: $digit")
                 gsmDialer?.sendDtmf(digit[0])
                 pusherClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
             }
+
             "AUDIO_CHUNK" -> {
-                // Receive audio from backend and play it
-                val audioData = data["audio"] as? String ?: return
+                val audioData = data["audio"] as? String ?: run {
+                    MainActivity.log("AUDIO_CHUNK ignored: missing audio")
+                    return
+                }
                 audioStreamHandler?.playAudioChunk(audioData)
             }
+
+            else -> MainActivity.log("Unhandled command: $type")
         }
     }
 }
