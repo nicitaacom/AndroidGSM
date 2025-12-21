@@ -126,9 +126,9 @@ class GsmService : Service() {
             MainActivity.log("Error releasing wake lock: ${error.message}")
         }
 
-        // cleanup clients
         pusherClient?.disconnect()
         audioStreamHandler?.cleanup()
+        gsmDialer?.cleanup()
         gsmDialer = null
         MainActivity.log("GsmService: Destroyed")
     }

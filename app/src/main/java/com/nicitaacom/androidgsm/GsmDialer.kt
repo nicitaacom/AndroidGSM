@@ -7,46 +7,116 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.telecom.TelecomManager
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyCallback
+import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
+import java.util.concurrent.Executor
 
 class GsmDialer(private val context: Context) {
+    private var telephonyManager: TelephonyManager? = null
+    private var phoneStateListener: PhoneStateListener? = null
+    private var telephonyCallback: TelephonyCallback? = null
+    private var onCallEnded: (() -> Unit)? = null
+
+    init {
+        telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        if (ActivityCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // 1. modern API (Android 12+)
+                telephonyCallback = object : TelephonyCallback(), TelephonyCallback.CallStateListener {
+                    override fun onCallStateChanged(state: Int) {
+                        handleCallState(state)
+                    }
+                }
+                telephonyManager?.registerTelephonyCallback(context.mainExecutor, telephonyCallback!!)
+                MainActivity.log("✅ TelephonyCallback registered (API 31+)")
+            } else {
+                // 2. legacy API (Android 9-11)
+                @Suppress("DEPRECATION")
+                phoneStateListener = object : PhoneStateListener() {
+                    override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                        handleCallState(state)
+                    }
+                }
+                @Suppress("DEPRECATION")
+                telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+                MainActivity.log("✅ PhoneStateListener registered (API <31)")
+            }
+        } else MainActivity.log("⚠️ READ_PHONE_STATE permission missing - call state monitoring disabled")
+    }
+
+    private fun handleCallState(state: Int) {
+        when (state) {
+            TelephonyManager.CALL_STATE_IDLE -> {
+                MainActivity.log("📞 Call state: IDLE (call ended)")
+                onCallEnded?.invoke()
+            }
+            TelephonyManager.CALL_STATE_OFFHOOK -> MainActivity.log("📞 Call state: OFFHOOK (active)")
+            TelephonyManager.CALL_STATE_RINGING -> MainActivity.log("📞 Call state: RINGING")
+        }
+    }
+
+    fun setCallEndedCallback(callback: () -> Unit) {
+        onCallEnded = callback
+    }
 
     fun startCall(number: String) {
         try {
             MainActivity.log("GsmDialer: Initiating call to $number")
-
-            // Check permission
-            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE)
-                != PackageManager.PERMISSION_GRANTED) {
+            if (ActivityCompat.checkSelfPermission(context, Manifest.permission.CALL_PHONE) != PackageManager.PERMISSION_GRANTED) {
                 MainActivity.log("ERROR: CALL_PHONE permission not granted")
                 return
             }
 
-            val intent = Intent(Intent.ACTION_CALL)
-            intent.data = Uri.parse("tel:$number")
-            intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
-            context.startActivity(intent)
+            val simState = telephonyManager?.simState
+            if (simState != TelephonyManager.SIM_STATE_READY) {
+                MainActivity.log("ERROR: SIM not ready (state: $simState)")
+                return
+            }
 
+            val intent = Intent(Intent.ACTION_CALL).apply {
+                data = Uri.parse("tel:$number")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(intent)
             MainActivity.log("GsmDialer: Call started to $number")
-        } catch (e: Exception) {
-            MainActivity.log("ERROR starting call: ${e.message}")
-            Log.e("GsmDialer", "Failed to start call", e)
+        } catch (error: Exception) {
+            MainActivity.log("ERROR starting call: ${error.message}")
+            Log.e("GsmDialer", "Failed to start call", error)
         }
     }
 
-        fun endCall() {
-        MainActivity.log("GsmDialer: End call requested")
-        MainActivity.log("WARNING: Ending calls programmatically requires system permissions")
-        MainActivity.log("User must end call manually from dialer")
-        // Note: Ending calls programmatically is restricted on Android
-        // This would require ANSWER_PHONE_CALLS permission (API 26+) or being a system app
-        Log.d("GsmDialer", "End call - user action required")
+    fun endCall() {
+        try {
+            MainActivity.log("GsmDialer: Attempting to end call")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ANSWER_PHONE_CALLS) == PackageManager.PERMISSION_GRANTED) {
+                    val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                    val ended = telecomManager?.endCall() ?: false
+                    MainActivity.log(if (ended) "✅ Call ended programmatically" else "⚠️ endCall() returned false")
+                } else MainActivity.log("ERROR: ANSWER_PHONE_CALLS permission not granted")
+            } else MainActivity.log("WARNING: endCall() requires Android 9+ (current: ${Build.VERSION.SDK_INT})")
+        } catch (error: Exception) {
+            MainActivity.log("ERROR ending call: ${error.message}")
+            Log.e("GsmDialer", "Failed to end call", error)
+        }
     }
 
     fun sendDtmf(digit: Char) {
-        MainActivity.log("WARNING: DTMF tones require active call connection")
-        MainActivity.log("DTMF support limited on this Android version")
-        Log.d("GsmDialer", "DTMF requested: $digit (not implemented)")
+        MainActivity.log("⚠️ DTMF not supported - requires InCallService (complex setup)")
+        Log.d("GsmDialer", "DTMF requested: $digit (requires InCallService)")
+    }
+
+    fun cleanup() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            telephonyCallback?.let { callback -> telephonyManager?.unregisterTelephonyCallback(callback) }
+        } else {
+            @Suppress("DEPRECATION")
+            phoneStateListener?.let { listener -> telephonyManager?.listen(listener, PhoneStateListener.LISTEN_NONE) }
+        }
+        telephonyCallback = null
+        phoneStateListener = null
     }
 }
