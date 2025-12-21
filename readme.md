@@ -7,6 +7,19 @@ Phone = modem. Backend = brain.
 
 ---
 
+## 📡 Architecture Overview
+
+```
+┌─────────────────┐          ┌──────────────┐          ┌──────────────────┐
+│   Android App   │◄────────►│    Pusher    │◄────────►│  Backend Server  │
+│                 │          │              │          │                  │
+│  • GsmService   │          │  Channels:   │          │  • Express API   │
+│  • PusherClient │          │  - Commands  │          │  • Pusher Trigger│
+│  • AudioHandler │          │  - Audio     │          │  • Audio Process │
+└─────────────────┘          └──────────────┘          └──────────────────┘
+```
+
+
 ## 🧠 Architecture (Current)
 ```agsl
 Backend
