@@ -172,7 +172,7 @@ class AudioStreamHandler(
             try {
                 // Decode base64
                 val audioBytes = Base64.decode(base64Audio, Base64.NO_WRAP)
-                
+
                 // Convert to shorts
                 val shortBuffer = ShortArray(audioBytes.size / 2)
                 ByteBuffer.wrap(audioBytes).asShortBuffer().get(shortBuffer)

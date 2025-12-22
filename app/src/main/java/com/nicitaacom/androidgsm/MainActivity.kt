@@ -23,11 +23,11 @@ class MainActivity : AppCompatActivity() {
 
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-    
+
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
         var instance: MainActivity? = null
-        
+
         fun log(message: String) {
             instance?.addLog(message)
         }
@@ -36,14 +36,14 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        
+
         instance = this
-        
+
         logTextView = findViewById(R.id.logTextView)
         scrollView = findViewById(R.id.scrollView)
         toggleButton = findViewById(R.id.toggleButton)
         statusTextView = findViewById(R.id.statusTextView)
-        
+
         val versionTextView: TextView = findViewById(R.id.versionTextView)
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
 
@@ -54,21 +54,21 @@ class MainActivity : AppCompatActivity() {
                 requestPermissionsAndStart()
             }
         }
-        
+
         updateButtonState()
 
         addLog("App started")
         addLog("Android version: ${Build.VERSION.RELEASE}")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
-        
+
         checkServiceStatus()
     }
-    
+
     private fun checkServiceStatus() {
         statusTextView.text = "Status: Ready"
         updateButtonState()
     }
-    
+
     private fun updateButtonState() {
         if (isServiceRunning) {
             toggleButton.text = "STOP SERVICE"
@@ -91,11 +91,11 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.ACCESS_NETWORK_STATE,
             Manifest.permission.WAKE_LOCK
         )
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             permissions.add(Manifest.permission.FOREGROUND_SERVICE)
         }
-        
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
@@ -103,7 +103,7 @@ class MainActivity : AppCompatActivity() {
         val missingPermissions = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        
+
         if (missingPermissions.isNotEmpty()) {
             addLog("Requesting ${missingPermissions.size} permissions...")
             ActivityCompat.requestPermissions(
@@ -115,18 +115,18 @@ class MainActivity : AppCompatActivity() {
             startService()
         }
     }
-    
+
     private fun startService() {
         try {
             addLog("Starting GSM Gateway Service...")
             val intent = Intent(this, GsmService::class.java)
-            
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)
             } else {
                 startService(intent)
             }
-            
+
             isServiceRunning = true
             updateButtonState()
             addLog("Service started successfully!")
@@ -134,13 +134,13 @@ class MainActivity : AppCompatActivity() {
             addLog("ERROR starting service: ${e.message}")
         }
     }
-    
+
     private fun stopService() {
         try {
             addLog("Stopping GSM Gateway Service...")
             val intent = Intent(this, GsmService::class.java)
             stopService(intent)
-            
+
             isServiceRunning = false
             updateButtonState()
             addLog("Service stopped successfully!")
@@ -148,17 +148,17 @@ class MainActivity : AppCompatActivity() {
             addLog("ERROR stopping service: ${e.message}")
         }
     }
-    
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        
+
         if (requestCode == PERMISSION_REQUEST_CODE) {
             val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-            
+
             if (allGranted) {
                 addLog("All permissions granted!")
                 startService()
@@ -171,27 +171,27 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-    
+
     fun addLog(message: String) {
         runOnUiThread {
             val timestamp = dateFormat.format(Date())
             val logEntry = "[$timestamp] $message\n"
             logBuffer.append(logEntry)
-            
+
             // Keep only last 500 lines
             val lines = logBuffer.lines()
             if (lines.size > 500) {
                 logBuffer.clear()
                 logBuffer.append(lines.takeLast(500).joinToString("\n"))
             }
-            
+
             logTextView.text = logBuffer.toString()
             scrollView.post {
                 scrollView.fullScroll(ScrollView.FOCUS_DOWN)
             }
         }
     }
-    
+
     override fun onDestroy() {
         super.onDestroy()
         instance = null

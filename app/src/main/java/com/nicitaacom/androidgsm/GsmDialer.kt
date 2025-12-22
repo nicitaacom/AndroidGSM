@@ -19,6 +19,8 @@ class GsmDialer(private val context: Context) {
     private var telephonyCallback: TelephonyCallback? = null
     private var onCallEnded: (() -> Unit)? = null
 
+    private var onCallConnected: (() -> Unit)? = null
+
     init {
         telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
 
@@ -57,9 +59,17 @@ class GsmDialer(private val context: Context) {
                 MainActivity.log("📞 Call state: IDLE (call ended)")
                 onCallEnded?.invoke()
             }
-            TelephonyManager.CALL_STATE_OFFHOOK -> MainActivity.log("📞 Call state: OFFHOOK (active)")
+            TelephonyManager.CALL_STATE_OFFHOOK -> {
+                MainActivity.log("📞 Call state: OFFHOOK (active)")
+                onCallConnected?.invoke()
+            }
             TelephonyManager.CALL_STATE_RINGING -> MainActivity.log("📞 Call state: RINGING")
         }
+    }
+
+
+    fun setCallConnectedCallback(callback: () -> Unit) {
+        onCallConnected = callback
     }
 
     fun setCallEndedCallback(callback: () -> Unit) {

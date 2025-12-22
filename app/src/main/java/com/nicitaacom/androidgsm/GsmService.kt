@@ -152,7 +152,6 @@ class GsmService : Service() {
     fun handleCommand(type: String, data: Map<String, Any>) {
         MainActivity.log("Command received: $type")
 
-        // handle both server and legacy names
         val normalizedType = when (type) {
             "MAKE_CALL", "CALL_START" -> "CALL_STARTED"
             else -> type
@@ -165,13 +164,25 @@ class GsmService : Service() {
                     return
                 }
                 MainActivity.log("Starting call to: $number")
+
+                // 1. set callback to start audio when call connects
+                gsmDialer?.setCallConnectedCallback {
+                    MainActivity.log("Call connected - starting audio capture")
+                    audioStreamHandler?.startAudioCapture()
+                    pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
+                }
+
+                gsmDialer?.setCallEndedCallback {
+                    MainActivity.log("Call ended - stopping audio")
+                    audioStreamHandler?.stopAudioCapture()
+                    audioStreamHandler?.stopAudioPlayback()
+                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                }
+
                 gsmDialer?.startCall(number)
-                audioStreamHandler?.startAudioCapture()
-                // don't need this line because it cause infinity loops (keep it commented to prevent doing this again)
-                // pusherClient?.sendEvent("CALL_STARTED", mapOf("number" to number))
+                // DON'T start audio here - wait for OFFHOOK state
             }
 
-            // only 1 type to avoid confusion
             "CALL_ENDED" -> {
                 MainActivity.log("Ending call")
                 gsmDialer?.endCall()

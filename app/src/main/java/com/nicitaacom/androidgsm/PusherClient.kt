@@ -171,6 +171,7 @@ class PusherClient(
                     service.handleCommand("CALL_ENDED", emptyMap())
                 }
                 "SEND_DTMF" -> service.handleCommand("SEND_DTMF", dataMap)
+                "AUDIO_CHUNK" -> service.handleCommand("AUDIO_CHUNK", dataMap)
                 else -> MainActivity.log("Unknown command type: $type")
             }
         } catch (error: Exception) {
