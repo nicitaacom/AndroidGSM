@@ -24,8 +24,24 @@ fun gitCount(ref: String): Int? =
         }
     }.getOrNull()
 
+fun gitShortSuffixForRef(ref: String, length: Int = 3): String? =
+    runCatching {
+        ByteArrayOutputStream().use { output ->
+            exec {
+                commandLine("git", "rev-parse", ref)
+                standardOutput = output
+            }
+            output.toString().trim().takeLast(length)
+        }
+    }.getOrNull()
+
 val todayCommitCount: Int = gitCount("origin/production") ?: gitCount("HEAD") ?: 1
-val versionNameComputed = "$todayDate-$todayCommitCount"
+
+// try to get a short suffix from the same refs we checked for counts
+val commitSuffix = gitShortSuffixForRef("origin/production") ?: gitShortSuffixForRef("HEAD") ?: ""
+
+// final version name: yy-MM-dd-<count><suffix> -> e.g. 25-12-25-9ff4
+val versionNameComputed = "$todayDate-$todayCommitCount$commitSuffix"
 
 /* ---------- android ---------- */
 
