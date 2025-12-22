@@ -21,6 +21,7 @@ class PusherClient(
 ) {
     private var pusher: Pusher? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private var heartbeatJob: Job? = null
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -46,6 +47,10 @@ class PusherClient(
                         if (change.currentState == ConnectionState.CONNECTED) {
                             subscribeToChannels()
                             sendEvent("CONNECTED") // 2. tell backend we're online
+                            startHeartbeat() // so layer (server.ts) will understand that connection is still alive
+                        }
+                        else {
+                            stopHeartbeat()
                         }
                     } catch (error: Exception) {
                         MainActivity.log("ERROR in onConnectionStateChange: ${error.message}")
@@ -62,6 +67,28 @@ class PusherClient(
             MainActivity.log("ERROR in Pusher.connect(): ${error.message}")
             error.printStackTrace()
         }
+    }
+
+    private fun startHeartbeat() {
+        stopHeartbeat()
+        heartbeatJob = scope.launch {
+            while (isActive) {
+                delay(15000) // every 15s
+                sendEvent("HEARTBEAT")
+            }
+        }
+    }
+
+
+    private fun stopHeartbeat() {
+        heartbeatJob?.cancel()
+        heartbeatJob = null
+    }
+
+    fun disconnect() {
+        stopHeartbeat()
+        pusher?.disconnect()
+        scope.cancel()
     }
 
     private fun authPrivateChannel(channelName: String, socketId: String): String {
@@ -180,13 +207,4 @@ class PusherClient(
         }
     }
 
-    fun disconnect() {
-        try {
-            pusher?.disconnect()
-            scope.cancel()
-        } catch (error: Exception) {
-            MainActivity.log("ERROR in disconnect: ${error.message}")
-            error.printStackTrace()
-        }
-    }
 }
