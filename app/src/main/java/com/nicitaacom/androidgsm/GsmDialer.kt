@@ -96,25 +96,34 @@ class GsmDialer(private val context: Context) {
         }
     }
 
-    // 8. programmatic call termination (API 28+)
+    // 8. programmatic call termination with fallback
     fun endCall() {
         try {
             MainActivity.log("GsmDialer: Attempting to end call")
 
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
-                MainActivity.log("WARNING: endCall() requires Android 9+ (current: ${Build.VERSION.SDK_INT})")
-                return
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                // 9. Android 9+ - use TelecomManager if permission granted
+                if (hasPermission(Manifest.permission.ANSWER_PHONE_CALLS)) {
+                    try {
+                        val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                        @Suppress("MissingPermission") // we already checked permission above (in init)
+                        val ended = telecomManager?.endCall() ?: false
+                        MainActivity.log(if (ended) "✅ Call ended programmatically" else "⚠️ endCall() returned false")
+                        return
+                    } catch (securityException: SecurityException) {
+                        MainActivity.log("ERROR: SecurityException calling endCall() - ${securityException.message}")
+                    }
+                } else {
+                    MainActivity.log("⚠️ ANSWER_PHONE_CALLS permission not granted - using fallback")
+                }
             }
 
-            if (!hasPermission(Manifest.permission.ANSWER_PHONE_CALLS)) {
-                MainActivity.log("ERROR: ANSWER_PHONE_CALLS permission not granted")
-                return
+            // 10. Fallback for Android <9 or missing permission - simulate headset hook
+            val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+                putExtra(Intent.EXTRA_KEY_EVENT, android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_HEADSETHOOK))
             }
-
-            // 9. use TelecomManager to end active call
-            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
-            val ended = telecomManager?.endCall() ?: false
-            MainActivity.log(if (ended) "✅ Call ended programmatically" else "⚠️ endCall() returned false")
+            context.sendOrderedBroadcast(intent, null)
+            MainActivity.log("⚠️ Call end requested via headset hook (fallback method)")
         } catch (error: Exception) {
             MainActivity.log("ERROR ending call: ${error.message}")
             Log.e("GsmDialer", "Failed to end call", error)
