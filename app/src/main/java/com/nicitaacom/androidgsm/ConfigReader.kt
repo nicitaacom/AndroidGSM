@@ -21,7 +21,8 @@ class ConfigReader {
             val jsonString = inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(jsonString)
 
-            val deviceName = "${Build.MANUFACTURER}_${Build.MODEL}".replace(" ", "_")
+            val deviceName = "${Build.MANUFACTURER}_${Build.MODEL}"
+                .replace(Regex("[^a-zA-Z0-9_-]"), "_")
 
             return Config(
                 BACKEND_URL = json.getString("BACKEND_URL"),
