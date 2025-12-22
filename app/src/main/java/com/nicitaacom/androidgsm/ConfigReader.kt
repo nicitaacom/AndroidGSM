@@ -1,6 +1,7 @@
 package com.nicitaacom.androidgsm
 
 import android.content.Context
+import android.os.Build
 import org.json.JSONObject
 
 data class Config(
@@ -20,9 +21,11 @@ class ConfigReader {
             val jsonString = inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(jsonString)
 
+            val deviceName = "${Build.MANUFACTURER}_${Build.MODEL}".replace(" ", "_")
+
             return Config(
                 BACKEND_URL = json.getString("BACKEND_URL"),
-                DEVICE_TOKEN = json.getString("DEVICE_TOKEN"),
+                DEVICE_TOKEN = deviceName,
                 BACKEND_BEARER = json.getString("BACKEND_BEARER"),
                 PUSHER_APP_ID = json.getString("PUSHER_APP_ID"),
                 PUSHER_KEY = json.getString("PUSHER_KEY"),

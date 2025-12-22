@@ -1,6 +1,5 @@
 {
   "BACKEND_URL": "https://gsm.nexgem.studio",
-  "DEVICE_TOKEN": "android-gateway-01",
   "BACKEND_BEARER": "wss-1234-$3cre7",
 
   "PUSHER_APP_ID": "2093123",
