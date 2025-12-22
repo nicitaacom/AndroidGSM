@@ -42,7 +42,7 @@ val todayCommitCount: Int = gitCount("origin/production") ?: gitCount("HEAD") ?:
 val commitSuffix = gitShortSuffixForRef("origin/production") ?: gitShortSuffixForRef("HEAD") ?: ""
 
 // final version name: yy-MM-dd-<count><suffix> -> e.g. 25-12-25-9ff4
-val versionNameComputed = "$todayDate-$todayCommitCount$commitSuffix"
+val versionNameComputed = "$todayDate-$todayCommitCount.$commitSuffix"
 
 /* ---------- android ---------- */
 
