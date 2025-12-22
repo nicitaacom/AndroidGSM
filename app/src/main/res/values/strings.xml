@@ -1,3 +1,4 @@
 <resources>
     <string name="app_name">outreach-tool GSM</string>
+    <string name="sim_label">SIM%d (%s)</string>
 </resources>

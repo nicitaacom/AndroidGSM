@@ -1,13 +1,16 @@
 package com.nicitaacom.androidgsm
 
 import android.Manifest
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
+import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
@@ -86,8 +89,20 @@ class GsmDialer(private val context: Context) {
                 return
             }
 
+            val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+            val selectedSubId = prefs.getInt("selected_sim", -1)
+
+            val subMgr = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+            val subInfo = if (selectedSubId != -1) subMgr.getActiveSubscriptionInfo(selectedSubId) else null
+            val slotIndex = subInfo?.simSlotIndex ?: -1
+
             // 6. verify SIM state
-            val simState = telephonyManager?.simState
+            val simState = if (slotIndex != -1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                telephonyManager?.getSimState(slotIndex) ?: TelephonyManager.SIM_STATE_UNKNOWN
+            } else {
+                telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
+            }
+
             if (simState != TelephonyManager.SIM_STATE_READY) {
                 MainActivity.log("ERROR: SIM not ready (state: $simState)")
                 return
@@ -98,6 +113,16 @@ class GsmDialer(private val context: Context) {
                 data = Uri.parse("tel:$number")
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
+
+            if (selectedSubId != -1) {
+                val handle = PhoneAccountHandle(
+                    ComponentName("com.android.phone", "com.android.services.telephony.TelephonyConnectionService"),
+                    selectedSubId.toString()
+                )
+                intent.putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
+                MainActivity.log("Using selected SIM subId: $selectedSubId (slot: $slotIndex)")
+            }
+
             context.startActivity(intent)
             MainActivity.log("GsmDialer: Call started to $number")
         } catch (error: Exception) {
