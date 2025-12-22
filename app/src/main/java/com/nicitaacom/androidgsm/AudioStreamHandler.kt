@@ -1,13 +1,21 @@
 package com.nicitaacom.androidgsm
 
 import android.content.Context
+import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
-import kotlinx.coroutines.*
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 
 class AudioStreamHandler(
@@ -19,6 +27,7 @@ class AudioStreamHandler(
     private var isRecording = false
     private var isPlaying = false
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 
     companion object {
         private const val TAG = "AudioStreamHandler"
@@ -35,6 +44,10 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🎤 Starting audio capture...")
 
+            // 1. set audio mode and speakerphone
+            audioManager.mode = AudioManager.MODE_IN_CALL
+            audioManager.isSpeakerphoneOn = true
+
             val bufferSize = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
                 CHANNEL_IN,
@@ -47,7 +60,7 @@ class AudioStreamHandler(
             }
 
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                MediaRecorder.AudioSource.VOICE_DOWNLINK,
                 SAMPLE_RATE,
                 CHANNEL_IN,
                 AUDIO_FORMAT,
@@ -55,7 +68,7 @@ class AudioStreamHandler(
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                MainActivity.log("ERROR: AudioRecord not initialized")
+                MainActivity.log("ERROR: AudioRecord not initialized - VOICE_DOWNLINK may not be supported")
                 return
             }
 
@@ -115,6 +128,11 @@ class AudioStreamHandler(
             audioRecord?.stop()
             audioRecord?.release()
             audioRecord = null
+
+            // Reset audio manager
+            audioManager.isSpeakerphoneOn = false
+            audioManager.mode = AudioManager.MODE_NORMAL
+
             MainActivity.log("🎤 Audio capture stopped")
             Log.d(TAG, "Audio capture stopped")
         } catch (e: Exception) {
@@ -128,6 +146,13 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🔊 Starting audio playback...")
 
+            // Set max volume for music stream
+            audioManager.setStreamVolume(
+                AudioManager.STREAM_MUSIC,
+                audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
+                0
+            )
+
             val bufferSize = AudioTrack.getMinBufferSize(
                 SAMPLE_RATE,
                 CHANNEL_OUT,
@@ -139,14 +164,22 @@ class AudioStreamHandler(
                 return
             }
 
-            audioTrack = AudioTrack(
-                android.media.AudioManager.STREAM_VOICE_CALL,
-                SAMPLE_RATE,
-                CHANNEL_OUT,
-                AUDIO_FORMAT,
-                bufferSize,
-                AudioTrack.MODE_STREAM
-            )
+            audioTrack = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AUDIO_FORMAT)
+                        .setSampleRate(SAMPLE_RATE)
+                        .setChannelMask(CHANNEL_OUT)
+                        .build()
+                )
+                .setBufferSizeInBytes(bufferSize)
+                .build()
 
             if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
                 MainActivity.log("ERROR: AudioTrack not initialized")

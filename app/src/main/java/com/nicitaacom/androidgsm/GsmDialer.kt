@@ -5,15 +5,18 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
+import android.media.AudioManager
 import android.telephony.PhoneStateListener
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
+import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
 
 class GsmDialer(private val context: Context) {
@@ -21,7 +24,6 @@ class GsmDialer(private val context: Context) {
     private var phoneStateListener: PhoneStateListener? = null
     private var telephonyCallback: TelephonyCallback? = null
     private var onCallEnded: (() -> Unit)? = null
-
     private var onCallConnected: (() -> Unit)? = null
 
     init {
@@ -70,7 +72,6 @@ class GsmDialer(private val context: Context) {
         }
     }
 
-
     fun setCallConnectedCallback(callback: () -> Unit) {
         onCallConnected = callback
     }
@@ -79,7 +80,10 @@ class GsmDialer(private val context: Context) {
         onCallEnded = callback
     }
 
+
     // 5. initiate GSM call
+    // called when handling CALL_STARTED command (from backend via Pusher) in GsmService.handleCommand.
+    @Suppress("unused", "MissingPermission")
     fun startCall(number: String) {
         try {
             MainActivity.log("GsmDialer: Initiating call to $number")
@@ -92,12 +96,28 @@ class GsmDialer(private val context: Context) {
             val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             val selectedSubId = prefs.getInt("selected_sim", -1)
 
-            val subMgr = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
-            val subInfo = if (selectedSubId != -1) subMgr.getActiveSubscriptionInfo(selectedSubId) else null
-            val slotIndex = subInfo?.simSlotIndex ?: -1
+            var slotIndex = -1
+            var handle: PhoneAccountHandle? = null
 
-            // 6. verify SIM state
-            val simState = if (slotIndex != -1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (selectedSubId != -1 && hasPermission(Manifest.permission.READ_PHONE_STATE)) {
+                val subMgr = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+                val subInfo = subMgr.getActiveSubscriptionInfo(selectedSubId)
+                if (subInfo != null) {
+                    slotIndex = subInfo.simSlotIndex
+                    handle = PhoneAccountHandle(
+                        ComponentName("com.android.phone", "com.android.services.telephony.TelephonyConnectionService"),
+                        selectedSubId.toString()
+                    )
+                    MainActivity.log("Using selected SIM subId: $selectedSubId (slot: $slotIndex)")
+                } else {
+                    MainActivity.log("Selected subId invalid or inactive - falling back to default SIM")
+                }
+            } else if (selectedSubId != -1) {
+                MainActivity.log("READ_PHONE_STATE missing - cannot select specific SIM, using default")
+            }
+
+            // 6. verify SIM state (use default if no specific slot)
+            val simState = if (slotIndex != -1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 telephonyManager?.getSimState(slotIndex) ?: TelephonyManager.SIM_STATE_UNKNOWN
             } else {
                 telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
@@ -114,20 +134,15 @@ class GsmDialer(private val context: Context) {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
 
-            if (selectedSubId != -1) {
-                val handle = PhoneAccountHandle(
-                    ComponentName("com.android.phone", "com.android.services.telephony.TelephonyConnectionService"),
-                    selectedSubId.toString()
-                )
+            if (handle != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 intent.putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
-                MainActivity.log("Using selected SIM subId: $selectedSubId (slot: $slotIndex)")
             }
 
             context.startActivity(intent)
             MainActivity.log("GsmDialer: Call started to $number")
-        } catch (error: Exception) {
-            MainActivity.log("ERROR starting call: ${error.message}")
-            Log.e("GsmDialer", "Failed to start call", error)
+        } catch (exception: Exception) {
+            MainActivity.log("ERROR starting call: ${exception.message}")
+            Log.e("GsmDialer", "Failed to start call", exception)
         }
     }
 
@@ -155,7 +170,7 @@ class GsmDialer(private val context: Context) {
 
             // 10. Fallback for Android <9 or missing permission - simulate headset hook
             val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-                putExtra(Intent.EXTRA_KEY_EVENT, android.view.KeyEvent(android.view.KeyEvent.ACTION_DOWN, android.view.KeyEvent.KEYCODE_HEADSETHOOK))
+                putExtra(Intent.EXTRA_KEY_EVENT, KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HEADSETHOOK))
             }
             context.sendOrderedBroadcast(intent, null)
             MainActivity.log("⚠️ Call end requested via headset hook (fallback method)")
@@ -166,8 +181,38 @@ class GsmDialer(private val context: Context) {
     }
 
     fun sendDtmf(digit: Char) {
-        MainActivity.log("⚠️ DTMF not supported - requires InCallService (complex setup)")
-        Log.d("GsmDialer", "DTMF requested: $digit (requires InCallService)")
+        try {
+            val toneType = when (digit) {
+                '0' -> ToneGenerator.TONE_DTMF_0
+                '1' -> ToneGenerator.TONE_DTMF_1
+                '2' -> ToneGenerator.TONE_DTMF_2
+                '3' -> ToneGenerator.TONE_DTMF_3
+                '4' -> ToneGenerator.TONE_DTMF_4
+                '5' -> ToneGenerator.TONE_DTMF_5
+                '6' -> ToneGenerator.TONE_DTMF_6
+                '7' -> ToneGenerator.TONE_DTMF_7
+                '8' -> ToneGenerator.TONE_DTMF_8
+                '9' -> ToneGenerator.TONE_DTMF_9
+                '*' -> ToneGenerator.TONE_DTMF_S
+                '#' -> ToneGenerator.TONE_DTMF_P
+                else -> return
+            }
+
+            // Prefer DTMF stream → VOICE_CALL → MUSIC
+            val stream = AudioManager.STREAM_DTMF
+
+            val toneGen = ToneGenerator(stream, 100) // max volume
+            toneGen.startTone(toneType, 200) // 200ms tone
+            MainActivity.log("DTMF sent locally: $digit (may not reach far end on all devices)")
+
+            // Release after short delay to free resources
+            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                toneGen.release()
+            }, 300)
+        } catch (exception: Exception) {
+            MainActivity.log("ERROR sending DTMF: ${exception.message}")
+            Log.e("GsmDialer", "Failed to send DTMF", exception)
+        }
     }
 
     // 10. cleanup listeners on destroy

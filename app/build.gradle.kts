@@ -52,7 +52,7 @@ android {
 
     defaultConfig {
         applicationId = "com.nicitaacom.androidgsm"
-        minSdk = 21
+        minSdk = 23 // minSdk for android 5.0/android 5.1 and with pusher it crashes even on android 5.1 so no sense from minSdk 21
         targetSdk = 36
 
         versionCode = todayCommitCount
