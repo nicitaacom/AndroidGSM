@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.nicitaacom.androidgsm"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") }

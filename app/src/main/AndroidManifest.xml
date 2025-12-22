@@ -10,6 +10,9 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
+    <!-- Bluetooth permission (required for audio routing on Android 12+) -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
     <!-- Permissions for network communication -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -19,6 +22,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 
+    <!-- Permissions for foreground service types (required on Android 14+) -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+
+    <!-- Required for phoneCall foreground service type -->
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
 
     <uses-feature android:name="android.hardware.telephony" android:required="false" />
 
@@ -27,40 +37,20 @@
             android:fullBackupContent="@xml/backup_rules"
             android:dataExtractionRules="@xml/data_extraction_rules"
             android:label="@string/app_name"
-            android:icon="@mipmap/ic_launcher"
+            android:icon="@drawable/ic_launcher_foreground"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:supportsRtl="true"
             android:theme="@style/Theme.AndroidGSM">
 
-        <!-- Main Activity -->
-        <activity
-            android:name=".MainActivity"
-            android:exported="true"
-            android:screenOrientation="portrait">
+        <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- Background Service for GSM gateway -->
-        <service
-                android:name=".GsmService"
-                android:enabled="true"
-                android:exported="false"
-                android:foregroundServiceType="connectedDevice|phoneCall|mediaPlayback" />
-
-        <!-- Auto-start receiver on device boot (optional) -->
-        <!--
-        <receiver
-            android:name=".BootReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-            </intent-filter>
-        </receiver>
-        -->
+        <service android:name=".GsmService" android:enabled="true" android:exported="false"
+                 android:foregroundServiceType="connectedDevice|phoneCall|mediaPlayback" />
 
     </application>
 

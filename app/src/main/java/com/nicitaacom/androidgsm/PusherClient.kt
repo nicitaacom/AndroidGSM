@@ -139,6 +139,10 @@ class PusherClient(
                         service.handleCommand("CALL_STARTED", mapOf("number" to number))
                     } else MainActivity.log("CALL_STARTED missing number")
                 }
+                "CALL_ENDED" -> {
+                    MainActivity.log("COMMAND -> CALL_ENDED")
+                    service.handleCommand("CALL_ENDED", emptyMap())
+                }
                 "SEND_DTMF" -> service.handleCommand("SEND_DTMF", dataMap)
                 else -> MainActivity.log("Unknown command type: $type")
             }
