@@ -44,6 +44,9 @@ class MainActivity : AppCompatActivity() {
         toggleButton = findViewById(R.id.toggleButton)
         statusTextView = findViewById(R.id.statusTextView)
         
+        val versionTextView: TextView = findViewById(R.id.versionTextView)
+        versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
+
         toggleButton.setOnClickListener {
             if (isServiceRunning) {
                 stopService()
@@ -69,11 +72,11 @@ class MainActivity : AppCompatActivity() {
     private fun updateButtonState() {
         if (isServiceRunning) {
             toggleButton.text = "STOP SERVICE"
-            toggleButton.setBackgroundColor(resources.getColor(android.R.color.holo_red_dark))
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
             statusTextView.text = "Status: Active"
         } else {
             toggleButton.text = "START SERVICE"
-            toggleButton.setBackgroundColor(resources.getColor(android.R.color.holo_green_dark))
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
             statusTextView.text = "Status: Inactive"
         }
     }

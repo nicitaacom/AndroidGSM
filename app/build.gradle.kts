@@ -1,3 +1,7 @@
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -10,14 +14,15 @@ android {
     defaultConfig {
         ndk { abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64") }
 
-
         applicationId = "com.nicitaacom.androidgsm"
-        minSdk = 21 // this is required because I need android 5.2 compatibility
+        minSdk = 21
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
+        versionName = generateVersionName()
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
+        buildConfigField("String", "VERSION_NAME", "\"${generateVersionName()}\"")
     }
 
     splits { abi { isEnable = false } }
@@ -40,6 +45,18 @@ android {
         abortOnError = false
         warningsAsErrors = false
     }
+    buildFeatures {
+        buildConfig = true
+    }
+}
+
+fun generateVersionName(): String {
+    val dateFormat = SimpleDateFormat("yy-MM-dd", Locale.US)
+    val timeFormat = SimpleDateFormat("HHmm", Locale.US)
+    val date = dateFormat.format(Date())
+    val time = timeFormat.format(Date()).toInt()
+    val buildNumber = (time / 100) + 1
+    return "$date-$buildNumber"
 }
 
 dependencies {
