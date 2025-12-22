@@ -4,8 +4,11 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.telephony.SubscriptionManager
 import android.view.View
 import android.widget.Button
@@ -13,17 +16,17 @@ import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.TextView
-import androidx.core.content.edit
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.edit
 import androidx.core.content.res.ResourcesCompat
+import androidx.core.net.toUri
 import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.*
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var logTextView: TextView
     private lateinit var scrollView: ScrollView
     private lateinit var toggleButton: Button
@@ -35,8 +38,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
-
-        // Use WeakReference to avoid memory leaks
         private var instance: WeakReference<MainActivity>? = null
 
         fun log(message: String) {
@@ -48,7 +49,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // Set weak reference
         instance = WeakReference(this)
 
         logTextView = findViewById(R.id.logTextView)
@@ -76,8 +76,6 @@ class MainActivity : AppCompatActivity() {
         checkServiceStatus()
         loadSimSelection()
     }
-
-    // ... (rest of your methods remain exactly the same: updateButtonState, requestPermissionsAndStart, etc.)
 
     private fun checkServiceStatus() {
         statusTextView.text = "Status: Ready"
@@ -115,6 +113,10 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         }
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            permissions.add(Manifest.permission.USE_FULL_SCREEN_INTENT)
+        }
+
         val missingPermissions = permissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
@@ -127,7 +129,26 @@ class MainActivity : AppCompatActivity() {
                 PERMISSION_REQUEST_CODE
             )
         } else {
+            requestBatteryOptimizationExemption()
             startService()
+        }
+    }
+
+    private fun requestBatteryOptimizationExemption() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            addLog("Battery optimization exemption not supported on this Android version")
+            return
+        }
+
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+            addLog("Requesting battery optimization exemption...")
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = "package:$packageName".toUri()
+            }
+            startActivity(intent)
+        } else {
+            addLog("Battery optimization already exempted")
         }
     }
 
@@ -176,12 +197,15 @@ class MainActivity : AppCompatActivity() {
 
             if (allGranted) {
                 addLog("All permissions granted!")
+                requestBatteryOptimizationExemption()
                 startService()
                 loadSimSelection()
             } else {
                 addLog("ERROR: Some permissions were denied")
-                val denied = permissions.filterIndexed { i, _ -> grantResults[i] != PackageManager.PERMISSION_GRANTED }
-                addLog("Denied: ${denied.joinToString()}")
+                val deniedPermissions = permissions.filterIndexed { index, _ ->
+                    grantResults[index] != PackageManager.PERMISSION_GRANTED
+                }
+                addLog("Denied: ${deniedPermissions.joinToString()}")
             }
         }
     }
@@ -192,6 +216,7 @@ class MainActivity : AppCompatActivity() {
             val logEntry = "[$timestamp] $message\n"
             logBuffer.append(logEntry)
 
+            // Keep only last 500 lines
             val lines = logBuffer.lines()
             if (lines.size > 500) {
                 logBuffer.clear()
@@ -207,7 +232,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // Clear the weak reference to allow GC
         if (instance?.get() == this) {
             instance = null
         }
@@ -260,7 +284,7 @@ class MainActivity : AppCompatActivity() {
         radioGroup.setOnCheckedChangeListener { group, checkedId ->
             val selected = group.findViewById<RadioButton>(checkedId).tag as Int
 
-            // Modern KTX way – requires: implementation(libs.androidx.core.ktx) and import androidx.core.content.edit
+            // Modern KTX way
             prefs.edit {
                 putInt("selected_sim", selected)
             }
