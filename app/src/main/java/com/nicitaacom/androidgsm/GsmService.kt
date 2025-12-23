@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -90,7 +91,12 @@ class GsmService : Service() {
 
             // 1. Start foreground IMMEDIATELY - before any async work
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForeground(NOTIFICATION_ID, createNotification())
+                val notification = createNotification()
+                val serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(NOTIFICATION_ID, notification, serviceType)
+                else startForeground(NOTIFICATION_ID, notification)
                 MainActivity.log("GsmService: Foreground notification created")
             }
 
