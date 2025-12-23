@@ -1,7 +1,6 @@
 package com.nicitaacom.androidgsm
 
 import android.Manifest
-import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -226,7 +225,7 @@ class MainActivity : AppCompatActivity() {
                 } catch (e: Exception) {
                     addLog("Error restoring screen timeout: ${e.message}")
                 }
-                originalScreenTimeout = -1
+                originalScreenTimeout = -1L
             }
         } catch (error: Exception) {
             addLog("ERROR stopping service: ${error.message}")
@@ -277,6 +276,16 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         if (instance?.get() == this) {
             instance = null
+        }
+        // Restore timeout on destroy if running
+        if (isServiceRunning && originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
+            try {
+                Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
+                addLog("Restored timeout on destroy")
+            } catch (e: Exception) {
+                addLog("Error restoring timeout on destroy: ${e.message}")
+            }
+            originalScreenTimeout = -1L
         }
     }
 

@@ -141,15 +141,15 @@ class GsmService : Service() {
                     MainActivity.log("Wake lock released")
                 }
             }
+            pusherClient?.disconnect()
+            audioStreamHandler?.cleanup()
+            gsmDialer?.cleanup()
+            gsmDialer = null
+            MainActivity.log("GsmService: Destroyed")
         } catch (error: Exception) {
-            MainActivity.log("Error releasing wake lock: ${error.message}")
+            MainActivity.log("ERROR in onDestroy: ${error.message}")
+            error.printStackTrace()
         }
-
-        pusherClient?.disconnect()
-        audioStreamHandler?.cleanup()
-        gsmDialer?.cleanup()
-        gsmDialer = null
-        MainActivity.log("GsmService: Destroyed")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
