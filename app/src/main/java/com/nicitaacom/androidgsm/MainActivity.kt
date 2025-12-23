@@ -62,11 +62,7 @@ class MainActivity : AppCompatActivity() {
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
 
         toggleButton.setOnClickListener {
-            if (isServiceRunning) {
-                stopService()
-            } else {
-                requestPermissionsAndStart()
-            }
+            if (isServiceRunning) stopService() else requestPermissionsAndStart()
         }
 
         updateButtonState()
@@ -76,18 +72,21 @@ class MainActivity : AppCompatActivity() {
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
 
         checkServiceStatus()
-        loadSimSelection()
 
-        // Keep app always visible (moves to recent apps but stays "open")
+        // 1. load SIM selection ONLY if permissions granted
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            loadSimSelection()
+        }
+
+        // 2. keep app always visible (moves to recent apps but stays "open")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         addLog("Screen will stay on while app is active")
-
     }
 
     override fun onResume() {
         super.onResume()
         if (isServiceRunning) {
-            // Keep screen on while app in foreground
+            // 1. keep screen on while app in foreground
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             val params = window.attributes
             originalBrightness = params.screenBrightness
@@ -100,7 +99,7 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         if (isServiceRunning) {
-            // Restore normal screen behavior
+            // 1. restore normal screen behavior
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (originalBrightness != -1f) {
                 val params = window.attributes
@@ -146,7 +145,7 @@ class MainActivity : AppCompatActivity() {
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // NEW: Request to ignore battery optimization
+        // 1. request to ignore battery optimization
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
@@ -169,7 +168,6 @@ class MainActivity : AppCompatActivity() {
             startService()
         }
     }
-
 
     private fun requestBatteryOptimizationExemption() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
@@ -203,8 +201,8 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = true
             updateButtonState()
             addLog("Service started successfully!")
-        } catch (e: Exception) {
-            addLog("ERROR starting service: ${e.message}")
+        } catch (error: Exception) {
+            addLog("ERROR starting service: ${error.message}")
         }
     }
 
@@ -217,16 +215,12 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = false
             updateButtonState()
             addLog("Service stopped successfully!")
-        } catch (e: Exception) {
-            addLog("ERROR stopping service: ${e.message}")
+        } catch (error: Exception) {
+            addLog("ERROR stopping service: ${error.message}")
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         if (requestCode == PERMISSION_REQUEST_CODE) {
@@ -235,8 +229,8 @@ class MainActivity : AppCompatActivity() {
             if (allGranted) {
                 addLog("All permissions granted!")
                 requestBatteryOptimizationExemption()
+                loadSimSelection() // 1. load SIM selection AFTER permissions granted
                 startService()
-                loadSimSelection()
             } else {
                 addLog("ERROR: Some permissions were denied")
                 val deniedPermissions = permissions.filterIndexed { index, _ ->
@@ -253,7 +247,7 @@ class MainActivity : AppCompatActivity() {
             val logEntry = "[$timestamp] $message\n"
             logBuffer.append(logEntry)
 
-            // Keep only last 500 lines
+            // 1. keep only last 500 lines
             val lines = logBuffer.lines()
             if (lines.size > 500) {
                 logBuffer.clear()
@@ -275,7 +269,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadSimSelection() {
-        // Multi-SIM APIs require API 22+
+        // 1. multi-SIM APIs require API 22+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
             addLog("Android version too old for multi-SIM support")
             return
@@ -301,8 +295,6 @@ class MainActivity : AppCompatActivity() {
         radioGroup.removeAllViews()
 
         val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-
-        // Immutable – value never changes after reading
         val selectedSubId = prefs.getInt("selected_sim", subs[0].subscriptionId)
 
         for (sub in subs) {
@@ -320,15 +312,10 @@ class MainActivity : AppCompatActivity() {
 
         radioGroup.setOnCheckedChangeListener { group, checkedId ->
             val selected = group.findViewById<RadioButton>(checkedId).tag as Int
-
-            // Modern KTX way
-            prefs.edit {
-                putInt("selected_sim", selected)
-            }
-
+            prefs.edit { putInt("selected_sim", selected) }
             addLog("Selected SIM changed to subId $selected")
         }
 
-        addLog("Dual SIM detected - selection UI shown")
+        addLog("Dual SIM detected - selection UI shown (${subs.size} SIMs)")
     }
 }
