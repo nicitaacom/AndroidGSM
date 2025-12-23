@@ -176,7 +176,7 @@ class GsmService : Service() {
                 }
                 MainActivity.log("Starting call to: $number")
 
-                // 1. set callbacks
+                // 1. set callbacks BEFORE starting call
                 gsmDialer?.setCallConnectedCallback {
                     MainActivity.log("Call connected (OFFHOOK) - starting audio capture")
                     audioStreamHandler?.startAudioCapture()
@@ -190,16 +190,25 @@ class GsmService : Service() {
                     pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                 }
 
-                // 2. Start call directly with screen-on intent
+                // 2. start call with error handling
                 try {
                     val callIntent = Intent(this, CallInitiatorActivity::class.java).apply {
                         putExtra("number", number)
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     }
                     startActivity(callIntent)
-                    MainActivity.log("Call initiated directly to $number")
+                    MainActivity.log("CallInitiatorActivity launched for $number")
                 } catch (error: Exception) {
-                    MainActivity.log("ERROR starting call activity: ${error.message}")
+                    MainActivity.log("ERROR launching CallInitiatorActivity: ${error.message}")
+                    error.printStackTrace()
+
+                    // Fallback: try direct call via GsmDialer
+                    try {
+                        gsmDialer?.startCall(number)
+                    } catch (fallbackError: Exception) {
+                        MainActivity.log("ERROR in fallback call: ${fallbackError.message}")
+                        fallbackError.printStackTrace()
+                    }
                 }
             }
 
