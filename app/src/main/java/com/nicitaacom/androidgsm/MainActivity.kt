@@ -40,7 +40,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
-        private const val READ_PHONE_STATE_REQUEST = 101
         private var instance: WeakReference<MainActivity>? = null
 
         fun log(message: String) {
@@ -63,8 +62,7 @@ class MainActivity : AppCompatActivity() {
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
 
         toggleButton.setOnClickListener {
-            if (isServiceRunning) stopService()
-            else requestPermissionsAndStart()
+            if (isServiceRunning) stopService() else requestPermissionsAndStart()
         }
 
         updateButtonState()
@@ -74,9 +72,13 @@ class MainActivity : AppCompatActivity() {
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
 
         checkServiceStatus()
-        initSimSelection()
 
-        // Keep app always visible (moves to recent apps but stays "open")
+        // 1. load SIM selection ONLY if permissions granted
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            loadSimSelection()
+        }
+
+        // 2. keep app always visible (moves to recent apps but stays "open")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         addLog("Screen will stay on while app is active")
     }
@@ -84,7 +86,7 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (isServiceRunning) {
-            // Keep screen on while app in foreground
+            // 1. keep screen on while app in foreground
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             val params = window.attributes
             originalBrightness = params.screenBrightness
@@ -92,13 +94,12 @@ class MainActivity : AppCompatActivity() {
             window.attributes = params
             addLog("Screen kept on and dimmed for continuous operation")
         }
-        initSimSelection() // Re-check on resume in case permissions changed
     }
 
     override fun onPause() {
         super.onPause()
         if (isServiceRunning) {
-            // Restore normal screen behavior
+            // 1. restore normal screen behavior
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (originalBrightness != -1f) {
                 val params = window.attributes
@@ -129,7 +130,6 @@ class MainActivity : AppCompatActivity() {
     private fun requestPermissionsAndStart() {
         val permissions = mutableListOf(
             Manifest.permission.CALL_PHONE,
-            Manifest.permission.ANSWER_PHONE_CALLS,
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.MODIFY_AUDIO_SETTINGS,
@@ -141,10 +141,11 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) permissions.add(Manifest.permission.FOREGROUND_SERVICE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            permissions.add(Manifest.permission.USE_FULL_SCREEN_INTENT)
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
-        // NEW: Request to ignore battery optimization
+        // 1. request to ignore battery optimization
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
             if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
@@ -200,8 +201,8 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = true
             updateButtonState()
             addLog("Service started successfully!")
-        } catch (e: Exception) {
-            addLog("ERROR starting service: ${e.message}")
+        } catch (error: Exception) {
+            addLog("ERROR starting service: ${error.message}")
         }
     }
 
@@ -214,16 +215,12 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = false
             updateButtonState()
             addLog("Service stopped successfully!")
-        } catch (e: Exception) {
-            addLog("ERROR stopping service: ${e.message}")
+        } catch (error: Exception) {
+            addLog("ERROR stopping service: ${error.message}")
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
 
         if (requestCode == PERMISSION_REQUEST_CODE) {
@@ -232,28 +229,14 @@ class MainActivity : AppCompatActivity() {
             if (allGranted) {
                 addLog("All permissions granted!")
                 requestBatteryOptimizationExemption()
+                loadSimSelection() // 1. load SIM selection AFTER permissions granted
                 startService()
-                initSimSelection()
             } else {
                 addLog("ERROR: Some permissions were denied")
                 val deniedPermissions = permissions.filterIndexed { index, _ ->
                     grantResults[index] != PackageManager.PERMISSION_GRANTED
                 }
                 addLog("Denied: ${deniedPermissions.joinToString()}")
-            }
-        } else if (requestCode == READ_PHONE_STATE_REQUEST) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                addLog("✅ READ_PHONE_STATE granted - loading SIM selection")
-                loadSimSelection()
-            } else {
-                addLog("⚠️ READ_PHONE_STATE denied - SIM selection disabled")
-                if (!ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.READ_PHONE_STATE)) {
-                    addLog("Permission denied permanently - go to app settings to grant it")
-                    // Optional: Add a button to open settings (you can add this to your layout if needed)
-                    // val settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                    // settingsIntent.data = Uri.fromParts("package", packageName, null)
-                    // startActivity(settingsIntent)
-                }
             }
         }
     }
@@ -264,7 +247,7 @@ class MainActivity : AppCompatActivity() {
             val logEntry = "[$timestamp] $message\n"
             logBuffer.append(logEntry)
 
-            // Keep only last 500 lines
+            // 1. keep only last 500 lines
             val lines = logBuffer.lines()
             if (lines.size > 500) {
                 logBuffer.clear()
@@ -285,37 +268,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun initSimSelection() {
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
-            loadSimSelection()
-        } else {
-            requestReadPhoneStatePermission()
-        }
-    }
-
-    private fun requestReadPhoneStatePermission() {
-        if (ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.READ_PHONE_STATE)) {
-            addLog("READ_PHONE_STATE needed for SIM selection and call monitoring - please grant")
-        }
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_PHONE_STATE), READ_PHONE_STATE_REQUEST)
-    }
-
     private fun loadSimSelection() {
-        // Multi-SIM APIs require API 22+
+        // 1. multi-SIM APIs require API 22+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
             addLog("Android version too old for multi-SIM support")
             return
         }
 
-        val subMgr = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
-
-        val subs = try {
-            subMgr.activeSubscriptionInfoList ?: emptyList()
-        } catch (e: SecurityException) {
-            addLog("⚠️ SecurityException accessing subscriptions: ${e.message} - SIM selection disabled")
-            findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
+            addLog("⚠️ READ_PHONE_STATE permission missing - SIM selection disabled")
             return
         }
+
+        val subMgr = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+        val subs = subMgr.activeSubscriptionInfoList ?: emptyList()
 
         if (subs.size < 2) {
             addLog("Single SIM detected - no selection UI shown")
@@ -329,8 +295,6 @@ class MainActivity : AppCompatActivity() {
         radioGroup.removeAllViews()
 
         val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-
-        // Immutable – value never changes after reading
         val selectedSubId = prefs.getInt("selected_sim", subs[0].subscriptionId)
 
         for (sub in subs) {
@@ -348,15 +312,10 @@ class MainActivity : AppCompatActivity() {
 
         radioGroup.setOnCheckedChangeListener { group, checkedId ->
             val selected = group.findViewById<RadioButton>(checkedId).tag as Int
-
-            // Modern KTX way
-            prefs.edit {
-                putInt("selected_sim", selected)
-            }
-
+            prefs.edit { putInt("selected_sim", selected) }
             addLog("Selected SIM changed to subId $selected")
         }
 
-        addLog("Dual SIM detected - selection UI shown")
+        addLog("Dual SIM detected - selection UI shown (${subs.size} SIMs)")
     }
 }
