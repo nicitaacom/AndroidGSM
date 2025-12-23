@@ -25,8 +25,11 @@ class CallInitiatorActivity : AppCompatActivity() {
             )
         }
 
-        // 2. Keep screen on
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // 2. Keep screen on + dismiss keyguard
+        window.addFlags(
+            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD
+        )
 
         // 3. Dismiss keyguard if needed (API 26+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

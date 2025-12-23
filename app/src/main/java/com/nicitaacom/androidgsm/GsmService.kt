@@ -23,23 +23,34 @@ class GsmService : Service() {
         private const val NOTIFICATION_ID = 1
         private const val CALL_NOTIFICATION_ID = 2
         private const val CHANNEL_ID = "gsm_gateway_channel"
+        private const val CALL_CHANNEL_ID = "gsm_call_channel"
     }
 
     override fun onCreate() {
         super.onCreate()
         MainActivity.log("GsmService: onCreate called")
 
-        // 1. Create notification channel FIRST
+        // 1. Create notification channels FIRST
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val manager = getSystemService(NotificationManager::class.java)
+
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "GSM Gateway Service",
                 NotificationManager.IMPORTANCE_HIGH
             )
             channel.description = "GSM Gateway background service"
-            val manager = getSystemService(NotificationManager::class.java)
             manager?.createNotificationChannel(channel)
-            MainActivity.log("Notification channel created")
+            MainActivity.log("Service notification channel created")
+
+            val callChannel = NotificationChannel(
+                CALL_CHANNEL_ID,
+                "GSM Calls",
+                NotificationManager.IMPORTANCE_HIGH
+            )
+            callChannel.description = "Notifications for initiating calls"
+            manager?.createNotificationChannel(callChannel)
+            MainActivity.log("Call notification channel created")
         }
 
         // 2. acquire wake lock if possible
@@ -179,16 +190,39 @@ class GsmService : Service() {
                     pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                 }
 
-                // 2. Launch CallInitiatorActivity directly (no notification needed if USE_FULL_SCREEN_INTENT granted)
+                // 2. Use full-screen notification to launch CallInitiatorActivity
+                // This handles locked/screen-off devices better
                 try {
                     val callIntent = Intent(this, CallInitiatorActivity::class.java).apply {
                         putExtra("number", number)
                         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
                     }
-                    startActivity(callIntent)
-                    MainActivity.log("CallInitiatorActivity launched")
+
+                    val pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
+
+                    val pendingIntent = PendingIntent.getActivity(
+                        this,
+                        0,
+                        callIntent,
+                        pendingIntentFlags
+                    )
+
+                    val builder = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
+                        .setContentTitle("Initiating GSM Call")
+                        .setContentText("Tap to call $number...")
+                        .setSmallIcon(R.mipmap.ic_launcher)
+                        .setPriority(NotificationCompat.PRIORITY_MAX)
+                        .setCategory(NotificationCompat.CATEGORY_CALL)
+                        .setFullScreenIntent(pendingIntent, true)
+                        .setAutoCancel(true)
+                        .setTimeoutAfter(30000) // Longer timeout
+
+                    val manager = getSystemService(NotificationManager::class.java)
+                    manager?.notify(CALL_NOTIFICATION_ID, builder.build())
+                    MainActivity.log("Full-screen notification posted to initiate call")
                 } catch (error: Exception) {
-                    MainActivity.log("ERROR launching CallInitiatorActivity: ${error.message}")
+                    MainActivity.log("ERROR posting call notification: ${error.message}")
                 }
             }
 

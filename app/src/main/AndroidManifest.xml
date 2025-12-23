@@ -53,11 +53,20 @@
         </activity>
 
         <activity android:name=".CallInitiatorActivity"
-                  android:exported="false"
+                  android:exported="true"
+                  android:launchMode="singleTask"
+                  android:showWhenLocked="true"
+                  android:turnScreenOn="true"
                   android:theme="@android:style/Theme.Translucent.NoTitleBar" />  <!-- Transparent -->
 
         <service android:name=".GsmService" android:enabled="true" android:exported="false"
                  android:foregroundServiceType="connectedDevice|phoneCall|mediaPlayback" />
+
+        <receiver android:name=".BootReceiver" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
     </application>
 

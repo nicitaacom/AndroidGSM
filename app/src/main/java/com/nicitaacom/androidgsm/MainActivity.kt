@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.telephony.SubscriptionManager
 import android.view.View
+import android.view.WindowManager
 import android.widget.Button
 import android.widget.RadioButton
 import android.widget.RadioGroup
@@ -35,6 +36,7 @@ class MainActivity : AppCompatActivity() {
 
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private var originalBrightness = -1f
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
@@ -75,6 +77,33 @@ class MainActivity : AppCompatActivity() {
 
         checkServiceStatus()
         loadSimSelection()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (isServiceRunning) {
+            // Keep screen on while app in foreground
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            val params = window.attributes
+            originalBrightness = params.screenBrightness
+            params.screenBrightness = 0.01f // Very dim to save battery
+            window.attributes = params
+            addLog("Screen kept on and dimmed for continuous operation")
+        }
+    }
+
+    override fun onPause() {
+        super.onPause()
+        if (isServiceRunning) {
+            // Restore normal screen behavior
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (originalBrightness != -1f) {
+                val params = window.attributes
+                params.screenBrightness = originalBrightness
+                window.attributes = params
+            }
+            addLog("Restored normal screen brightness")
+        }
     }
 
     private fun checkServiceStatus() {
