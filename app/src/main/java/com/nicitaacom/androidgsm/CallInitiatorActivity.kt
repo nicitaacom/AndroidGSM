@@ -76,12 +76,12 @@ class CallInitiatorActivity : AppCompatActivity() {
 
                                     if (subInfo != null) {
                                         val targetAccount = phoneAccounts.find { account ->
-                                            // Match by SIM slot index
-                                            account.id.contains(subInfo.simSlotIndex.toString())
+                                            // Match by SIM slot index or subId
+                                            account.id.contains(subInfo.simSlotIndex.toString()) || account.id.contains(selectedSubId.toString())
                                         }
 
                                         if (targetAccount != null) {
-                                            putExtra("android.telecom.extra.PHONE_ACCOUNT_HANDLE", targetAccount)
+                                            putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, targetAccount)
                                             MainActivity.log("Using SIM slot ${subInfo.simSlotIndex + 1} (SubId: $selectedSubId)")
                                         } else {
                                             MainActivity.log("WARNING: Could not find PhoneAccount for SubId $selectedSubId")
@@ -118,8 +118,8 @@ class CallInitiatorActivity : AppCompatActivity() {
                         MainActivity.log("Error bringing MainActivity to front from CallInitiator: ${e.message}")
                     }
                     finish()
-                }, 200)
-            }, 500)
+                }, 1000)
+            }, 300)
 
         } catch (error: Exception) {
             MainActivity.log("ERROR in CallInitiatorActivity: ${error.message}")

@@ -48,9 +48,12 @@ class PusherClient(
                             if (!isSubscribed) subscribeToChannels()  // Only subscribe if not already subscribed
                             sendEvent("CONNECTED")
                             startHeartbeat()
-                        } else {
+                        } else if (change.currentState == ConnectionState.DISCONNECTED) {
+                            val channelName = "private-device-${config.DEVICE_TOKEN}"
+                            pusher?.unsubscribe(channelName)
+                            MainActivity.log("Unsubscribed from $channelName on disconnect")
+                            isSubscribed = false
                             stopHeartbeat()
-                            if (change.currentState == ConnectionState.DISCONNECTED) isSubscribed = false
                         }
                     } catch (error: Exception) {
                         MainActivity.log("ERROR in onConnectionStateChange: ${error.message}")
@@ -86,6 +89,9 @@ class PusherClient(
 
     fun disconnect() {
         stopHeartbeat()
+        val channelName = "private-device-${config.DEVICE_TOKEN}"
+        pusher?.unsubscribe(channelName)
+        MainActivity.log("Unsubscribed from $channelName on manual disconnect")
         isSubscribed = false
         pusher?.disconnect()
         scope.cancel()

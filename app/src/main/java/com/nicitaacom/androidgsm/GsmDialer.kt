@@ -96,19 +96,26 @@ class GsmDialer(private val context: Context) {
             val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             val selectedSubId = prefs.getInt("selected_sim", -1)
 
-            var slotIndex = -1
             var handle: PhoneAccountHandle? = null
 
             if (selectedSubId != -1 && hasPermission(Manifest.permission.READ_PHONE_STATE)) {
+                val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+                val phoneAccounts = telecomManager.callCapablePhoneAccounts
+
                 val subMgr = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
                 val subInfo = subMgr.getActiveSubscriptionInfo(selectedSubId)
+
                 if (subInfo != null) {
-                    slotIndex = subInfo.simSlotIndex
-                    handle = PhoneAccountHandle(
-                        ComponentName("com.android.phone", "com.android.services.telephony.TelephonyConnectionService"),
-                        selectedSubId.toString()
-                    )
-                    MainActivity.log("Using selected SIM subId: $selectedSubId (slot: $slotIndex)")
+                    val targetAccount = phoneAccounts.find { account ->
+                        account.id.contains(subInfo.simSlotIndex.toString()) || account.id.contains(selectedSubId.toString())
+                    }
+
+                    if (targetAccount != null) {
+                        handle = targetAccount
+                        MainActivity.log("Using PhoneAccountHandle for SIM slot ${subInfo.simSlotIndex + 1} (SubId: $selectedSubId)")
+                    } else {
+                        MainActivity.log("WARNING: Could not find PhoneAccount for SubId $selectedSubId - using default")
+                    }
                 } else {
                     MainActivity.log("Selected subId invalid or inactive - falling back to default SIM")
                 }
@@ -117,11 +124,7 @@ class GsmDialer(private val context: Context) {
             }
 
             // 6. verify SIM state (use default if no specific slot)
-            val simState = if (slotIndex != -1 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                telephonyManager?.getSimState(slotIndex) ?: TelephonyManager.SIM_STATE_UNKNOWN
-            } else {
-                telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
-            }
+            val simState = telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
 
             if (simState != TelephonyManager.SIM_STATE_READY) {
                 MainActivity.log("ERROR: SIM not ready (state: $simState)")
