@@ -1,6 +1,7 @@
 package com.nicitaacom.androidgsm
 
 import android.Manifest
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -38,6 +39,11 @@ class MainActivity : AppCompatActivity() {
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private var originalBrightness = -1f
 
+    private val activityManager get() = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+
+    private fun isInLockTaskMode(): Boolean =
+        activityManager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
+
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
         private var instance: WeakReference<MainActivity>? = null
@@ -73,12 +79,10 @@ class MainActivity : AppCompatActivity() {
 
         checkServiceStatus()
 
-        // 1. load SIM selection ONLY if permissions granted
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
             loadSimSelection()
         }
 
-        // 2. keep app always visible (moves to recent apps but stays "open")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         addLog("Screen will stay on while app is active")
     }
@@ -86,16 +90,14 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (isServiceRunning) {
-            // 1. keep screen on while app in foreground
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             val params = window.attributes
-            originalBrightness = params.screenBrightness
-            params.screenBrightness = 0.01f // TODO - this screen dim doesn't work fix - should be very dim to save battery
+            originalBrightness = if (params.screenBrightness < 0f) 0.5f else params.screenBrightness
+            params.screenBrightness = 0.01f
             window.attributes = params
             addLog("Screen kept on and dimmed for continuous operation")
 
-            // Pin app if service running (ensure always open)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && !isInLockTaskMode) {
+            if (!isInLockTaskMode()) {
                 startLockTask()
                 addLog("App pinned to prevent minimizing")
             }
@@ -103,9 +105,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onPause() {
-        super.onPause()
+        super.onResume()
         if (isServiceRunning) {
-            // 1. restore normal screen behavior
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (originalBrightness != -1f) {
                 val params = window.attributes
@@ -122,49 +123,39 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtonState() {
-        if (isServiceRunning) {
-            toggleButton.text = "STOP SERVICE"
-            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
-            statusTextView.text = "Status: Active"
-        } else {
-            toggleButton.text = "START SERVICE"
-            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-            statusTextView.text = "Status: Inactive"
-        }
+        toggleButton.text = if (isServiceRunning) "STOP SERVICE" else "START SERVICE"
+        toggleButton.setBackgroundColor(ContextCompat.getColor(this, if (isServiceRunning) R.color.error_red else R.color.brand_green))
+        statusTextView.text = if (isServiceRunning) "Status: Active" else "Status: Inactive"
     }
 
     private fun requestPermissionsAndStart() {
-        val permissions = mutableListOf(
-            Manifest.permission.CALL_PHONE,
-            Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.READ_PHONE_STATE,
-            Manifest.permission.MODIFY_AUDIO_SETTINGS,
-            Manifest.permission.INTERNET,
-            Manifest.permission.ACCESS_NETWORK_STATE,
-            Manifest.permission.WAKE_LOCK
-        )
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) permissions.add(Manifest.permission.FOREGROUND_SERVICE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            permissions.add(Manifest.permission.USE_FULL_SCREEN_INTENT)
-            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
-        }
-
-        // 1. request to ignore battery optimization
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
-                addLog("Requesting battery optimization exemption...")
-                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
-                    data = "package:$packageName".toUri()
-                }
-                startActivity(intent)
+        val permissions = mutableListOf<String>().apply {
+            add(Manifest.permission.CALL_PHONE)
+            add(Manifest.permission.RECORD_AUDIO)
+            add(Manifest.permission.READ_PHONE_STATE)
+            add(Manifest.permission.MODIFY_AUDIO_SETTINGS)
+            add(Manifest.permission.INTERNET)
+            add(Manifest.permission.ACCESS_NETWORK_STATE)
+            add(Manifest.permission.WAKE_LOCK)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) add(Manifest.permission.FOREGROUND_SERVICE)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                add(Manifest.permission.USE_FULL_SCREEN_INTENT)
+                add(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
 
-        val missingPermissions = permissions.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+        if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+            addLog("Requesting battery optimization exemption...")
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = "package:$packageName".toUri()
+            }
+            startActivity(intent)
+        }
+
+        val missingPermissions = permissions.filter { permission: String ->
+            ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
         }
 
         if (missingPermissions.isNotEmpty()) {
@@ -176,11 +167,6 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestBatteryOptimizationExemption() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-            addLog("Battery optimization exemption not supported on this Android version")
-            return
-        }
-
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
             addLog("Requesting battery optimization exemption...")
@@ -197,7 +183,6 @@ class MainActivity : AppCompatActivity() {
         try {
             addLog("Starting GSM Gateway Service...")
             val intent = Intent(this, GsmService::class.java)
-
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)
             } else {
@@ -208,8 +193,7 @@ class MainActivity : AppCompatActivity() {
             updateButtonState()
             addLog("Service started successfully!")
 
-            // Pin app to keep it always open (kiosk mode)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            if (!isInLockTaskMode()) {
                 startLockTask()
                 addLog("App pinned in kiosk mode to stay open")
             }
@@ -220,8 +204,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopService() {
         try {
-            // Unpin app first
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && isInLockTaskMode) {
+            if (isInLockTaskMode()) {
                 stopLockTask()
                 addLog("App unpinned from kiosk mode")
             }
@@ -247,7 +230,7 @@ class MainActivity : AppCompatActivity() {
             if (allGranted) {
                 addLog("All permissions granted!")
                 requestBatteryOptimizationExemption()
-                loadSimSelection() // 1. load SIM selection AFTER permissions granted
+                loadSimSelection()
                 startService()
             } else {
                 addLog("ERROR: Some permissions were denied")
@@ -265,7 +248,6 @@ class MainActivity : AppCompatActivity() {
             val logEntry = "[$timestamp] $message\n"
             logBuffer.append(logEntry)
 
-            // 1. keep only last 500 lines
             val lines = logBuffer.lines()
             if (lines.size > 500) {
                 logBuffer.clear()
@@ -284,20 +266,13 @@ class MainActivity : AppCompatActivity() {
         if (instance?.get() == this) {
             instance = null
         }
-        // Ensure unpin on destroy if service running
-        if (isServiceRunning && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && isInLockTaskMode) {
+        if (isServiceRunning && isInLockTaskMode()) {
             stopLockTask()
             addLog("App unpinned on destroy")
         }
     }
 
     private fun loadSimSelection() {
-        // 1. multi-SIM APIs require API 22+
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
-            addLog("Android version too old for multi-SIM support")
-            return
-        }
-
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
             addLog("⚠️ READ_PHONE_STATE permission missing - SIM selection disabled")
             return
@@ -322,7 +297,7 @@ class MainActivity : AppCompatActivity() {
 
         for (sub in subs) {
             val radio = RadioButton(this).apply {
-                id = View.generateViewId() // Generate unique ID for each radio button
+                id = View.generateViewId()
                 text = getString(R.string.sim_label, sub.simSlotIndex + 1, sub.carrierName)
                 tag = sub.subscriptionId
                 setTextColor(ContextCompat.getColor(context, R.color.text_primary))
@@ -332,7 +307,6 @@ class MainActivity : AppCompatActivity() {
 
             radioGroup.addView(radio)
 
-            // Check the radio button AFTER adding it to the group
             if (sub.subscriptionId == selectedSubId) {
                 radioGroup.check(radio.id)
                 addLog("SIM ${sub.simSlotIndex + 1} (${sub.carrierName}) selected by default")
