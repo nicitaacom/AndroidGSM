@@ -38,11 +38,7 @@ class MainActivity : AppCompatActivity() {
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private var originalBrightness = -1f
-
-    private val activityManager get() = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-
-    private fun isInLockTaskMode(): Boolean =
-        activityManager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE
+    private var originalScreenTimeout: Long = -1
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
@@ -97,15 +93,21 @@ class MainActivity : AppCompatActivity() {
             window.attributes = params
             addLog("Screen kept on and dimmed for continuous operation")
 
-            if (!isInLockTaskMode()) {
-                startLockTask()
-                addLog("App pinned to prevent minimizing")
+            // Set screen timeout if not set and permission granted
+            if (originalScreenTimeout == -1L && Settings.System.canWrite(this)) {
+                try {
+                    originalScreenTimeout = Settings.System.getLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT)
+                    Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, Int.MAX_VALUE.toLong())
+                    addLog("Set screen timeout to maximum to prevent disable")
+                } catch (e: Exception) {
+                    addLog("Error setting screen timeout: ${e.message}")
+                }
             }
         }
     }
 
     override fun onPause() {
-        super.onResume()
+        super.onPause()
         if (isServiceRunning) {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             if (originalBrightness != -1f) {
@@ -154,6 +156,15 @@ class MainActivity : AppCompatActivity() {
             startActivity(intent)
         }
 
+        // Request write settings if needed
+        if (!Settings.System.canWrite(this)) {
+            addLog("Requesting write settings permission to control screen timeout...")
+            val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                data = "package:$packageName".toUri()
+            }
+            startActivity(intent)
+        }
+
         val missingPermissions = permissions.filter { permission: String ->
             ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
         }
@@ -192,11 +203,6 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = true
             updateButtonState()
             addLog("Service started successfully!")
-
-            if (!isInLockTaskMode()) {
-                startLockTask()
-                addLog("App pinned in kiosk mode to stay open")
-            }
         } catch (error: Exception) {
             addLog("ERROR starting service: ${error.message}")
         }
@@ -204,11 +210,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopService() {
         try {
-            if (isInLockTaskMode()) {
-                stopLockTask()
-                addLog("App unpinned from kiosk mode")
-            }
-
             addLog("Stopping GSM Gateway Service...")
             val intent = Intent(this, GsmService::class.java)
             stopService(intent)
@@ -216,6 +217,17 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = false
             updateButtonState()
             addLog("Service stopped successfully!")
+
+            // Restore screen timeout
+            if (originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
+                try {
+                    Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
+                    addLog("Restored original screen timeout")
+                } catch (e: Exception) {
+                    addLog("Error restoring screen timeout: ${e.message}")
+                }
+                originalScreenTimeout = -1
+            }
         } catch (error: Exception) {
             addLog("ERROR stopping service: ${error.message}")
         }
@@ -265,10 +277,6 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         if (instance?.get() == this) {
             instance = null
-        }
-        if (isServiceRunning && isInLockTaskMode()) {
-            stopLockTask()
-            addLog("App unpinned on destroy")
         }
     }
 
