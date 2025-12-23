@@ -90,9 +90,15 @@ class MainActivity : AppCompatActivity() {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             val params = window.attributes
             originalBrightness = params.screenBrightness
-            params.screenBrightness = 0.01f // Very dim to save battery
+            params.screenBrightness = 0.01f // TODO - this screen dim doesn't work fix - should be very dim to save battery
             window.attributes = params
             addLog("Screen kept on and dimmed for continuous operation")
+
+            // Pin app if service running (ensure always open)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && !isInLockTaskMode) {
+                startLockTask()
+                addLog("App pinned to prevent minimizing")
+            }
         }
     }
 
@@ -201,6 +207,12 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = true
             updateButtonState()
             addLog("Service started successfully!")
+
+            // Pin app to keep it always open (kiosk mode)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                startLockTask()
+                addLog("App pinned in kiosk mode to stay open")
+            }
         } catch (error: Exception) {
             addLog("ERROR starting service: ${error.message}")
         }
@@ -208,6 +220,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopService() {
         try {
+            // Unpin app first
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && isInLockTaskMode) {
+                stopLockTask()
+                addLog("App unpinned from kiosk mode")
+            }
+
             addLog("Stopping GSM Gateway Service...")
             val intent = Intent(this, GsmService::class.java)
             stopService(intent)
@@ -265,6 +283,11 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         if (instance?.get() == this) {
             instance = null
+        }
+        // Ensure unpin on destroy if service running
+        if (isServiceRunning && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && isInLockTaskMode) {
+            stopLockTask()
+            addLog("App unpinned on destroy")
         }
     }
 
