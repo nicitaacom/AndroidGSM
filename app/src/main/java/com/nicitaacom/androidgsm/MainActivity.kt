@@ -77,6 +77,11 @@ class MainActivity : AppCompatActivity() {
 
         checkServiceStatus()
         loadSimSelection()
+
+        // Keep app always visible (moves to recent apps but stays "open")
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        addLog("Screen will stay on while app is active")
+
     }
 
     override fun onResume() {
@@ -134,17 +139,23 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.WAKE_LOCK
         )
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            permissions.add(Manifest.permission.FOREGROUND_SERVICE)
-        }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
-
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) permissions.add(Manifest.permission.FOREGROUND_SERVICE)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             permissions.add(Manifest.permission.USE_FULL_SCREEN_INTENT)
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+
+        // NEW: Request to ignore battery optimization
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
+                addLog("Requesting battery optimization exemption...")
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = "package:$packageName".toUri()
+                }
+                startActivity(intent)
+            }
         }
 
         val missingPermissions = permissions.filter {
@@ -153,13 +164,8 @@ class MainActivity : AppCompatActivity() {
 
         if (missingPermissions.isNotEmpty()) {
             addLog("Requesting ${missingPermissions.size} permissions...")
-            ActivityCompat.requestPermissions(
-                this,
-                missingPermissions.toTypedArray(),
-                PERMISSION_REQUEST_CODE
-            )
+            ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), PERMISSION_REQUEST_CODE)
         } else {
-            requestBatteryOptimizationExemption()
             startService()
         }
     }

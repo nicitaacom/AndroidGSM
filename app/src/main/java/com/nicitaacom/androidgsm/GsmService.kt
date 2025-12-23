@@ -190,39 +190,16 @@ class GsmService : Service() {
                     pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                 }
 
-                // 2. Use full-screen notification to launch CallInitiatorActivity
-                // This handles locked/screen-off devices better
+                // 2. Start call directly with screen-on intent
                 try {
                     val callIntent = Intent(this, CallInitiatorActivity::class.java).apply {
                         putExtra("number", number)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     }
-
-                    val pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) PendingIntent.FLAG_MUTABLE else 0
-
-                    val pendingIntent = PendingIntent.getActivity(
-                        this,
-                        0,
-                        callIntent,
-                        pendingIntentFlags
-                    )
-
-                    val builder = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
-                        .setContentTitle("Initiating GSM Call")
-                        .setContentText("Tap to call $number...")
-                        .setSmallIcon(R.mipmap.ic_launcher)
-                        .setPriority(NotificationCompat.PRIORITY_MAX)
-                        .setCategory(NotificationCompat.CATEGORY_CALL)
-                        .setFullScreenIntent(pendingIntent, true)
-                        .setAutoCancel(true)
-                        .setTimeoutAfter(30000) // Longer timeout
-
-                    val manager = getSystemService(NotificationManager::class.java)
-                    manager?.notify(CALL_NOTIFICATION_ID, builder.build())
-                    MainActivity.log("Full-screen notification posted to initiate call")
+                    startActivity(callIntent)
+                    MainActivity.log("Call initiated directly to $number")
                 } catch (error: Exception) {
-                    MainActivity.log("ERROR posting call notification: ${error.message}")
+                    MainActivity.log("ERROR starting call activity: ${error.message}")
                 }
             }
 
