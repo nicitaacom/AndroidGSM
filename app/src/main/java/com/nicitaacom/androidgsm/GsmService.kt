@@ -34,7 +34,7 @@ class GsmService : Service() {
             val channel = NotificationChannel(
                 CHANNEL_ID,
                 "GSM Gateway Service",
-                NotificationManager.IMPORTANCE_HIGH  // For full-screen support
+                NotificationManager.IMPORTANCE_HIGH
             )
             channel.description = "GSM Gateway background service"
             val manager = getSystemService(NotificationManager::class.java)
@@ -165,9 +165,9 @@ class GsmService : Service() {
                 }
                 MainActivity.log("Starting call to: $number")
 
-                // 1. set callback to start audio when call connects
+                // 1. set callbacks
                 gsmDialer?.setCallConnectedCallback {
-                    MainActivity.log("Call connected - starting audio capture")
+                    MainActivity.log("Call connected (OFFHOOK) - starting audio capture")
                     audioStreamHandler?.startAudioCapture()
                     pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
                 }
@@ -179,29 +179,17 @@ class GsmService : Service() {
                     pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                 }
 
-                // 2. Use full-screen notification to initiate call (works when locked/screen off)
-                val notificationManager = getSystemService(NotificationManager::class.java)
-                val pendingIntent = PendingIntent.getActivity(
-                    this,
-                    0,
-                    Intent(this, CallInitiatorActivity::class.java).apply {
+                // 2. Launch CallInitiatorActivity directly (no notification needed if USE_FULL_SCREEN_INTENT granted)
+                try {
+                    val callIntent = Intent(this, CallInitiatorActivity::class.java).apply {
                         putExtra("number", number)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    },
-                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-                )
-
-                val callNotification = NotificationCompat.Builder(this, CHANNEL_ID)
-                    .setContentTitle("Initiating Call")
-                    .setContentText("Tap to start call to $number")
-                    .setSmallIcon(R.mipmap.ic_launcher)
-                    .setPriority(NotificationCompat.PRIORITY_HIGH)  // Required for full-screen
-                    .setFullScreenIntent(pendingIntent, true)  // Enables lock screen display
-                    .setAutoCancel(true)
-                    .build()
-
-                notificationManager.notify(CALL_NOTIFICATION_ID, callNotification)
-                MainActivity.log("Full-screen call notification posted")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    }
+                    startActivity(callIntent)
+                    MainActivity.log("CallInitiatorActivity launched")
+                } catch (error: Exception) {
+                    MainActivity.log("ERROR launching CallInitiatorActivity: ${error.message}")
+                }
             }
 
             "CALL_ENDED" -> {

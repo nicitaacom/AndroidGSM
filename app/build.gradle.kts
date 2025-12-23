@@ -36,7 +36,7 @@ fun gitShortSuffixForRef(ref: String, length: Int = 3): String? =
         }
     }.getOrNull()
 
-val todayCommitCount: Int = gitCount("origin/production") ?: gitCount("HEAD") ?: 1
+val todayCommitCount = (gitCount("origin/production") ?: gitCount("HEAD") ?: 1).coerceAtLeast(1)
 
 // try to get a short suffix from the same refs we checked for counts
 val commitSuffix = gitShortSuffixForRef("origin/production") ?: gitShortSuffixForRef("HEAD") ?: ""

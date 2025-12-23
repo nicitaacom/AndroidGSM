@@ -44,7 +44,11 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🎤 Starting audio capture...")
 
-            // 1. set audio mode and speakerphone
+            // 1. IMPORTANT: VOICE_DOWNLINK only captures audio during ACTIVE call (OFFHOOK state)
+            // Dialing tones (beeps) during RINGING state are NOT captured - this is an Android limitation
+            // Audio capture will work once call connects (when far end picks up)
+
+            // 2. set audio mode and speakerphone
             audioManager.mode = AudioManager.MODE_IN_CALL
             audioManager.isSpeakerphoneOn = true
 
@@ -79,7 +83,7 @@ class AudioStreamHandler(
                 captureAndStreamAudio(bufferSize)
             }
 
-            MainActivity.log("✅ Audio capture started")
+            MainActivity.log("✅ Audio capture started (active when call connects)")
         } catch (e: SecurityException) {
             MainActivity.log("ERROR: RECORD_AUDIO permission not granted")
             Log.e(TAG, "Security exception", e)
@@ -88,6 +92,7 @@ class AudioStreamHandler(
             Log.e(TAG, "Failed to start audio capture", e)
         }
     }
+
 
     private suspend fun captureAndStreamAudio(bufferSize: Int) = withContext(Dispatchers.IO) {
         val buffer = ShortArray(bufferSize / 2)

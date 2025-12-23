@@ -22,6 +22,7 @@ class PusherClient(
     private var pusher: Pusher? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var heartbeatJob: Job? = null
+    private var isSubscribed = false  // Track subscription state
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -32,7 +33,6 @@ class PusherClient(
         try {
             val options = PusherOptions().apply {
                 setCluster(config.PUSHER_CLUSTER)
-                // 1. custom authorizer for private channels
                 authorizer = com.pusher.client.util.HttpAuthorizer("${config.BACKEND_URL}/pusher/auth").apply {
                     setHeaders(mapOf("Authorization" to "Bearer ${config.BACKEND_BEARER}"))
                 }
@@ -45,12 +45,12 @@ class PusherClient(
                     try {
                         MainActivity.log("Pusher: ${change.previousState} → ${change.currentState}")
                         if (change.currentState == ConnectionState.CONNECTED) {
-                            subscribeToChannels()
-                            sendEvent("CONNECTED") // 2. tell backend we're online
-                            startHeartbeat() // so layer (server.ts) will understand that connection is still alive
-                        }
-                        else {
+                            if (!isSubscribed) subscribeToChannels()  // Only subscribe if not already subscribed
+                            sendEvent("CONNECTED")
+                            startHeartbeat()
+                        } else {
                             stopHeartbeat()
+                            if (change.currentState == ConnectionState.DISCONNECTED) isSubscribed = false
                         }
                     } catch (error: Exception) {
                         MainActivity.log("ERROR in onConnectionStateChange: ${error.message}")
@@ -73,12 +73,11 @@ class PusherClient(
         stopHeartbeat()
         heartbeatJob = scope.launch {
             while (isActive) {
-                delay(15000) // every 15s
+                delay(15000)
                 sendEvent("HEARTBEAT")
             }
         }
     }
-
 
     private fun stopHeartbeat() {
         heartbeatJob?.cancel()
@@ -87,31 +86,9 @@ class PusherClient(
 
     fun disconnect() {
         stopHeartbeat()
+        isSubscribed = false
         pusher?.disconnect()
         scope.cancel()
-    }
-
-    private fun authPrivateChannel(channelName: String, socketId: String): String {
-        return try {
-            val url = "${config.BACKEND_URL}/pusher/auth"
-            val json = JSONObject().apply {
-                put("socket_id", socketId)
-                put("channel_name", channelName)
-            }
-
-            val request = Request.Builder()
-                .url(url)
-                .post(json.toString().toRequestBody("application/json".toMediaType()))
-                .addHeader("Authorization", "Bearer ${config.BACKEND_BEARER}")
-                .build()
-
-            val response = httpClient.newCall(request).execute()
-            response.body?.string() ?: ""
-        } catch (error: Exception) {
-            MainActivity.log("Pusher auth failed: ${error.message}")
-            error.printStackTrace()
-            ""
-        }
     }
 
     private fun subscribeToChannels() {
@@ -119,16 +96,25 @@ class PusherClient(
             val channelName = "private-device-${config.DEVICE_TOKEN}"
             MainActivity.log("Pusher: subscribing to $channelName")
 
+            // Check if already subscribed
+            pusher?.getPrivateChannel(channelName)?.let {
+                MainActivity.log("Already subscribed to $channelName")
+                isSubscribed = true
+                return
+            }
+
             val channel = pusher?.subscribePrivate(
                 channelName,
                 object : PrivateChannelEventListener {
                     override fun onAuthenticationFailure(message: String, error: Exception?) {
                         MainActivity.log("Private channel auth failed: $message")
                         error?.printStackTrace()
+                        isSubscribed = false
                     }
 
                     override fun onSubscriptionSucceeded(channelName: String) {
                         MainActivity.log("Pusher subscribed to $channelName")
+                        isSubscribed = true
                     }
 
                     override fun onEvent(event: com.pusher.client.channel.PusherEvent) {
@@ -141,11 +127,12 @@ class PusherClient(
                         }
                     }
                 },
-                "command" // Bind to command event during subscription
+                "command"
             )
         } catch (error: Exception) {
             MainActivity.log("ERROR in subscribeToChannels: ${error.message}")
             error.printStackTrace()
+            isSubscribed = false
         }
     }
 
@@ -180,7 +167,6 @@ class PusherClient(
         }
     }
 
-    // 4. unified send event via HTTP (not Pusher trigger)
     fun sendEvent(type: String, data: Map<String, Any> = emptyMap()) {
         scope.launch {
             try {
@@ -207,5 +193,4 @@ class PusherClient(
             }
         }
     }
-
 }
