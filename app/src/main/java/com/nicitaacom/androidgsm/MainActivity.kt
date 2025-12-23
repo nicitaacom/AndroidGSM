@@ -299,15 +299,21 @@ class MainActivity : AppCompatActivity() {
 
         for (sub in subs) {
             val radio = RadioButton(this).apply {
+                id = View.generateViewId() // Generate unique ID for each radio button
                 text = getString(R.string.sim_label, sub.simSlotIndex + 1, sub.carrierName)
                 tag = sub.subscriptionId
-                isChecked = sub.subscriptionId == selectedSubId
                 setTextColor(ContextCompat.getColor(context, R.color.text_primary))
                 buttonTintList = ResourcesCompat.getColorStateList(resources, R.color.brand_green, null)
                 setPadding(16, 16, 16, 16)
             }
 
             radioGroup.addView(radio)
+
+            // Check the radio button AFTER adding it to the group
+            if (sub.subscriptionId == selectedSubId) {
+                radioGroup.check(radio.id)
+                addLog("SIM ${sub.simSlotIndex + 1} (${sub.carrierName}) selected by default")
+            }
         }
 
         radioGroup.setOnCheckedChangeListener { group, checkedId ->
