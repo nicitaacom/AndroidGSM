@@ -7,15 +7,18 @@ Phone = modem. Backend = brain.
 
 ---
 
+## Important!
+Create separated branch - test if app not crashes - only then merge changes to production
+
 ## 📡 Architecture Overview
 
 ```
 ┌─────────────────┐          ┌──────────────┐          ┌──────────────────┐
-│   Android App   │◄────────►│    Pusher    │◄────────►│  Backend Server  │
+│     Website     │◄────────►│  server.ts   │◄────────►│  Android app     │
 │                 │          │              │          │                  │
-│  • GsmService   │          │  Channels:   │          │  • Express API   │
-│  • PusherClient │          │  - Commands  │          │  • Pusher Trigger│
-│  • AudioHandler │          │  - Audio     │          │  • Audio Process │
+│  • Next.js      │          │              │          │                  │
+│  • Next.js API  │          │              │          │  • Audio         │
+│                 │          │              │          │  • GSM Pusher    │
 └─────────────────┘          └──────────────┘          └──────────────────┘
 ```
 
