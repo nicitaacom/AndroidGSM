@@ -129,6 +129,7 @@ class MainActivity : AppCompatActivity() {
     private fun requestPermissionsAndStart() {
         val permissions = mutableListOf(
             Manifest.permission.CALL_PHONE,
+            Manifest.permission.ANSWER_PHONE_CALLS,
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.MODIFY_AUDIO_SETTINGS,
@@ -140,7 +141,6 @@ class MainActivity : AppCompatActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) permissions.add(Manifest.permission.FOREGROUND_SERVICE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            permissions.add(Manifest.permission.USE_FULL_SCREEN_INTENT)
             permissions.add(Manifest.permission.POST_NOTIFICATIONS)
         }
 
