@@ -40,6 +40,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
+        private const val READ_PHONE_STATE_REQUEST = 101
         private var instance: WeakReference<MainActivity>? = null
 
         fun log(message: String) {
@@ -76,7 +77,7 @@ class MainActivity : AppCompatActivity() {
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
 
         checkServiceStatus()
-        loadSimSelection()
+        initSimSelection()
 
         // Keep app always visible (moves to recent apps but stays "open")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -95,6 +96,7 @@ class MainActivity : AppCompatActivity() {
             window.attributes = params
             addLog("Screen kept on and dimmed for continuous operation")
         }
+        initSimSelection() // Re-check on resume in case permissions changed
     }
 
     override fun onPause() {
@@ -236,13 +238,27 @@ class MainActivity : AppCompatActivity() {
                 addLog("All permissions granted!")
                 requestBatteryOptimizationExemption()
                 startService()
-                loadSimSelection()
+                initSimSelection()
             } else {
                 addLog("ERROR: Some permissions were denied")
                 val deniedPermissions = permissions.filterIndexed { index, _ ->
                     grantResults[index] != PackageManager.PERMISSION_GRANTED
                 }
                 addLog("Denied: ${deniedPermissions.joinToString()}")
+            }
+        } else if (requestCode == READ_PHONE_STATE_REQUEST) {
+            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                addLog("✅ READ_PHONE_STATE granted - loading SIM selection")
+                loadSimSelection()
+            } else {
+                addLog("⚠️ READ_PHONE_STATE denied - SIM selection disabled")
+                if (!ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.READ_PHONE_STATE)) {
+                    addLog("Permission denied permanently - go to app settings to grant it")
+                    // Optional: Add a button to open settings (you can add this to your layout if needed)
+                    // val settingsIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    // settingsIntent.data = Uri.fromParts("package", packageName, null)
+                    // startActivity(settingsIntent)
+                }
             }
         }
     }
@@ -274,6 +290,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun initSimSelection() {
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
+            loadSimSelection()
+        } else {
+            requestReadPhoneStatePermission()
+        }
+    }
+
+    private fun requestReadPhoneStatePermission() {
+        if (ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.READ_PHONE_STATE)) {
+            addLog("READ_PHONE_STATE needed for SIM selection and call monitoring - please grant")
+        }
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.READ_PHONE_STATE), READ_PHONE_STATE_REQUEST)
+    }
+
     private fun loadSimSelection() {
         // Multi-SIM APIs require API 22+
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP_MR1) {
@@ -281,11 +312,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) != PackageManager.PERMISSION_GRANTED) {
-            addLog("⚠️ READ_PHONE_STATE permission missing - SIM selection disabled")
-            return
-        }
-
+        // Permission already checked in initSimSelection - proceed
         val subMgr = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
         val subs = subMgr.activeSubscriptionInfoList ?: emptyList()
 
