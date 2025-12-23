@@ -63,11 +63,8 @@ class MainActivity : AppCompatActivity() {
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
 
         toggleButton.setOnClickListener {
-            if (isServiceRunning) {
-                stopService()
-            } else {
-                requestPermissionsAndStart()
-            }
+            if (isServiceRunning) stopService()
+            else requestPermissionsAndStart()
         }
 
         updateButtonState()
@@ -82,7 +79,6 @@ class MainActivity : AppCompatActivity() {
         // Keep app always visible (moves to recent apps but stays "open")
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         addLog("Screen will stay on while app is active")
-
     }
 
     override fun onResume() {
@@ -171,7 +167,6 @@ class MainActivity : AppCompatActivity() {
             startService()
         }
     }
-
 
     private fun requestBatteryOptimizationExemption() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
@@ -312,9 +307,15 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        // Permission already checked in initSimSelection - proceed
         val subMgr = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
-        val subs = subMgr.activeSubscriptionInfoList ?: emptyList()
+
+        val subs = try {
+            subMgr.activeSubscriptionInfoList ?: emptyList()
+        } catch (e: SecurityException) {
+            addLog("⚠️ SecurityException accessing subscriptions: ${e.message} - SIM selection disabled")
+            findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
+            return
+        }
 
         if (subs.size < 2) {
             addLog("Single SIM detected - no selection UI shown")
