@@ -107,8 +107,19 @@ class CallInitiatorActivity : AppCompatActivity() {
                 }
 
                 // 6. close after call starts
-                Handler(Looper.getMainLooper()).postDelayed({ finish() }, 1000)
-            }, 300)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        val bringIntent = Intent(this, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        }
+                        startActivity(bringIntent)
+                        MainActivity.log("Brought MainActivity to front from CallInitiator")
+                    } catch (e: Exception) {
+                        MainActivity.log("Error bringing MainActivity to front from CallInitiator: ${e.message}")
+                    }
+                    finish()
+                }, 200)
+            }, 500)
 
         } catch (error: Exception) {
             MainActivity.log("ERROR in CallInitiatorActivity: ${error.message}")

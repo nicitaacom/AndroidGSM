@@ -8,7 +8,9 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
@@ -155,12 +157,19 @@ class GsmService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun createNotification(): Notification {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val flags = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
+        val pendingIntent: PendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
+
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("GSM Gateway Active")
             .setContentText("Waiting for calls...")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
+            .setContentIntent(pendingIntent)
 
         return builder.build()
     }
@@ -216,6 +225,19 @@ class GsmService : Service() {
                         fallbackError.printStackTrace()
                     }
                 }
+
+                // 3. Aggressively bring MainActivity to front after delay
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        val bringIntent = Intent(this, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        }
+                        startActivity(bringIntent)
+                        MainActivity.log("Brought MainActivity to front after call start (from service)")
+                    } catch (e: Exception) {
+                        MainActivity.log("Error bringing MainActivity to front: ${e.message}")
+                    }
+                }, 1000)
             }
 
             "CALL_ENDED" -> {
@@ -224,6 +246,19 @@ class GsmService : Service() {
                 audioStreamHandler?.stopAudioCapture()
                 audioStreamHandler?.stopAudioPlayback()
                 pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+
+                // Aggressively bring MainActivity to front after delay
+                Handler(Looper.getMainLooper()).postDelayed({
+                    try {
+                        val bringIntent = Intent(this, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                        }
+                        startActivity(bringIntent)
+                        MainActivity.log("Brought MainActivity to front after call end (from service)")
+                    } catch (e: Exception) {
+                        MainActivity.log("Error bringing MainActivity to front: ${e.message}")
+                    }
+                }, 500)
             }
 
             "SEND_DTMF" -> {
@@ -234,6 +269,8 @@ class GsmService : Service() {
                 MainActivity.log("Sending DTMF: $digit")
                 gsmDialer?.sendDtmf(digit[0])
                 pusherClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
+
+                // Optional: bring to front after DTMF if needed, but probably not necessary
             }
 
             "AUDIO_CHUNK" -> {
