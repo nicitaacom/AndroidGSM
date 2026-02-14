@@ -106,7 +106,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
       const ctx = audioContextRef.current!
       const buf = ctx.createBuffer(1, chunk.length, 16000)
-      buf.copyToChannel(chunk, 0)
+      // TS DOM lib can infer chunk as Float32Array<ArrayBufferLike>; copyToChannel expects ArrayBuffer-backed view.
+      const channelData = new Float32Array(chunk.length)
+      channelData.set(chunk)
+      buf.copyToChannel(channelData, 0)
       const src = ctx.createBufferSource()
       src.buffer = buf
       src.connect(ctx.destination)

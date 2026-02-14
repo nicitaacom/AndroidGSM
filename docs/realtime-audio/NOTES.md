@@ -22,3 +22,8 @@ Root gives you access to install/modify lower-level audio routing (AudioFlinger/
 
 ## 5) Opus + RTP timestamps
 For true Opus+RTP, prefer WebRTC end-to-end. In plain WS mode above, packet headers mimic RTP fields (`seq`, `ts`) but codec remains PCM16 for simplicity.
+
+## 6) Why WS for media instead of Pusher Channels?
+- Pusher Channels is excellent for signaling/events, but media streaming needs tighter control over packet size/rate/backpressure and lower overhead.
+- WS gives direct, persistent, bidirectional transport where you can tune framing and queue behavior for jitter buffer logic.
+- Keep Pusher for call-state signaling (`CALL_STARTED`, `CALL_CONNECTED`, `CALL_ENDED`), and use WS/WebRTC for continuous audio frames.
