@@ -18,6 +18,8 @@ import android.telephony.TelephonyManager
 import android.util.Log
 import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
+import android.os.PowerManager
+
 
 class GsmDialer(private val context: Context) {
     private var telephonyManager: TelephonyManager? = null
@@ -93,6 +95,19 @@ class GsmDialer(private val context: Context) {
                 return
             }
 
+            // 1. wake up screen if locked
+            try {
+                val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+                val wakeLock = powerManager.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "GsmDialer::CallWakeLock"
+                )
+                wakeLock.acquire(3000) // 3 seconds
+                MainActivity.log("Screen wake lock acquired for call")
+            } catch (error: Exception) {
+                MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
+            }
+
             val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
             val selectedSubId = prefs.getInt("selected_sim", -1)
 
@@ -123,7 +138,6 @@ class GsmDialer(private val context: Context) {
                 MainActivity.log("READ_PHONE_STATE missing - cannot select specific SIM, using default")
             }
 
-            // 6. verify SIM state (use default if no specific slot)
             val simState = telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
 
             if (simState != TelephonyManager.SIM_STATE_READY) {
@@ -131,7 +145,7 @@ class GsmDialer(private val context: Context) {
                 return
             }
 
-            // 7. launch dialer with ACTION_CALL
+            // 2. launch call intent
             val intent = Intent(Intent.ACTION_CALL).apply {
                 data = Uri.parse("tel:$number")
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK
@@ -148,7 +162,6 @@ class GsmDialer(private val context: Context) {
             Log.e("GsmDialer", "Failed to start call", exception)
         }
     }
-
     // 8. programmatic call termination with fallback
     fun endCall() {
         try {

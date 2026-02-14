@@ -207,23 +207,11 @@ class GsmService : Service() {
 
                 // 2. start call with error handling
                 try {
-                    val callIntent = Intent(this, CallInitiatorActivity::class.java).apply {
-                        putExtra("number", number)
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-                    }
-                    startActivity(callIntent)
-                    MainActivity.log("CallInitiatorActivity launched for $number")
+                    gsmDialer?.startCall(number)
+                    MainActivity.log("Call started via GsmDialer to $number")
                 } catch (error: Exception) {
-                    MainActivity.log("ERROR launching CallInitiatorActivity: ${error.message}")
+                    MainActivity.log("ERROR starting call: ${error.message}")
                     error.printStackTrace()
-
-                    // Fallback: try direct call via GsmDialer
-                    try {
-                        gsmDialer?.startCall(number)
-                    } catch (fallbackError: Exception) {
-                        MainActivity.log("ERROR in fallback call: ${fallbackError.message}")
-                        fallbackError.printStackTrace()
-                    }
                 }
 
                 // 3. Aggressively bring MainActivity to front after delay

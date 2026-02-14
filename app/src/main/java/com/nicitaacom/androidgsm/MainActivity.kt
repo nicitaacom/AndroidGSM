@@ -92,7 +92,6 @@ class MainActivity : AppCompatActivity() {
             window.attributes = params
             addLog("Screen kept on and dimmed for continuous operation")
 
-            // Set screen timeout if not set and permission granted
             if (originalScreenTimeout == -1L && Settings.System.canWrite(this)) {
                 try {
                     originalScreenTimeout = Settings.System.getLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT)
@@ -155,7 +154,6 @@ class MainActivity : AppCompatActivity() {
             startActivity(intent)
         }
 
-        // Request write settings if needed
         if (!Settings.System.canWrite(this)) {
             addLog("Requesting write settings permission to control screen timeout...")
             val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
@@ -217,7 +215,6 @@ class MainActivity : AppCompatActivity() {
             updateButtonState()
             addLog("Service stopped successfully!")
 
-            // Restore screen timeout
             if (originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
                 try {
                     Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
@@ -277,7 +274,6 @@ class MainActivity : AppCompatActivity() {
         if (instance?.get() == this) {
             instance = null
         }
-        // Restore timeout on destroy if running
         if (isServiceRunning && originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
             try {
                 Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
