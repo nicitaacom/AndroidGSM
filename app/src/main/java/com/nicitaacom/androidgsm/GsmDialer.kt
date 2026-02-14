@@ -87,13 +87,13 @@ class GsmDialer(private val context: Context) {
     // 5. initiate GSM call
     // called when handling CALL_STARTED command (from backend via Pusher) in GsmService.handleCommand.
     @Suppress("unused", "MissingPermission")
-    fun startCall(number: String) {
+    fun startCall(number: String): Boolean {
         try {
             MainActivity.log("GsmDialer: Initiating call to $number")
 
             if (!hasPermission(Manifest.permission.CALL_PHONE)) {
                 MainActivity.log("ERROR: CALL_PHONE permission not granted")
-                return
+                return false
             }
 
             // 1. wake up screen if locked
@@ -147,7 +147,7 @@ class GsmDialer(private val context: Context) {
 
             if (simState != TelephonyManager.SIM_STATE_READY) {
                 MainActivity.log("ERROR: SIM not ready (state: $simState)")
-                return
+                return false
             }
 
             // 2. Place call through TelecomManager on modern Android to avoid SIM picker fallback.
@@ -168,9 +168,11 @@ class GsmDialer(private val context: Context) {
                 context.startActivity(intent)
             }
             MainActivity.log("GsmDialer: Call started to $number")
+            return true
         } catch (exception: Exception) {
             MainActivity.log("ERROR starting call: ${exception.message}")
             Log.e("GsmDialer", "Failed to start call", exception)
+            return false
         }
     }
     // 8. programmatic call termination with fallback

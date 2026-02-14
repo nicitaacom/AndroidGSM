@@ -206,10 +206,20 @@ class GsmService : Service() {
 
                 // 2. start call with error handling
                 try {
-                    gsmDialer?.startCall(number)
-                    MainActivity.log("Call started via GsmDialer to $number")
+                    val started = gsmDialer?.startCall(number) ?: false
+                    if (started) {
+                        MainActivity.log("Call started via GsmDialer to $number")
+                    } else {
+                        MainActivity.log("❌ Call start failed - syncing CALL_ENDED state")
+                        audioStreamHandler?.stopAudioCapture()
+                        audioStreamHandler?.stopAudioPlayback()
+                        pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                    }
                 } catch (error: Exception) {
                     MainActivity.log("ERROR starting call: ${error.message}")
+                    audioStreamHandler?.stopAudioCapture()
+                    audioStreamHandler?.stopAudioPlayback()
+                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                     error.printStackTrace()
                 }
 

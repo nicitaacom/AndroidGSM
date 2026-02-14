@@ -77,7 +77,8 @@ class AudioStreamHandler(
                 return
             }
 
-            audioRecord = CAPTURE_SOURCES.firstNotNullOfOrNull { source ->
+            var selectedRecord: AudioRecord? = null
+            for (source in CAPTURE_SOURCES) {
                 val record = AudioRecord(
                     source,
                     SAMPLE_RATE,
@@ -87,12 +88,12 @@ class AudioStreamHandler(
                 )
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
                     MainActivity.log("✅ Audio capture source selected: $source")
-                    record
-                } else {
-                    record.release()
-                    null
+                    selectedRecord = record
+                    break
                 }
+                record.release()
             }
+            audioRecord = selectedRecord
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 MainActivity.log("ERROR: AudioRecord not initialized - no supported capture source")
