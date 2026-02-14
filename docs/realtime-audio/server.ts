@@ -73,6 +73,9 @@ const corsOptions: CorsOptions = {
 app.use(cors(corsOptions))
 // app.options('/api/*', cors(corsOptions)) // don't use it to fix throw new TypeError(`Missing parameter name at ${i}
 
+
+
+
 function authOk(auth?: string) {
   return !!auth && auth === `Bearer ${BACKEND_AUTH_KEY}`
 }
