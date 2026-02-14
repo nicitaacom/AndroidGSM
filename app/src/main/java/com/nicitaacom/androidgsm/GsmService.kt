@@ -8,9 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
@@ -214,18 +212,6 @@ class GsmService : Service() {
                     error.printStackTrace()
                 }
 
-                // 3. Aggressively bring MainActivity to front after delay
-                Handler(Looper.getMainLooper()).postDelayed({
-                    try {
-                        val bringIntent = Intent(this, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                        }
-                        startActivity(bringIntent)
-                        MainActivity.log("Brought MainActivity to front after call start (from service)")
-                    } catch (e: Exception) {
-                        MainActivity.log("Error bringing MainActivity to front: ${e.message}")
-                    }
-                }, 1000)
             }
 
             "CALL_ENDED" -> {
@@ -235,18 +221,6 @@ class GsmService : Service() {
                 audioStreamHandler?.stopAudioPlayback()
                 pusherClient?.sendEvent("CALL_ENDED", emptyMap())
 
-                // Aggressively bring MainActivity to front after delay
-                Handler(Looper.getMainLooper()).postDelayed({
-                    try {
-                        val bringIntent = Intent(this, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                        }
-                        startActivity(bringIntent)
-                        MainActivity.log("Brought MainActivity to front after call end (from service)")
-                    } catch (e: Exception) {
-                        MainActivity.log("Error bringing MainActivity to front: ${e.message}")
-                    }
-                }, 500)
             }
 
             "SEND_DTMF" -> {
