@@ -73,9 +73,6 @@ const corsOptions: CorsOptions = {
 app.use(cors(corsOptions))
 // app.options('/api/*', cors(corsOptions)) // don't use it to fix throw new TypeError(`Missing parameter name at ${i}
 
-
-
-
 function authOk(auth?: string) {
   return !!auth && auth === `Bearer ${BACKEND_AUTH_KEY}`
 }
@@ -96,6 +93,53 @@ app.get('/health', (_req, res) => {
     wsAndroidPeers: androidByDevice.size,
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
+  })
+})
+
+app.get('/api/devices', (_req, res) => {
+  const now = Date.now()
+
+  for (const [token, info] of [...connectedDevices.entries()]) {
+    if (now - info.lastSeen.getTime() > 30000) {
+      connectedDevices.delete(token)
+      console.log('ℹ️ [api/devices] removed stale device', { token })
+    }
+  }
+
+  const devices = Array.from(connectedDevices.values())
+    .sort((a, b) => a.lastSeen.getTime() - b.lastSeen.getTime())
+    .map((d) => ({
+      deviceToken: d.deviceToken,
+      lastSeen: d.lastSeen,
+    }))
+
+  console.log('ℹ️ [api/devices] returning devices', { count: devices.length })
+  res.json({ devices })
+})
+
+app.get('/api/device-status/:deviceToken', (req, res) => {
+  if (!authOk(req.headers.authorization)) {
+    console.log('❌ [api/device-status] unauthorized')
+    return res.status(401).json({ error: 'Unauthorized' })
+  }
+
+  const { deviceToken } = req.params
+  const now = Date.now()
+  const device = connectedDevices.get(deviceToken)
+
+  if (!device || now - device.lastSeen.getTime() > 30000) {
+    if (device) {
+      connectedDevices.delete(deviceToken)
+      console.log('ℹ️ [api/device-status] removed stale device', { deviceToken })
+    }
+    return res.json({ isAuthorized: false, lastSeen: null })
+  }
+
+  console.log('✅ [api/device-status] active', { deviceToken, lastSeen: device.lastSeen.toISOString() })
+  return res.json({
+    isAuthorized: true,
+    lastSeen: device.lastSeen.toISOString(),
+    deviceToken: device.deviceToken,
   })
 })
 
@@ -132,6 +176,31 @@ app.post('/api/events', async (req, res) => {
     case 'DTMF_SENT':
       await sendCommand(deviceToken, 'SEND_DTMF', data)
       break
+    case 'AUDIO_CHUNK': {
+      // Keep backwards compatibility with current Android app flow (Pusher events)
+      await pusher.trigger('gsm-calls', 'audio-chunk', {
+        deviceToken,
+        audio: data?.audio,
+        timestamp: new Date().toISOString(),
+      })
+
+      const browserPeer = browserByDevice.get(deviceToken)
+      if (browserPeer?.readyState === WebSocket.OPEN) {
+        browserPeer.send(
+          JSON.stringify({
+            role: 'android',
+            deviceToken,
+            dir: 'toBrowser',
+            codec: data?.codec || 'pcm16',
+            seq: data?.seq,
+            ts: data?.ts,
+            sampleRate: data?.sampleRate || 16000,
+            audio: data?.audio,
+          }),
+        )
+      }
+      break
+    }
     default:
       break
   }
@@ -204,7 +273,7 @@ wss.on('connection', (ws, req) => {
 
   console.log('✅ [ws/audio] connected')
 
-  ws.on('message', (buf) => {
+  ws.on('message', async (buf) => {
     let msg: any
     try {
       msg = JSON.parse(buf.toString('utf8'))
@@ -223,10 +292,23 @@ wss.on('connection', (ws, req) => {
     // Relay with sequence/timestamp untouched (receiver jitter buffer uses these)
     if (dir === 'toAndroid') {
       const peer = androidByDevice.get(deviceToken)
-      if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify(msg))
+      if (peer?.readyState === WebSocket.OPEN) {
+        peer.send(JSON.stringify(msg))
+      } else if (msg.audio) {
+        // Backward-compatible fallback: Android app currently receives media via Pusher command events.
+        await sendCommand(deviceToken, 'AUDIO_CHUNK', {
+          audio: msg.audio,
+          codec: msg.codec || 'pcm16',
+          seq: msg.seq,
+          ts: msg.ts,
+          sampleRate: msg.sampleRate || 16000,
+        })
+        console.log('⚠️ [ws/audio] no android ws peer, relayed chunk via pusher command', { deviceToken, seq: msg.seq })
+      }
     } else if (dir === 'toBrowser') {
       const peer = browserByDevice.get(deviceToken)
       if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify(msg))
+      else console.log('⚠️ [ws/audio] no browser ws peer for toBrowser packet', { deviceToken, seq: msg.seq })
     }
   })
 

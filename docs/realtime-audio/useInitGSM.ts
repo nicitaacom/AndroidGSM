@@ -2,6 +2,7 @@
 import { RefObject, useEffect, useRef } from "react"
 import { useCallingSetup } from "../store/useCallingSetup"
 import { useGSM } from "../store/useGSM"
+import { getPusherClient } from "@/libs/Pusher/pusher"
 
 type AudioPacket = {
   role: "browser" | "android"
@@ -14,10 +15,15 @@ type AudioPacket = {
   audio: string
 }
 
+type GsmCallsEvent = {
+  deviceToken?: string
+  audio?: string
+}
+
 export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => {
   const { callingSetup, num, dtmfTone, isConnected, isMuted, setDTMFTone, setIsReady, setError, setIsConnected, setIsCalling } =
     useCallingSetup()
-  const { deviceToken } = useGSM()
+  const { deviceToken, setDeviceToken } = useGSM()
 
   const audioContextRef = useRef<AudioContext | null>(null)
   const wsRef = useRef<WebSocket | null>(null)
@@ -27,14 +33,130 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const seqTxRef = useRef(0)
   const rxQueueRef = useRef<Map<number, Float32Array>>(new Map())
   const nextRxSeqRef = useRef(0)
+  const rxEnqueueSeqRef = useRef(0)
   const playoutTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   // ~250ms playout delay, good enough for <=1000ms user requirement
   const PLAYOUT_INTERVAL_MS = 20
   const MAX_QUEUE = 80
 
+  /**
+   * Inbound audio pipeline used by both transports:
+   * - primary: WebSocket `/ws/audio` (preferred media path)
+   * - fallback: Pusher `gsm-calls` -> `audio-chunk` (backward compatibility)
+   */
+  const enqueueBase64Audio = (base64Audio: string) => {
+    try {
+      const audioBytes = Uint8Array.from(atob(base64Audio), c => c.charCodeAt(0))
+      const int16 = new Int16Array(audioBytes.buffer)
+      const f32 = new Float32Array(int16.length)
+      for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
+
+      if (rxQueueRef.current.size > MAX_QUEUE) {
+        const minKey = Math.min(...rxQueueRef.current.keys())
+        rxQueueRef.current.delete(minKey)
+        nextRxSeqRef.current = Math.max(nextRxSeqRef.current, minKey + 1)
+      }
+
+      const nextSeq = rxEnqueueSeqRef.current++
+      rxQueueRef.current.set(nextSeq, f32)
+    } catch {
+      // ignore malformed packet
+    }
+  }
+
+  useEffect(() => {
+    async function fetchDeviceToken() {
+      try {
+        const res = await fetch("/api/gsm/status")
+        if (!res.ok) throw new Error(await res.text())
+        const data = await res.json()
+        if (data?.deviceToken) {
+          setDeviceToken(data.deviceToken)
+          setIsReady(!!data.isAuthorized)
+          console.info("[gsm/status] fetched", data)
+        }
+      } catch (error) {
+        setError(String(error))
+        console.error("[gsm/status] error", error)
+      }
+    }
+
+    fetchDeviceToken()
+    const id = setInterval(fetchDeviceToken, 5000)
+    return () => clearInterval(id)
+  }, [setDeviceToken, setError, setIsReady])
+
+  useEffect(() => {
+    const pusher = getPusherClient()
+    const devicesChannel = pusher.subscribe("gsm-devices")
+    const callsChannel = pusher.subscribe("gsm-calls")
+
+    const onDeviceConnected = async (eventData: { deviceToken?: string }) => {
+      // If payload has token, apply immediately; otherwise fallback to status endpoint.
+      if (eventData?.deviceToken) {
+        setDeviceToken(eventData.deviceToken)
+        setIsReady(true)
+        console.info("[gsm/pusher] device-connected", eventData)
+        return
+      }
+
+      try {
+        const res = await fetch("/api/gsm/status")
+        if (!res.ok) return
+        const data = await res.json()
+        if (data?.deviceToken) setDeviceToken(data.deviceToken)
+        setIsReady(!!data?.isAuthorized)
+      } catch {
+        // no-op
+      }
+    }
+
+    const onCallStarted = (eventData: GsmCallsEvent) => {
+      if (!deviceToken || eventData?.deviceToken !== deviceToken) return
+      setIsCalling(true)
+      console.info("[gsm/pusher] call-started", eventData)
+    }
+
+    const onCallConnected = (eventData: GsmCallsEvent) => {
+      if (!deviceToken || eventData?.deviceToken !== deviceToken) return
+      setIsConnected(true)
+      console.info("[gsm/pusher] call-connected", eventData)
+    }
+
+    const onCallEnded = (eventData: GsmCallsEvent) => {
+      if (!deviceToken || eventData?.deviceToken !== deviceToken) return
+      setIsConnected(false)
+      setIsCalling(false)
+      console.info("[gsm/pusher] call-ended", eventData)
+    }
+
+    const onAudioChunk = (eventData: GsmCallsEvent) => {
+      if (!deviceToken || eventData?.deviceToken !== deviceToken || !eventData?.audio) return
+      enqueueBase64Audio(eventData.audio)
+    }
+
+    // Bind only namespaced events from your PusherEventMap (`gsm:*`) to avoid duplication/confusion.
+    devicesChannel.bind("gsm:device-connected", onDeviceConnected)
+    callsChannel.bind("gsm:call-started", onCallStarted)
+    callsChannel.bind("gsm:call-connected", onCallConnected)
+    callsChannel.bind("gsm:call-ended", onCallEnded)
+    callsChannel.bind("gsm:audio-chunk", onAudioChunk)
+
+    return () => {
+      devicesChannel.unbind("gsm:device-connected", onDeviceConnected)
+      callsChannel.unbind("gsm:call-started", onCallStarted)
+      callsChannel.unbind("gsm:call-connected", onCallConnected)
+      callsChannel.unbind("gsm:call-ended", onCallEnded)
+      callsChannel.unbind("gsm:audio-chunk", onAudioChunk)
+      pusher.unsubscribe("gsm-devices")
+      pusher.unsubscribe("gsm-calls")
+    }
+  }, [deviceToken, setDeviceToken, setIsReady, setIsCalling, setIsConnected])
+
   useEffect(() => {
     if (callingSetup !== "gsm" || !deviceToken) return
+    console.info("[gsm/ws] init", { callingSetup, deviceToken })
 
     if (!audioContextRef.current) {
       audioContextRef.current = new AudioContext({ sampleRate: 16000 })
@@ -44,24 +166,29 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const wsBase = process.env.NEXT_PUBLIC_WS_URL
     if (!bearerToken || !wsBase) {
       setError("Missing NEXT_PUBLIC_BACKEND_BEARER or NEXT_PUBLIC_WS_URL")
+      console.error("[gsm/ws] missing env", { hasBearerToken: !!bearerToken, wsBase })
       return
     }
 
+    console.info("[gsm/ws] connecting", { wsBase, deviceToken })
     const ws = new WebSocket(`${wsBase}/ws/audio?token=${encodeURIComponent(bearerToken)}`)
     wsRef.current = ws
 
     ws.onopen = () => {
       setIsReady(true)
+      console.info("[gsm/ws] connected", { deviceToken })
       ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
     }
 
-    ws.onerror = () => {
+    ws.onerror = event => {
       setIsReady(false)
       setError("WS connection error")
+      console.error("[gsm/ws] error", event)
     }
 
-    ws.onclose = () => {
+    ws.onclose = event => {
       setIsReady(false)
+      console.warn("[gsm/ws] closed", { code: event.code, reason: event.reason, wasClean: event.wasClean })
     }
 
     ws.onmessage = async ev => {
@@ -69,18 +196,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         const pkt: AudioPacket = JSON.parse(ev.data)
         if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
 
-        const audioBytes = Uint8Array.from(atob(pkt.audio), c => c.charCodeAt(0))
-        const int16 = new Int16Array(audioBytes.buffer)
-        const f32 = new Float32Array(int16.length)
-        for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
-
-        if (rxQueueRef.current.size > MAX_QUEUE) {
-          // drop oldest backlog for low-load resilience
-          const minKey = Math.min(...rxQueueRef.current.keys())
-          rxQueueRef.current.delete(minKey)
-          nextRxSeqRef.current = Math.max(nextRxSeqRef.current, minKey + 1)
-        }
-        rxQueueRef.current.set(pkt.seq, f32)
+        enqueueBase64Audio(pkt.audio)
       } catch {
         // ignore malformed packet
       }
@@ -175,6 +291,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
   const call = async () => {
     if (!deviceToken) return
+    console.info("[gsm/call] start requested", { deviceToken, num })
     setIsCalling(true)
     const res = await fetch("/api/gsm/call-started", {
       method: "POST",
@@ -186,6 +303,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   const hungUp = async () => {
+    console.info("[gsm/call] end requested", { deviceToken })
     await fetch("/api/gsm/call-ended", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -196,6 +314,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   const sendDTMF = async (digit: string) => {
+    console.info("[gsm/dtmf] send", { digit, deviceToken })
     await fetch("/api/gsm/send-dtmf", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
