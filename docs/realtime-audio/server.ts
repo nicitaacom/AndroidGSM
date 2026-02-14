@@ -1,3 +1,5 @@
+// Note: this is from backend gsm-outreach-tool github repository - this file exist only for context for AI
+// this code hosted on VPS which allows bypass Vercel 60s API request timeout limit
 import express from 'express'
 import cors from 'cors'
 import bodyParser from 'body-parser'
