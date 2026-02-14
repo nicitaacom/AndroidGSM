@@ -3,6 +3,8 @@ package com.nicitaacom.androidgsm
 import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -31,8 +33,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logTextView: TextView
     private lateinit var scrollView: ScrollView
     private lateinit var toggleButton: Button
+    private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private var isServiceRunning = false
+    private var hasSimAvailable = true
 
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -57,6 +61,7 @@ class MainActivity : AppCompatActivity() {
         logTextView = findViewById(R.id.logTextView)
         scrollView = findViewById(R.id.scrollView)
         toggleButton = findViewById(R.id.toggleButton)
+        copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
 
         val versionTextView: TextView = findViewById(R.id.versionTextView)
@@ -64,6 +69,10 @@ class MainActivity : AppCompatActivity() {
 
         toggleButton.setOnClickListener {
             if (isServiceRunning) stopService() else requestPermissionsAndStart()
+        }
+
+        copyLogsButton.setOnClickListener {
+            copyLastLogsToClipboard()
         }
 
         updateButtonState()
@@ -123,6 +132,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtonState() {
+        if (!hasSimAvailable) {
+            toggleButton.text = "NO SIM DETECTED"
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.bg_card))
+            toggleButton.isEnabled = false
+            statusTextView.text = "Status: No SIM"
+            return
+        }
+
+        toggleButton.isEnabled = true
         toggleButton.text = if (isServiceRunning) "STOP SERVICE" else "START SERVICE"
         toggleButton.setBackgroundColor(ContextCompat.getColor(this, if (isServiceRunning) R.color.error_red else R.color.brand_green))
         statusTextView.text = if (isServiceRunning) "Status: Active" else "Status: Inactive"
@@ -189,6 +207,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun startService() {
         try {
+            if (!hasSimAvailable) {
+                addLog("❌ Cannot start service: no SIM cards detected")
+                updateButtonState()
+                return
+            }
+
             addLog("Starting GSM Gateway Service...")
             val intent = Intent(this, GsmService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -239,7 +263,8 @@ class MainActivity : AppCompatActivity() {
                 addLog("All permissions granted!")
                 requestBatteryOptimizationExemption()
                 loadSimSelection()
-                startService()
+                if (hasSimAvailable) startService()
+                else addLog("❌ Service not started because no SIM cards are detected")
             } else {
                 addLog("ERROR: Some permissions were denied")
                 val deniedPermissions = permissions.filterIndexed { index, _ ->
@@ -269,6 +294,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun copyLastLogsToClipboard() {
+        val lines = logBuffer.lines().filter { it.isNotBlank() }
+        val last50 = lines.takeLast(50).joinToString("\n")
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", last50))
+        addLog("📋 Copied last ${lines.takeLast(50).size} logs to clipboard")
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         if (instance?.get() == this) {
@@ -295,10 +328,15 @@ class MainActivity : AppCompatActivity() {
         val subs = subMgr.activeSubscriptionInfoList ?: emptyList()
 
         if (subs.isEmpty()) {
+            hasSimAvailable = false
             addLog("❌ No SIM cards detected - GSM calling is unavailable")
             findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
+            updateButtonState()
             return
         }
+
+        hasSimAvailable = true
+        updateButtonState()
 
         if (subs.size < 2) {
             addLog("Single SIM detected - no selection UI shown")

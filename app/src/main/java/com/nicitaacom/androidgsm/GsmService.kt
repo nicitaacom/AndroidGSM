@@ -92,9 +92,10 @@ class GsmService : Service() {
             // 1. Start foreground IMMEDIATELY - before any async work
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val notification = createNotification()
+                // Avoid strict Android 14/15 microphone FGS eligibility gate during startup.
+                // Audio recording still works with RECORD_AUDIO permission when call is active.
                 val serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(NOTIFICATION_ID, notification, serviceType)
                 else startForeground(NOTIFICATION_ID, notification)
                 MainActivity.log("GsmService: Foreground notification created")

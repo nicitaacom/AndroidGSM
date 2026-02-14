@@ -76,7 +76,8 @@ app.use(cors(corsOptions))
 function extractBearerToken(auth?: string): string {
   if (!auth) return ""
   const match = auth.match(/^Bearer\s+(.+)$/i)
-  return (match?.[1] ?? auth).trim()
+  // Accept accidentally escaped '$' coming from env systems/UI copy-paste (e.g. \$ in token values).
+  return (match?.[1] ?? auth).trim().replace(/\\\$/g, '$')
 }
 
 function authOk(auth?: string) {

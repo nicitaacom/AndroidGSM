@@ -36,6 +36,12 @@ class AudioStreamHandler(
         private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_SIZE_FACTOR = 4
+        private val CAPTURE_SOURCES = intArrayOf(
+            MediaRecorder.AudioSource.VOICE_DOWNLINK,
+            MediaRecorder.AudioSource.VOICE_CALL,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.MIC,
+        )
     }
 
     fun startAudioCapture() {
@@ -71,16 +77,25 @@ class AudioStreamHandler(
                 return
             }
 
-            audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                SAMPLE_RATE,
-                CHANNEL_IN,
-                AUDIO_FORMAT,
-                bufferSize
-            )
+            audioRecord = CAPTURE_SOURCES.firstNotNullOfOrNull { source ->
+                val record = AudioRecord(
+                    source,
+                    SAMPLE_RATE,
+                    CHANNEL_IN,
+                    AUDIO_FORMAT,
+                    bufferSize
+                )
+                if (record.state == AudioRecord.STATE_INITIALIZED) {
+                    MainActivity.log("✅ Audio capture source selected: $source")
+                    record
+                } else {
+                    record.release()
+                    null
+                }
+            }
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                MainActivity.log("ERROR: AudioRecord not initialized - VOICE_DOWNLINK may not be supported")
+                MainActivity.log("ERROR: AudioRecord not initialized - no supported capture source")
                 return
             }
 
@@ -162,7 +177,7 @@ class AudioStreamHandler(
             MainActivity.log("🔊 Starting audio playback...")
 
             // Keep route on BT/headset/earpiece instead of forcing loudspeaker.
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.mode = AudioManager.MODE_IN_CALL
             audioManager.isSpeakerphoneOn = false
 
             // Set max volume for voice call stream
