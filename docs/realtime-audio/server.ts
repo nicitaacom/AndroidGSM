@@ -73,8 +73,16 @@ const corsOptions: CorsOptions = {
 app.use(cors(corsOptions))
 // app.options('/api/*', cors(corsOptions)) // don't use it to fix throw new TypeError(`Missing parameter name at ${i}
 
+function extractBearerToken(auth?: string): string {
+  if (!auth) return ""
+  const match = auth.match(/^Bearer\s+(.+)$/i)
+  return (match?.[1] ?? auth).trim()
+}
+
 function authOk(auth?: string) {
-  return !!auth && auth === `Bearer ${BACKEND_AUTH_KEY}`
+  const incoming = extractBearerToken(auth)
+  const expected = (BACKEND_AUTH_KEY || "").trim()
+  return !!incoming && !!expected && incoming === expected
 }
 
 async function sendCommand(deviceToken: string, type: string, data: any = {}) {
@@ -119,7 +127,15 @@ app.get('/api/devices', (_req, res) => {
 
 app.get('/api/device-status/:deviceToken', (req, res) => {
   if (!authOk(req.headers.authorization)) {
-    console.log('❌ [api/device-status] unauthorized')
+    const incoming = extractBearerToken(req.headers.authorization)
+    const expected = (BACKEND_AUTH_KEY || "").trim()
+    console.log('❌ [api/device-status] unauthorized', {
+      incomingToken: incoming,
+      incomingLen: incoming.length,
+      expectedToken: expected,
+      expectedLen: expected.length,
+      rawAuthorization: req.headers.authorization,
+    })
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
@@ -146,7 +162,15 @@ app.get('/api/device-status/:deviceToken', (req, res) => {
 app.post('/api/events', async (req, res) => {
   console.log('ℹ️ [api/events] request received')
   if (!authOk(req.headers.authorization)) {
-    console.log('❌ [api/events] unauthorized')
+    const incoming = extractBearerToken(req.headers.authorization)
+    const expected = (BACKEND_AUTH_KEY || "").trim()
+    console.log('❌ [api/events] unauthorized', {
+      incomingToken: incoming,
+      incomingLen: incoming.length,
+      expectedToken: expected,
+      expectedLen: expected.length,
+      rawAuthorization: req.headers.authorization,
+    })
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
@@ -211,7 +235,15 @@ app.post('/api/events', async (req, res) => {
 app.post('/api/commands', async (req, res) => {
   console.log('ℹ️ [api/commands] request received')
   if (!authOk(req.headers.authorization)) {
-    console.log('❌ [api/commands] unauthorized')
+    const incoming = extractBearerToken(req.headers.authorization)
+    const expected = (BACKEND_AUTH_KEY || "").trim()
+    console.log('❌ [api/commands] unauthorized', {
+      incomingToken: incoming,
+      incomingLen: incoming.length,
+      expectedToken: expected,
+      expectedLen: expected.length,
+      rawAuthorization: req.headers.authorization,
+    })
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
@@ -230,7 +262,15 @@ app.post('/api/commands', async (req, res) => {
 app.post('/pusher/auth', (req, res) => {
   console.log('ℹ️ [pusher/auth] request received')
   if (!authOk(req.headers.authorization)) {
-    console.log('❌ [pusher/auth] unauthorized')
+    const incoming = extractBearerToken(req.headers.authorization)
+    const expected = (BACKEND_AUTH_KEY || "").trim()
+    console.log('❌ [pusher/auth] unauthorized', {
+      incomingToken: incoming,
+      incomingLen: incoming.length,
+      expectedToken: expected,
+      expectedLen: expected.length,
+      rawAuthorization: req.headers.authorization,
+    })
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
@@ -266,7 +306,14 @@ wss.on('connection', (ws, req) => {
   const url = new URL(req.url || '', `http://${req.headers.host}`)
   const token = url.searchParams.get('token')
   if (!authOk(token ? `Bearer ${token}` : undefined)) {
-    console.log('❌ [ws/audio] unauthorized connection')
+    const incoming = (token || "").trim()
+    const expected = (BACKEND_AUTH_KEY || "").trim()
+    console.log('❌ [ws/audio] unauthorized connection', {
+      incomingToken: incoming,
+      incomingLen: incoming.length,
+      expectedToken: expected,
+      expectedLen: expected.length,
+    })
     ws.close(1008, 'Unauthorized')
     return
   }

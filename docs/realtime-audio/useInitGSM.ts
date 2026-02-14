@@ -40,6 +40,16 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const PLAYOUT_INTERVAL_MS = 20
   const MAX_QUEUE = 80
 
+  useEffect(() => {
+    // Debug aid for "frontend is ready but call commands fail" / wrong Pusher app confusion.
+    console.info("[gsm/config] env snapshot", {
+      wsBase: process.env.NEXT_PUBLIC_WS_URL,
+      hasBackendBearer: !!process.env.NEXT_PUBLIC_BACKEND_BEARER,
+      nextPublicPusherKey: process.env.NEXT_PUBLIC_PUSHER_APP_KEY,
+      nextPublicGsmPusherKey: process.env.NEXT_PUBLIC_GSM_PUSHER_APP_KEY,
+    })
+  }, [])
+
   /**
    * Inbound audio pipeline used by both transports:
    * - primary: WebSocket `/ws/audio` (preferred media path)

@@ -37,3 +37,8 @@ For true Opus+RTP, prefer WebRTC end-to-end. In plain WS mode above, packet head
 - Your website Next.js API routes and Android app may be using different bearer values.
 - Verify the exact token used by website proxy routes matches backend `BACKEND_BEARER` byte-for-byte (no extra quotes/spaces/newlines).
 - Prefer reading bearer from server-side env in Next routes, not hardcoded literals.
+
+## 9) If frontend shows ready but commands still fail
+- "Ready" can come from status polling / pusher device events, but dialing still depends on `/api/commands` auth.
+- If you use multiple Pusher apps, ensure frontend subscribes with the same key/cluster as backend triggers for GSM channels.
+- Add a dedicated `NEXT_PUBLIC_GSM_PUSHER_APP_KEY` (or equivalent) if your app has separate realtime domains.
