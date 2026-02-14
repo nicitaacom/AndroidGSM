@@ -294,6 +294,12 @@ class MainActivity : AppCompatActivity() {
         val subMgr = getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
         val subs = subMgr.activeSubscriptionInfoList ?: emptyList()
 
+        if (subs.isEmpty()) {
+            addLog("❌ No SIM cards detected - GSM calling is unavailable")
+            findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
+            return
+        }
+
         if (subs.size < 2) {
             addLog("Single SIM detected - no selection UI shown")
             findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
