@@ -18,6 +18,7 @@ class GsmService : Service() {
     private var pusherClient: PusherClient? = null
     private var gsmDialer: GsmDialer? = null
     private var audioStreamHandler: AudioStreamHandler? = null
+    private var audioWsHandler: AudioWebSocketHandler? = null
     private var config: Config? = null
 
     companion object {
@@ -120,6 +121,11 @@ class GsmService : Service() {
 
                     audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
                     MainActivity.log("GsmService: AudioStreamHandler initialized")
+
+                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray ->
+                        // Callback for audio received (placeholder for future use)
+                    }
+                    MainActivity.log("GsmService: AudioWebSocketHandler initialized")
                 } catch (error: Exception) {
                     MainActivity.log("WARNING: Pusher/Audio failed: ${error.message}")
                     error.printStackTrace()
@@ -142,6 +148,7 @@ class GsmService : Service() {
                     MainActivity.log("Wake lock released")
                 }
             }
+            audioWsHandler?.disconnect()
             pusherClient?.disconnect()
             audioStreamHandler?.cleanup()
             gsmDialer?.cleanup()
@@ -192,15 +199,23 @@ class GsmService : Service() {
 
                 // 1. set callbacks BEFORE starting call
                 gsmDialer?.setCallConnectedCallback {
-                    MainActivity.log("Call connected (OFFHOOK) - starting audio capture")
+                    MainActivity.log("Call connected (OFFHOOK) - starting audio capture and WebSocket")
                     audioStreamHandler?.startAudioCapture()
+                    
+                    // Connect WebSocket for bidirectional audio
+                    val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")?.replace("https://", "wss://") + "/ws/audio"
+                    audioWsHandler?.connect(wsUrl, "Bearer ${config?.BACKEND_BEARER}", config?.DEVICE_TOKEN ?: "")
+                    audioWsHandler?.startAudioCapture()
+                    audioWsHandler?.startAudioPlayback()
+                    
                     pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
                 }
 
                 gsmDialer?.setCallEndedCallback {
-                    MainActivity.log("Call ended - stopping audio")
+                    MainActivity.log("Call ended - stopping audio and WebSocket")
                     audioStreamHandler?.stopAudioCapture()
                     audioStreamHandler?.stopAudioPlayback()
+                    audioWsHandler?.disconnect()
                     pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                 }
 
@@ -248,10 +263,21 @@ class GsmService : Service() {
 
             "AUDIO_CHUNK" -> {
                 val audioData = data["audio"] as? String ?: run {
-                    MainActivity.log("AUDIO_CHUNK ignored: missing audio")
+                    MainActivity.log("AUDIO_CHUNK ignored: missing audio data")
                     return
                 }
-                audioStreamHandler?.playAudioChunk(audioData)
+                
+                if (audioStreamHandler == null) {
+                    MainActivity.log("⚠️ AUDIO_CHUNK received but AudioStreamHandler not initialized")
+                    return
+                }
+                
+                try {
+                    audioStreamHandler?.playAudioChunk(audioData)
+                } catch (e: Exception) {
+                    MainActivity.log("❌ ERROR playing audio chunk: ${e.message}")
+                    e.printStackTrace()
+                }
             }
 
             else -> MainActivity.log("Unhandled command: $type")

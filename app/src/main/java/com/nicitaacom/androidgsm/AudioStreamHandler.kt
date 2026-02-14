@@ -17,6 +17,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
+import java.nio.ByteOrder
 
 class AudioStreamHandler(
     private val context: Context,
@@ -36,6 +37,8 @@ class AudioStreamHandler(
         private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_SIZE_FACTOR = 4
+        private const val AUDIO_CHUNK_SIZE_MS = 20  // 20ms chunks at 16kHz = 320 samples
+        private const val EXPECTED_CHUNK_SIZE = SAMPLE_RATE * AUDIO_CHUNK_SIZE_MS / 1000 * 2  // in bytes
         private val CAPTURE_SOURCES = intArrayOf(
             MediaRecorder.AudioSource.VOICE_DOWNLINK,
             MediaRecorder.AudioSource.VOICE_CALL,
@@ -50,20 +53,24 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🎤 Starting audio capture...")
 
-            // 1. IMPORTANT: VOICE_DOWNLINK only captures audio during ACTIVE call (OFFHOOK state)
-            // Dialing tones (beeps) during RINGING state are NOT captured - this is an Android limitation
-            // Audio capture will work once call connects (when far end picks up)
-
-            // 2. keep call routing managed by system (BT/wired/earpiece), do not force loudspeaker
+            // 1. Set audio mode for voice communication (BEFORE creating AudioRecord)
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             audioManager.isSpeakerphoneOn = false
+            
+            // Log routing info
+            MainActivity.log("Audio mode set to MODE_IN_COMMUNICATION, speaker: OFF")
+
+            // 2. Try to route to BT/wired/earpiece if available
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
                 audioManager.availableCommunicationDevices.firstOrNull {
                     it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
                             it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
                             it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
                             it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES
-                }?.let { audioManager.setCommunicationDevice(it) }
+                }?.let { device ->
+                    audioManager.setCommunicationDevice(device)
+                    MainActivity.log("Using audio device: ${device.type}")
+                }
             }
 
             val bufferSize = AudioRecord.getMinBufferSize(
@@ -73,26 +80,31 @@ class AudioStreamHandler(
             ) * BUFFER_SIZE_FACTOR
 
             if (bufferSize <= 0) {
-                MainActivity.log("ERROR: Invalid buffer size")
+                MainActivity.log("ERROR: Invalid buffer size: $bufferSize")
                 return
             }
 
             var selectedRecord: AudioRecord? = null
             for (source in CAPTURE_SOURCES) {
-                val record = AudioRecord(
-                    source,
-                    SAMPLE_RATE,
-                    CHANNEL_IN,
-                    AUDIO_FORMAT,
-                    bufferSize
-                )
-                if (record.state == AudioRecord.STATE_INITIALIZED) {
-                    MainActivity.log("✅ Audio capture source selected: $source")
-                    selectedRecord = record
-                    break
+                try {
+                    val record = AudioRecord(
+                        source,
+                        SAMPLE_RATE,
+                        CHANNEL_IN,
+                        AUDIO_FORMAT,
+                        bufferSize
+                    )
+                    if (record.state == AudioRecord.STATE_INITIALIZED) {
+                        MainActivity.log("✅ Audio capture source selected: $source (bufferSize: $bufferSize)")
+                        selectedRecord = record
+                        break
+                    }
+                    record.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to initialize AudioRecord with source $source: ${e.message}")
                 }
-                record.release()
             }
+            
             audioRecord = selectedRecord
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
@@ -107,7 +119,7 @@ class AudioStreamHandler(
                 captureAndStreamAudio(bufferSize)
             }
 
-            MainActivity.log("✅ Audio capture started (active when call connects)")
+            MainActivity.log("✅ Audio capture started (16kHz PCM, MONO, 16-bit)")
         } catch (e: SecurityException) {
             MainActivity.log("ERROR: RECORD_AUDIO permission not granted")
             Log.e(TAG, "Security exception", e)
@@ -127,20 +139,42 @@ class AudioStreamHandler(
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
 
                 if (read > 0) {
-                    // Convert to bytes
+                    // 1. Only process valid chunk sizes (at least one sample = 2 bytes)
+                    if (read < 1) continue
+
+                    // 2. Convert to bytes - ensure we only convert the actual samples read
                     val byteBuffer = ByteArray(read * 2)
-                    ByteBuffer.wrap(byteBuffer).asShortBuffer().put(buffer, 0, read)
+                    ByteBuffer.wrap(byteBuffer).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(buffer, 0, read)
 
-                    // Encode to base64
-                    val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
+                    // 3. Encode to base64
+                    val base64Audio = try {
+                        Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error encoding audio to base64", e)
+                        continue
+                    }
 
-                    // Send to backend
-                    pusherClient.sendEvent("AUDIO_CHUNK", mapOf("audio" to base64Audio))
+                    // 4. Validate base64 before sending
+                    if (base64Audio.isBlank()) {
+                        Log.w(TAG, "⚠️ Generated empty base64 audio chunk")
+                        continue
+                    }
+
+                    // 5. Send to backend with error handling
+                    try {
+                        pusherClient.sendEvent("AUDIO_CHUNK", mapOf("audio" to base64Audio))
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error sending audio chunk via Pusher", e)
+                    }
 
                     chunkCount++
                     if (chunkCount % 50 == 0) {
-                        Log.d(TAG, "Sent $chunkCount audio chunks")
+                        Log.d(TAG, "✅ Sent $chunkCount audio chunks (${read} samples each)")
                     }
+                } else if (read < 0) {
+                    // Negative read indicates error
+                    Log.e(TAG, "❌ AudioRecord.read() returned error: $read")
+                    break
                 }
 
             } catch (e: Exception) {
@@ -148,6 +182,7 @@ class AudioStreamHandler(
                 break
             }
         }
+        Log.d(TAG, "Audio capture loop ended after $chunkCount chunks")
     }
 
     fun stopAudioCapture() {
@@ -177,11 +212,11 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🔊 Starting audio playback...")
 
-            // Keep route on BT/headset/earpiece instead of forcing loudspeaker.
+            // 1. Audio mode MUST be IN_CALL for voice communication (not MEDIA)
             audioManager.mode = AudioManager.MODE_IN_CALL
             audioManager.isSpeakerphoneOn = false
 
-            // Set max volume for voice call stream
+            // 2. Set max volume for voice call stream
             audioManager.setStreamVolume(
                 AudioManager.STREAM_VOICE_CALL,
                 audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
@@ -199,10 +234,11 @@ class AudioStreamHandler(
                 return
             }
 
+            // 3. Use VOICE_COMMUNICATION for proper routing (NOT MEDIA)
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)  // CRITICAL: Not USAGE_MEDIA!
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -214,6 +250,7 @@ class AudioStreamHandler(
                         .build()
                 )
                 .setBufferSizeInBytes(bufferSize)
+                .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
             if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
@@ -224,7 +261,7 @@ class AudioStreamHandler(
             isPlaying = true
             audioTrack?.play()
 
-            MainActivity.log("✅ Audio playback started")
+            MainActivity.log("✅ Audio playback started (USAGE_VOICE_COMMUNICATION)")
         } catch (e: Exception) {
             MainActivity.log("ERROR starting playback: ${e.message}")
             Log.e(TAG, "Failed to start audio playback", e)
@@ -238,17 +275,86 @@ class AudioStreamHandler(
 
         scope.launch {
             try {
-                // Decode base64
-                val audioBytes = Base64.decode(base64Audio, Base64.NO_WRAP)
+                // 1. Validate base64 string
+                if (base64Audio.isBlank()) {
+                    Log.w(TAG, "⚠️ DEBUG: Received empty base64 audio chunk")
+                    MainActivity.log("⚠️ Empty audio chunk (Pusher fallback)")
+                    return@launch
+                }
 
-                // Convert to shorts
+                // 2. Decode base64 with error handling
+                val audioBytes = try {
+                    Base64.decode(base64Audio, Base64.NO_WRAP)
+                } catch (e: IllegalArgumentException) {
+                    Log.e(TAG, "❌ DEBUG: Failed to decode base64: ${e.message}")
+                    Log.e(TAG, "  Base64 length: ${base64Audio.length}")
+                    Log.e(TAG, "  First 50 chars: ${base64Audio.take(50)}")
+                    MainActivity.log("ERROR: Invalid base64 - check logs")
+                    return@launch
+                }
+
+                Log.d(TAG, "✅ DEBUG: Decoded base64 → ${audioBytes.size} bytes")
+
+                // 3. Validate decoded bytes
+                if (audioBytes.isEmpty()) {
+                    Log.w(TAG, "⚠️ DEBUG: Decoded audio bytes are empty")
+                    return@launch
+                }
+
+                // 4. Check if size is valid (must be even number of bytes for 16-bit samples)
+                if (audioBytes.size % 2 != 0) {
+                    Log.e(TAG, "❌ DEBUG: Odd bytes (${audioBytes.size}) - expected multiple of 2")
+                    Log.e(TAG, "  This means corrupted PCM data")
+                    MainActivity.log("ERROR: Audio chunk odd size - corrupted")
+                    return@launch
+                }
+
+                // 5. Convert bytes to shorts (16-bit PCM samples)
+                // Use proper byte order handling
                 val shortBuffer = ShortArray(audioBytes.size / 2)
-                ByteBuffer.wrap(audioBytes).asShortBuffer().get(shortBuffer)
+                val byteBuffer = ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN)
+                byteBuffer.asShortBuffer().get(shortBuffer)
 
-                // Play audio
-                audioTrack?.write(shortBuffer, 0, shortBuffer.size)
+                Log.d(TAG, "✅ DEBUG: Converted to ${shortBuffer.size} samples")
+                Log.d(TAG, "  Sample values (first 10): ${shortBuffer.take(10).joinToString(",")}")
+
+                // 6. Verify AudioTrack is initialized before writing
+                if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
+                    Log.w(TAG, "⚠️ DEBUG: AudioTrack state=${audioTrack?.state}, restarting")
+                    startAudioPlayback()
+                }
+
+                // 7. Write audio with error handling
+                val written = audioTrack?.write(shortBuffer, 0, shortBuffer.size) ?: -1
+                
+                Log.d(TAG, "DEBUG: AudioTrack.write() returned: $written")
+                
+                if (written == AudioTrack.ERROR_INVALID_OPERATION) {
+                    Log.e(TAG, "❌ DEBUG: AudioTrack.ERROR_INVALID_OPERATION")
+                    Log.e(TAG, "  AudioTrack state: ${audioTrack?.state}")
+                    Log.e(TAG, "  isPlaying: $isPlaying")
+                    isPlaying = false
+                    MainActivity.log("ERROR: AudioTrack invalid operation")
+                } else if (written == AudioTrack.ERROR_BAD_VALUE) {
+                    Log.e(TAG, "❌ DEBUG: AudioTrack.ERROR_BAD_VALUE")
+                    Log.e(TAG, "  Tried to write ${shortBuffer.size} samples")
+                    isPlaying = false
+                    MainActivity.log("ERROR: AudioTrack bad value")
+                } else if (written < 0) {
+                    Log.e(TAG, "❌ DEBUG: AudioTrack unknown error: $written")
+                    isPlaying = false
+                } else if (written != shortBuffer.size) {
+                    Log.w(TAG, "⚠️ DEBUG: Partial write: $written / ${shortBuffer.size} samples")
+                } else {
+                    Log.d(TAG, "✅ DEBUG: Successfully wrote ${shortBuffer.size} samples")
+                }
+
             } catch (e: Exception) {
-                Log.e(TAG, "Error playing audio chunk", e)
+                Log.e(TAG, "❌ DEBUG: Exception in playAudioChunk")
+                Log.e(TAG, "  Message: ${e.message}")
+                Log.e(TAG, "  Class: ${e::class.simpleName}")
+                e.printStackTrace()
+                MainActivity.log("ERROR: Play failed - check logcat")
             }
         }
     }
