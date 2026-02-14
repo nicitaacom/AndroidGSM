@@ -22,6 +22,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     isConnected,
     isMuted,
     setDTMFTone,
+    setIsReady,
     setError,
     setIsConnected,
     setIsCalling,
@@ -60,7 +61,17 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     wsRef.current = ws
 
     ws.onopen = () => {
+      setIsReady(true)
       ws.send(JSON.stringify({ role: 'browser', deviceToken, dir: 'toAndroid' }))
+    }
+
+    ws.onerror = () => {
+      setIsReady(false)
+      setError('WS connection error')
+    }
+
+    ws.onclose = () => {
+      setIsReady(false)
     }
 
     ws.onmessage = async (ev) => {
@@ -91,7 +102,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       stopMicCapture()
       if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
     }
-  }, [callingSetup, deviceToken, setError])
+  }, [callingSetup, deviceToken, setError, setIsReady])
 
   useEffect(() => {
     if (!isConnected || !audioContextRef.current) return
