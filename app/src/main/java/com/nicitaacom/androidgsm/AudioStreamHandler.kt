@@ -9,11 +9,11 @@ import android.media.AudioTrack
 import android.media.MediaRecorder
 import android.util.Base64
 import android.util.Log
+import android.os.Build
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
@@ -48,9 +48,17 @@ class AudioStreamHandler(
             // Dialing tones (beeps) during RINGING state are NOT captured - this is an Android limitation
             // Audio capture will work once call connects (when far end picks up)
 
-            // 2. set audio mode and speakerphone
-            audioManager.mode = AudioManager.MODE_IN_CALL
-            audioManager.isSpeakerphoneOn = true
+            // 2. keep call routing managed by system (BT/wired/earpiece), do not force loudspeaker
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager.availableCommunicationDevices.firstOrNull {
+                    it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+                            it.type == android.media.AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                            it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET ||
+                            it.type == android.media.AudioDeviceInfo.TYPE_WIRED_HEADPHONES
+                }?.let { audioManager.setCommunicationDevice(it) }
+            }
 
             val bufferSize = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
@@ -64,7 +72,7 @@ class AudioStreamHandler(
             }
 
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_DOWNLINK,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 SAMPLE_RATE,
                 CHANNEL_IN,
                 AUDIO_FORMAT,
@@ -119,7 +127,6 @@ class AudioStreamHandler(
                     }
                 }
 
-                delay(20) // ~50 chunks per second
             } catch (e: Exception) {
                 Log.e(TAG, "Error in audio capture loop", e)
                 break
@@ -135,6 +142,9 @@ class AudioStreamHandler(
             audioRecord = null
 
             // Reset audio manager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                audioManager.clearCommunicationDevice()
+            }
             audioManager.isSpeakerphoneOn = false
             audioManager.mode = AudioManager.MODE_NORMAL
 
@@ -151,9 +161,9 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🔊 Starting audio playback...")
 
-            // Set audio mode and speakerphone if not already
-            audioManager.mode = AudioManager.MODE_IN_CALL
-            audioManager.isSpeakerphoneOn = true
+            // Keep route on BT/headset/earpiece instead of forcing loudspeaker.
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
 
             // Set max volume for voice call stream
             audioManager.setStreamVolume(
@@ -176,7 +186,7 @@ class AudioStreamHandler(
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
