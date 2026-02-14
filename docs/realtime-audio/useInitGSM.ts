@@ -1,12 +1,13 @@
-import { RefObject, useEffect, useRef } from 'react'
-import { useCallingSetup } from '../store/useCallingSetup'
-import { useGSM } from '../store/useGSM'
+// Note: this is from frontend github repository - this file exist only for context for AI
+import { RefObject, useEffect, useRef } from "react"
+import { useCallingSetup } from "../store/useCallingSetup"
+import { useGSM } from "../store/useGSM"
 
 type AudioPacket = {
-  role: 'browser' | 'android'
+  role: "browser" | "android"
   deviceToken: string
-  dir: 'toAndroid' | 'toBrowser'
-  codec: 'pcm16'
+  dir: "toAndroid" | "toBrowser"
+  codec: "pcm16"
   seq: number
   ts: number
   sampleRate: 16000
@@ -14,18 +15,8 @@ type AudioPacket = {
 }
 
 export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => {
-  const {
-    callingSetup,
-    num,
-    dtmfTone,
-    isConnected,
-    isMuted,
-    setDTMFTone,
-    setIsReady,
-    setError,
-    setIsConnected,
-    setIsCalling,
-  } = useCallingSetup()
+  const { callingSetup, num, dtmfTone, isConnected, isMuted, setDTMFTone, setIsReady, setError, setIsConnected, setIsCalling } =
+    useCallingSetup()
   const { deviceToken } = useGSM()
 
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -43,49 +34,42 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const MAX_QUEUE = 80
 
   useEffect(() => {
-    if (callingSetup !== 'gsm' || !deviceToken) return
-    setIsReady(false)
+    if (callingSetup !== "gsm" || !deviceToken) return
 
     if (!audioContextRef.current) {
       audioContextRef.current = new AudioContext({ sampleRate: 16000 })
     }
 
-    const token = process.env.NEXT_PUBLIC_BACKEND_BEARER
+    const bearerToken = process.env.NEXT_PUBLIC_BACKEND_BEARER
     const wsBase = process.env.NEXT_PUBLIC_WS_URL
-    if (!token || !wsBase) {
-      setError('Missing NEXT_PUBLIC_BACKEND_BEARER or NEXT_PUBLIC_WS_URL')
-      console.error('[gsm/ws] missing env', { hasToken: !!token, wsBase })
+    if (!bearerToken || !wsBase) {
+      setError("Missing NEXT_PUBLIC_BACKEND_BEARER or NEXT_PUBLIC_WS_URL")
       return
     }
 
-    console.info('[gsm/ws] connecting', { wsBase, deviceToken })
-
-    const ws = new WebSocket(`${wsBase}/ws/audio?token=${encodeURIComponent(token)}`)
+    const ws = new WebSocket(`${wsBase}/ws/audio?token=${encodeURIComponent(bearerToken)}`)
     wsRef.current = ws
 
     ws.onopen = () => {
       setIsReady(true)
-      console.info('[gsm/ws] connected', { deviceToken })
-      ws.send(JSON.stringify({ role: 'browser', deviceToken, dir: 'toAndroid' }))
+      ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
     }
 
-    ws.onerror = (event) => {
+    ws.onerror = () => {
       setIsReady(false)
-      setError('WS connection error')
-      console.error('[gsm/ws] error', event)
+      setError("WS connection error")
     }
 
-    ws.onclose = (event) => {
+    ws.onclose = () => {
       setIsReady(false)
-      console.warn('[gsm/ws] closed', { code: event.code, reason: event.reason, wasClean: event.wasClean })
     }
 
-    ws.onmessage = async (ev) => {
+    ws.onmessage = async ev => {
       try {
         const pkt: AudioPacket = JSON.parse(ev.data)
-        if (pkt.deviceToken !== deviceToken || pkt.dir !== 'toBrowser') return
+        if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
 
-        const audioBytes = Uint8Array.from(atob(pkt.audio), (c) => c.charCodeAt(0))
+        const audioBytes = Uint8Array.from(atob(pkt.audio), c => c.charCodeAt(0))
         const int16 = new Int16Array(audioBytes.buffer)
         const f32 = new Float32Array(int16.length)
         for (let i = 0; i < int16.length; i++) f32[i] = int16[i] / 32768
@@ -148,7 +132,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const processor = audioContextRef.current.createScriptProcessor(1024, 1, 1)
     processorRef.current = processor
 
-    processor.onaudioprocess = (e) => {
+    processor.onaudioprocess = e => {
       if (isMuted || wsRef.current?.readyState !== WebSocket.OPEN) return
 
       const inF32 = e.inputBuffer.getChannelData(0)
@@ -161,10 +145,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       const audio = btoa(String.fromCharCode(...bytes))
 
       const pkt: AudioPacket = {
-        role: 'browser',
+        role: "browser",
         deviceToken,
-        dir: 'toAndroid',
-        codec: 'pcm16',
+        dir: "toAndroid",
+        codec: "pcm16",
         seq: seqTxRef.current++,
         ts: performance.now(),
         sampleRate: 16000,
@@ -178,23 +162,23 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   const stopMicCapture = () => {
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop())
+    mediaStreamRef.current?.getTracks().forEach(t => t.stop())
     mediaStreamRef.current = null
     processorRef.current?.disconnect()
     processorRef.current = null
   }
 
   useEffect(() => {
-    if (isConnected) startMicCapture().catch((e) => setError(String(e)))
+    if (isConnected) startMicCapture().catch(e => setError(String(e)))
     else stopMicCapture()
   }, [isConnected])
 
   const call = async () => {
     if (!deviceToken) return
     setIsCalling(true)
-    const res = await fetch('/api/gsm/call-started', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const res = await fetch("/api/gsm/call-started", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ num, deviceToken }),
     })
     if (!res.ok) throw new Error(await res.text())
@@ -202,9 +186,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   const hungUp = async () => {
-    await fetch('/api/gsm/call-ended', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    await fetch("/api/gsm/call-ended", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ deviceToken }),
     })
     setIsConnected(false)
@@ -212,9 +196,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   const sendDTMF = async (digit: string) => {
-    await fetch('/api/gsm/send-dtmf', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    await fetch("/api/gsm/send-dtmf", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ digit, deviceToken }),
     })
     if (dtmfTimeoutRef.current) clearTimeout(dtmfTimeoutRef.current)

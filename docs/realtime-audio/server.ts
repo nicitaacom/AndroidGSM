@@ -1,3 +1,5 @@
+// Note: this is from backend gsm-outreach-tool github repository - this file exist only for context for AI
+// this code hosted on VPS which allows bypass Vercel 60s API request timeout limit
 import express from 'express'
 import cors from 'cors'
 import bodyParser from 'body-parser'
@@ -10,6 +12,9 @@ dotenv.config()
 
 const BACKEND_AUTH_KEY = process.env.BACKEND_BEARER
 const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8080)
+
+const FRONTEND_PORT = process.env.FRONTEND_PORT || 3000
+const FRONTEND_URL = process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : `http://localhost:${FRONTEND_PORT}`
 
 const pusher = new Pusher({
   appId: process.env.PUSHER_APP_ID!,
@@ -34,6 +39,42 @@ const app = express()
 app.use(cors())
 app.use(bodyParser.json({ limit: '2mb' }))
 app.use(bodyParser.urlencoded({ extended: true }))
+
+// ---- CORS ----
+const allowedOrigins = [
+  FRONTEND_URL,
+  `http://localhost:${FRONTEND_PORT}`,
+  `http://127.0.0.1:${FRONTEND_PORT}`,
+]
+
+interface CorsOptions {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => void
+  credentials: boolean
+  methods: string[]
+  allowedHeaders: string[]
+  optionsSuccessStatus: number
+}
+
+const corsOptions: CorsOptions = {
+  origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true)
+    } else {
+      callback(new Error(`CORS blocked for origin: ${origin}`), false)
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 200,
+}
+
+// APPLY CORS globally - this automatically handles pre-flight OPTIONS requests internally
+app.use(cors(corsOptions))
+// app.options('/api/*', cors(corsOptions)) // don't use it to fix throw new TypeError(`Missing parameter name at ${i}
+
+
+
 
 function authOk(auth?: string) {
   return !!auth && auth === `Bearer ${BACKEND_AUTH_KEY}`
