@@ -60,24 +60,19 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const pusher = getPusherClient()
     const channel = pusher.subscribe("gsm-devices")
 
-    const refresh = async () => {
-      try {
-        const res = await fetch("/api/gsm/status")
-        if (!res.ok) return
-        const data = await res.json()
-        if (data?.deviceToken) setDeviceToken(data.deviceToken)
-        setIsReady(!!data?.isAuthorized)
-      } catch {
-        // no-op
-      }
+    const onDeviceConnected = (eventData: { deviceToken?: string }) => {
+      if (!eventData?.deviceToken) return
+      setDeviceToken(eventData.deviceToken)
+      setIsReady(true)
+      console.info("[gsm/pusher] device-connected", eventData)
     }
 
-    channel.bind("device-connected", refresh)
-    channel.bind("gsm:device-connected", refresh)
+    channel.bind("device-connected", onDeviceConnected)
+    channel.bind("gsm:device-connected", onDeviceConnected)
 
     return () => {
-      channel.unbind("device-connected", refresh)
-      channel.unbind("gsm:device-connected", refresh)
+      channel.unbind("device-connected", onDeviceConnected)
+      channel.unbind("gsm:device-connected", onDeviceConnected)
       pusher.unsubscribe("gsm-devices")
     }
   }, [setDeviceToken, setIsReady])
