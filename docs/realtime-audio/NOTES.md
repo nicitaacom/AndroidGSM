@@ -27,3 +27,8 @@ For true Opus+RTP, prefer WebRTC end-to-end. In plain WS mode above, packet head
 - Pusher Channels is excellent for signaling/events, but media streaming needs tighter control over packet size/rate/backpressure and lower overhead.
 - WS gives direct, persistent, bidirectional transport where you can tune framing and queue behavior for jitter buffer logic.
 - Keep Pusher for call-state signaling (`CALL_STARTED`, `CALL_CONNECTED`, `CALL_ENDED`), and use WS/WebRTC for continuous audio frames.
+
+## 7) "`/ws/audio` does not exist" confusion
+- `wss://your-domain/ws/audio` is a **WebSocket upgrade endpoint**, not a normal browser page route.
+- Opening it in the browser address bar via `https://.../ws/audio` will not prove much; use DevTools WS tab or `wscat`.
+- If WS never connects, the usual issue is reverse proxy config not forwarding `Upgrade`/`Connection` headers.
