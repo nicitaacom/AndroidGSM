@@ -8,9 +8,7 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.Build
-import android.os.Handler
 import android.os.IBinder
-import android.os.Looper
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 
@@ -94,9 +92,10 @@ class GsmService : Service() {
             // 1. Start foreground IMMEDIATELY - before any async work
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val notification = createNotification()
+                // Avoid strict Android 14/15 microphone FGS eligibility gate during startup.
+                // Audio recording still works with RECORD_AUDIO permission when call is active.
                 val serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(NOTIFICATION_ID, notification, serviceType)
                 else startForeground(NOTIFICATION_ID, notification)
                 MainActivity.log("GsmService: Foreground notification created")
@@ -207,25 +206,23 @@ class GsmService : Service() {
 
                 // 2. start call with error handling
                 try {
-                    gsmDialer?.startCall(number)
-                    MainActivity.log("Call started via GsmDialer to $number")
+                    val started = gsmDialer?.startCall(number) ?: false
+                    if (started) {
+                        MainActivity.log("Call started via GsmDialer to $number")
+                    } else {
+                        MainActivity.log("❌ Call start failed - syncing CALL_ENDED state")
+                        audioStreamHandler?.stopAudioCapture()
+                        audioStreamHandler?.stopAudioPlayback()
+                        pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                    }
                 } catch (error: Exception) {
                     MainActivity.log("ERROR starting call: ${error.message}")
+                    audioStreamHandler?.stopAudioCapture()
+                    audioStreamHandler?.stopAudioPlayback()
+                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                     error.printStackTrace()
                 }
 
-                // 3. Aggressively bring MainActivity to front after delay
-                Handler(Looper.getMainLooper()).postDelayed({
-                    try {
-                        val bringIntent = Intent(this, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                        }
-                        startActivity(bringIntent)
-                        MainActivity.log("Brought MainActivity to front after call start (from service)")
-                    } catch (e: Exception) {
-                        MainActivity.log("Error bringing MainActivity to front: ${e.message}")
-                    }
-                }, 1000)
             }
 
             "CALL_ENDED" -> {
@@ -235,18 +232,6 @@ class GsmService : Service() {
                 audioStreamHandler?.stopAudioPlayback()
                 pusherClient?.sendEvent("CALL_ENDED", emptyMap())
 
-                // Aggressively bring MainActivity to front after delay
-                Handler(Looper.getMainLooper()).postDelayed({
-                    try {
-                        val bringIntent = Intent(this, MainActivity::class.java).apply {
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-                        }
-                        startActivity(bringIntent)
-                        MainActivity.log("Brought MainActivity to front after call end (from service)")
-                    } catch (e: Exception) {
-                        MainActivity.log("Error bringing MainActivity to front: ${e.message}")
-                    }
-                }, 500)
             }
 
             "SEND_DTMF" -> {
