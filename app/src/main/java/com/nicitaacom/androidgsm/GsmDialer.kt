@@ -8,6 +8,7 @@ import android.content.pm.PackageManager
 import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.media.AudioManager
@@ -112,17 +113,21 @@ class GsmDialer(private val context: Context) {
             val selectedSubId = prefs.getInt("selected_sim", -1)
 
             var handle: PhoneAccountHandle? = null
+            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
 
             if (selectedSubId != -1 && hasPermission(Manifest.permission.READ_PHONE_STATE)) {
-                val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-                val phoneAccounts = telecomManager.callCapablePhoneAccounts
-
                 val subMgr = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
                 val subInfo = subMgr.getActiveSubscriptionInfo(selectedSubId)
 
                 if (subInfo != null) {
-                    val targetAccount = phoneAccounts.find { account ->
-                        account.id.contains(subInfo.simSlotIndex.toString()) || account.id.contains(selectedSubId.toString())
+                    val targetAccount = telecomManager.callCapablePhoneAccounts.firstOrNull { account ->
+                        val extras = telecomManager.getPhoneAccount(account)?.extras
+                        val subIdFromExtras = extras?.getInt(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, -1)
+                            ?: extras?.getInt("android.telephony.extra.SUBSCRIPTION_INDEX", -1)
+                            ?: extras?.getInt("android.telephony.extra.SUBSCRIPTION_ID", -1)
+                            ?: -1
+
+                        subIdFromExtras == selectedSubId
                     }
 
                     if (targetAccount != null) {
@@ -145,17 +150,23 @@ class GsmDialer(private val context: Context) {
                 return
             }
 
-            // 2. launch call intent
-            val intent = Intent(Intent.ACTION_CALL).apply {
-                data = Uri.parse("tel:$number")
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            // 2. Place call through TelecomManager on modern Android to avoid SIM picker fallback.
+            val uri = Uri.parse("tel:$number")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                val extras = Bundle().apply {
+                    handle?.let { putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, it) }
+                }
+                telecomManager.placeCall(uri, extras)
+            } else {
+                val intent = Intent(Intent.ACTION_CALL).apply {
+                    data = uri
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    if (handle != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
+                    }
+                }
+                context.startActivity(intent)
             }
-
-            if (handle != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                intent.putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
-            }
-
-            context.startActivity(intent)
             MainActivity.log("GsmDialer: Call started to $number")
         } catch (exception: Exception) {
             MainActivity.log("ERROR starting call: ${exception.message}")
