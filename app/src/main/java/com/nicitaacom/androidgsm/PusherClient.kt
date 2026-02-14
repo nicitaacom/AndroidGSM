@@ -43,31 +43,35 @@ class PusherClient(
             pusher?.connect(object : ConnectionEventListener {
                 override fun onConnectionStateChange(change: ConnectionStateChange) {
                     try {
-                        MainActivity.log("Pusher: ${change.previousState} → ${change.currentState}")
+                        MainActivity.log("ℹ️ Pusher: ${change.previousState} → ${change.currentState}")
                         if (change.currentState == ConnectionState.CONNECTED) {
-                            if (!isSubscribed) subscribeToChannels()  // Only subscribe if not already subscribed
+                            subscribeToChannels()
                             sendEvent("CONNECTED")
                             startHeartbeat()
                         } else if (change.currentState == ConnectionState.DISCONNECTED) {
                             val channelName = "private-device-${config.DEVICE_TOKEN}"
                             pusher?.unsubscribe(channelName)
-                            MainActivity.log("Unsubscribed from $channelName on disconnect")
+                            MainActivity.log("ℹ️ Unsubscribed from $channelName on disconnect")
                             isSubscribed = false
                             stopHeartbeat()
                         }
                     } catch (error: Exception) {
-                        MainActivity.log("ERROR in onConnectionStateChange: ${error.message}")
+                        MainActivity.log("❌ ERROR in onConnectionStateChange: ${error.message}")
                         error.printStackTrace()
                     }
                 }
 
                 override fun onError(message: String, code: String?, error: Exception?) {
-                    MainActivity.log("Pusher error: $message $code")
+                    if (message.contains("Existing subscription", ignoreCase = true)) {
+                        MainActivity.log("⚠️ Pusher duplicate subscription ignored: $message")
+                    } else {
+                        MainActivity.log("❌ Pusher error: $message $code")
+                    }
                     error?.printStackTrace()
                 }
             }, ConnectionState.ALL)
         } catch (error: Exception) {
-            MainActivity.log("ERROR in Pusher.connect(): ${error.message}")
+            MainActivity.log("❌ ERROR in Pusher.connect(): ${error.message}")
             error.printStackTrace()
         }
     }
@@ -91,7 +95,7 @@ class PusherClient(
         stopHeartbeat()
         val channelName = "private-device-${config.DEVICE_TOKEN}"
         pusher?.unsubscribe(channelName)
-        MainActivity.log("Unsubscribed from $channelName on manual disconnect")
+        MainActivity.log("ℹ️ Unsubscribed from $channelName on manual disconnect")
         isSubscribed = false
         pusher?.disconnect()
         scope.cancel()
@@ -100,26 +104,22 @@ class PusherClient(
     private fun subscribeToChannels() {
         try {
             val channelName = "private-device-${config.DEVICE_TOKEN}"
-            MainActivity.log("Pusher: subscribing to $channelName")
-
-            // Check if already subscribed
-            pusher?.getPrivateChannel(channelName)?.let {
-                MainActivity.log("Already subscribed to $channelName")
-                isSubscribed = true
-                return
-            }
+            MainActivity.log("ℹ️ Pusher: subscribing to $channelName")
+            // Ensure clean re-subscribe on reconnect to avoid stale subscription state.
+            pusher?.unsubscribe(channelName)
+            isSubscribed = false
 
             val channel = pusher?.subscribePrivate(
                 channelName,
                 object : PrivateChannelEventListener {
                     override fun onAuthenticationFailure(message: String, error: Exception?) {
-                        MainActivity.log("Private channel auth failed: $message")
+                        MainActivity.log("❌ Private channel auth failed: $message")
                         error?.printStackTrace()
                         isSubscribed = false
                     }
 
                     override fun onSubscriptionSucceeded(channelName: String) {
-                        MainActivity.log("Pusher subscribed to $channelName")
+                        MainActivity.log("✅ Pusher subscribed to $channelName")
                         isSubscribed = true
                     }
 
@@ -128,7 +128,7 @@ class PusherClient(
                             MainActivity.log("Pusher event: ${event.eventName} -> ${event.data}")
                             if (event.eventName == "command") handleCommand(event.data)
                         } catch (error: Exception) {
-                            MainActivity.log("ERROR in onEvent: ${error.message}")
+                            MainActivity.log("❌ ERROR in onEvent: ${error.message}")
                             error.printStackTrace()
                         }
                     }
@@ -136,7 +136,7 @@ class PusherClient(
                 "command"
             )
         } catch (error: Exception) {
-            MainActivity.log("ERROR in subscribeToChannels: ${error.message}")
+            MainActivity.log("❌ ERROR in subscribeToChannels: ${error.message}")
             error.printStackTrace()
             isSubscribed = false
         }
@@ -168,7 +168,7 @@ class PusherClient(
                 else -> MainActivity.log("Unknown command type: $type")
             }
         } catch (error: Exception) {
-            MainActivity.log("Command parse error: ${error.message}")
+            MainActivity.log("❌ Command parse error: ${error.message}")
             error.printStackTrace()
         }
     }
@@ -191,10 +191,10 @@ class PusherClient(
 
                 val response = httpClient.newCall(request).execute()
                 if (!response.isSuccessful) {
-                    MainActivity.log("Event send failed: ${response.code}")
+                    MainActivity.log("❌ Event send failed: ${response.code}")
                 }
             } catch (error: Exception) {
-                MainActivity.log("Send event error: ${error.message}")
+                MainActivity.log("❌ Send event error: ${error.message}")
                 error.printStackTrace()
             }
         }
