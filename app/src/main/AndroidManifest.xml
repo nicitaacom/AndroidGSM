@@ -5,6 +5,8 @@
     <!-- Permissions for GSM calls -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
 
     <!-- Permissions for audio capture and routing -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -60,7 +62,9 @@
                   android:launchMode="singleTask"
                   android:showWhenLocked="true"
                   android:turnScreenOn="true"
-                  android:theme="@android:style/Theme.Translucent.NoTitleBar" />  <!-- Transparent -->
+                  android:theme="@android:style/Theme.Translucent.NoTitleBar"
+                  android:taskAffinity=""
+                  android:excludeFromRecents="true" />  <!-- Prevent dialer from closing app -->
 
         <service android:name=".GsmService" android:enabled="true" android:exported="false"
                  android:foregroundServiceType="connectedDevice|microphone|mediaPlayback" />  <!-- Updated types -->

@@ -30,59 +30,65 @@ class GsmService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        MainActivity.log("GsmService: onCreate called")
-
-        // 1. Create notification channels FIRST
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val manager = getSystemService(NotificationManager::class.java)
-
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "GSM Gateway Service",
-                NotificationManager.IMPORTANCE_HIGH
-            )
-            channel.description = "GSM Gateway background service"
-            manager?.createNotificationChannel(channel)
-            MainActivity.log("Service notification channel created")
-
-            val callChannel = NotificationChannel(
-                CALL_CHANNEL_ID,
-                "GSM Calls",
-                NotificationManager.IMPORTANCE_HIGH
-            )
-            callChannel.description = "Notifications for initiating calls"
-            manager?.createNotificationChannel(callChannel)
-            MainActivity.log("Call notification channel created")
-        }
-
-        // 2. acquire wake lock if possible
         try {
-            val powerManager = getSystemService(POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
-            wakeLock?.acquire()
-            MainActivity.log("GsmService: Wake lock acquired")
-        } catch (error: Exception) {
-            MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
-        }
+            MainActivity.log("GsmService: onCreate called")
 
-        // 3. load config
-        try {
-            config = ConfigReader.readConfig(this)
-            if (config == null) {
-                MainActivity.log("ERROR: ConfigReader returned null - service will run in degraded mode")
-                return
+            // 1. Create notification channels FIRST
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val manager = getSystemService(NotificationManager::class.java)
+
+                val channel = NotificationChannel(
+                    CHANNEL_ID,
+                    "GSM Gateway Service",
+                    NotificationManager.IMPORTANCE_HIGH
+                )
+                channel.description = "GSM Gateway background service"
+                manager?.createNotificationChannel(channel)
+                MainActivity.log("Service notification channel created")
+
+                val callChannel = NotificationChannel(
+                    CALL_CHANNEL_ID,
+                    "GSM Calls",
+                    NotificationManager.IMPORTANCE_HIGH
+                )
+                callChannel.description = "Notifications for initiating calls"
+                manager?.createNotificationChannel(callChannel)
+                MainActivity.log("Call notification channel created")
             }
 
-            MainActivity.log("GsmService: Config loaded")
-            MainActivity.log("Backend URL: ${config?.BACKEND_URL}")
-            MainActivity.log("Device Token: ${config?.DEVICE_TOKEN}")
+            // 2. acquire wake lock if possible
+            try {
+                val powerManager = getSystemService(POWER_SERVICE) as PowerManager
+                wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
+                wakeLock?.acquire()
+                MainActivity.log("GsmService: Wake lock acquired")
+            } catch (error: Exception) {
+                MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
+            }
 
-            // init dialer
-            gsmDialer = GsmDialer(this)
-            MainActivity.log("GsmService: GsmDialer initialized")
-        } catch (error: Exception) {
-            MainActivity.log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
-            return
+            // 3. load config
+            try {
+                config = ConfigReader.readConfig(this)
+                if (config == null) {
+                    MainActivity.log("ERROR: ConfigReader returned null - service will run in degraded mode")
+                    return
+                }
+
+                MainActivity.log("GsmService: Config loaded")
+                MainActivity.log("Backend URL: ${config?.BACKEND_URL}")
+                MainActivity.log("Device Token: ${config?.DEVICE_TOKEN}")
+
+                // init dialer
+                gsmDialer = GsmDialer(this)
+                MainActivity.log("GsmService: GsmDialer initialized")
+            } catch (error: Exception) {
+                MainActivity.log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
+                error.printStackTrace()
+                return
+            }
+        } catch (e: Exception) {
+            MainActivity.log("FATAL: Uncaught exception in onCreate: ${e.message}")
+            e.printStackTrace()
         }
     }
 
@@ -93,8 +99,6 @@ class GsmService : Service() {
             // 1. Start foreground IMMEDIATELY - before any async work
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val notification = createNotification()
-                // Avoid strict Android 14/15 microphone FGS eligibility gate during startup.
-                // Audio recording still works with RECORD_AUDIO permission when call is active.
                 val serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
                         ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(NOTIFICATION_ID, notification, serviceType)
@@ -182,105 +186,179 @@ class GsmService : Service() {
 
     // central command dispatcher - single entrypoint
     fun handleCommand(type: String, data: Map<String, Any>) {
-        MainActivity.log("Command received: $type")
+        try {
+            MainActivity.log("Command received: $type")
 
-        val normalizedType = when (type) {
-            "MAKE_CALL", "CALL_START" -> "CALL_STARTED"
-            else -> type
+            val normalizedType = when (type) {
+                "MAKE_CALL", "CALL_START" -> "CALL_STARTED"
+                else -> type
+            }
+
+            when (normalizedType) {
+                "CALL_STARTED" -> handleCallStarted(data)
+                "CALL_ENDED" -> handleCallEnded()
+                "SEND_DTMF" -> handleSendDtmf(data)
+                "AUDIO_CHUNK" -> handleAudioChunk(data)
+                else -> MainActivity.log("Unhandled command: $type")
+            }
+        } catch (e: Exception) {
+            MainActivity.log("FATAL: Uncaught exception in handleCommand: ${e.message}")
+            e.printStackTrace()
         }
+    }
 
-        when (normalizedType) {
-            "CALL_STARTED" -> {
-                val number = data["number"] as? String ?: run {
-                    MainActivity.log("CALL_STARTED ignored: missing number")
-                    return
-                }
-                MainActivity.log("Starting call to: $number")
+    private fun handleCallStarted(data: Map<String, Any>) {
+        try {
+            val number = data["number"] as? String
+            if (number.isNullOrBlank()) {
+                MainActivity.log("CALL_STARTED ignored: missing number")
+                return
+            }
+            MainActivity.log("Starting call to: $number")
 
-                // 1. set callbacks BEFORE starting call
-                gsmDialer?.setCallConnectedCallback {
+            // 1. set callbacks BEFORE starting call
+            gsmDialer?.setCallConnectedCallback {
+                try {
                     MainActivity.log("Call connected (OFFHOOK) - starting audio capture and WebSocket")
-                    audioStreamHandler?.startAudioCapture()
-                    
-                    // Connect WebSocket for bidirectional audio
-                    val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")?.replace("https://", "wss://") + "/ws/audio"
-                    audioWsHandler?.connect(wsUrl, "Bearer ${config?.BACKEND_BEARER}", config?.DEVICE_TOKEN ?: "")
-                    audioWsHandler?.startAudioCapture()
-                    audioWsHandler?.startAudioPlayback()
-                    
-                    pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                }
 
-                gsmDialer?.setCallEndedCallback {
+                    // Start audio capture with retry
+                    Thread {
+                        try {
+                            audioStreamHandler?.startAudioCapture()
+                            MainActivity.log("Audio capture started successfully")
+                        } catch (e: Exception) {
+                            MainActivity.log("Error starting audio capture: ${e.message}")
+                            e.printStackTrace()
+                        }
+                    }.start()
+
+                    // Connect WebSocket for bidirectional audio (non-blocking)
+                    Thread {
+                        try {
+                            val baseUrl = config?.BACKEND_URL ?: ""
+                            val wsUrl = baseUrl
+                                .replace("http://", "ws://")
+                                .replace("https://", "wss://")
+                                .removeSuffix("/") + "/ws/audio"
+                            val bearerToken = config?.BACKEND_BEARER ?: ""
+
+                            MainActivity.log("WS URL: $wsUrl")
+                            MainActivity.log("Bearer token: ${bearerToken.take(10)}...")
+
+                            // Small delay to ensure Pusher CALL_CONNECTED reaches server first
+                            Thread.sleep(500)
+
+                            audioWsHandler?.connect(wsUrl, bearerToken, config?.DEVICE_TOKEN ?: "")
+                            audioWsHandler?.startAudioCapture()
+                            audioWsHandler?.startAudioPlayback()
+                            MainActivity.log("WebSocket audio connected")
+                        } catch (e: Exception) {
+                            MainActivity.log("Error connecting WebSocket: ${e.message}")
+                            e.printStackTrace()
+                        }
+                    }.start()
+
+                    // Send CALL_CONNECTED to server (non-blocking)
+                    Thread {
+                        try {
+                            pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
+                            MainActivity.log("CALL_CONNECTED sent to server")
+                        } catch (e: Exception) {
+                            MainActivity.log("Error sending CALL_CONNECTED: ${e.message}")
+                        }
+                    }.start()
+                } catch (e: Exception) {
+                    MainActivity.log("ERROR in CALL_CONNECTED callback: ${e.message}")
+                    e.printStackTrace()
+                }
+            }
+
+            gsmDialer?.setCallEndedCallback {
+                try {
                     MainActivity.log("Call ended - stopping audio and WebSocket")
                     audioStreamHandler?.stopAudioCapture()
                     audioStreamHandler?.stopAudioPlayback()
                     audioWsHandler?.disconnect()
                     pusherClient?.sendEvent("CALL_ENDED", emptyMap())
-                }
-
-                // 2. start call with error handling
-                try {
-                    val started = gsmDialer?.startCall(number) ?: false
-                    if (started) {
-                        MainActivity.log("Call started via GsmDialer to $number")
-                    } else {
-                        MainActivity.log("❌ Call start failed - syncing CALL_ENDED state")
-                        audioStreamHandler?.stopAudioCapture()
-                        audioStreamHandler?.stopAudioPlayback()
-                        pusherClient?.sendEvent("CALL_ENDED", emptyMap())
-                    }
-                } catch (error: Exception) {
-                    MainActivity.log("ERROR starting call: ${error.message}")
-                    audioStreamHandler?.stopAudioCapture()
-                    audioStreamHandler?.stopAudioPlayback()
-                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
-                    error.printStackTrace()
-                }
-
-            }
-
-            "CALL_ENDED" -> {
-                MainActivity.log("Ending call")
-                gsmDialer?.endCall()
-                audioStreamHandler?.stopAudioCapture()
-                audioStreamHandler?.stopAudioPlayback()
-                pusherClient?.sendEvent("CALL_ENDED", emptyMap())
-
-            }
-
-            "SEND_DTMF" -> {
-                val digit = data["digit"] as? String ?: run {
-                    MainActivity.log("SEND_DTMF ignored: missing digit")
-                    return
-                }
-                MainActivity.log("Sending DTMF: $digit")
-                gsmDialer?.sendDtmf(digit[0])
-                pusherClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
-
-                // Optional: bring to front after DTMF if needed, but probably not necessary
-            }
-
-            "AUDIO_CHUNK" -> {
-                val audioData = data["audio"] as? String ?: run {
-                    MainActivity.log("AUDIO_CHUNK ignored: missing audio data")
-                    return
-                }
-                
-                if (audioStreamHandler == null) {
-                    MainActivity.log("⚠️ AUDIO_CHUNK received but AudioStreamHandler not initialized")
-                    return
-                }
-                
-                try {
-                    audioStreamHandler?.playAudioChunk(audioData)
                 } catch (e: Exception) {
-                    MainActivity.log("❌ ERROR playing audio chunk: ${e.message}")
+                    MainActivity.log("ERROR in CALL_ENDED callback: ${e.message}")
                     e.printStackTrace()
                 }
             }
 
-            else -> MainActivity.log("Unhandled command: $type")
+            // 2. start call with error handling
+            try {
+                val started = gsmDialer?.startCall(number) ?: false
+                if (started) {
+                    MainActivity.log("Call started via GsmDialer to $number")
+                } else {
+                    MainActivity.log("Call start failed - syncing CALL_ENDED state")
+                    audioStreamHandler?.stopAudioCapture()
+                    audioStreamHandler?.stopAudioPlayback()
+                    audioWsHandler?.disconnect()
+                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                }
+            } catch (error: Exception) {
+                MainActivity.log("ERROR starting call: ${error.message}")
+                audioStreamHandler?.stopAudioCapture()
+                audioStreamHandler?.stopAudioPlayback()
+                audioWsHandler?.disconnect()
+                pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                error.printStackTrace()
+            }
+        } catch (e: Exception) {
+            MainActivity.log("FATAL ERROR in handleCallStarted: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
+    private fun handleCallEnded() {
+        try {
+            MainActivity.log("Ending call")
+            gsmDialer?.endCall()
+            audioStreamHandler?.stopAudioCapture()
+            audioStreamHandler?.stopAudioPlayback()
+            audioWsHandler?.disconnect()
+            pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+        } catch (e: Exception) {
+            MainActivity.log("ERROR in handleCallEnded: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
+    private fun handleSendDtmf(data: Map<String, Any>) {
+        try {
+            val digit = data["digit"] as? String
+            if (digit.isNullOrBlank()) {
+                MainActivity.log("SEND_DTMF ignored: missing digit")
+                return
+            }
+            MainActivity.log("Sending DTMF: $digit")
+            gsmDialer?.sendDtmf(digit[0])
+            pusherClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
+        } catch (e: Exception) {
+            MainActivity.log("ERROR in handleSendDtmf: ${e.message}")
+            e.printStackTrace()
+        }
+    }
+
+    private fun handleAudioChunk(data: Map<String, Any>) {
+        try {
+            val audioData = data["audio"] as? String
+            if (audioData.isNullOrBlank()) {
+                MainActivity.log("AUDIO_CHUNK ignored: missing audio data")
+                return
+            }
+
+            if (audioStreamHandler == null) {
+                MainActivity.log("AUDIO_CHUNK received but AudioStreamHandler not initialized")
+                return
+            }
+
+            audioStreamHandler?.playAudioChunk(audioData)
+        } catch (e: Exception) {
+            MainActivity.log("ERROR playing audio chunk: ${e.message}")
+            e.printStackTrace()
         }
     }
 }

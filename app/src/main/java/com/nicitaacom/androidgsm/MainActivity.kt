@@ -296,10 +296,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun copyLastLogsToClipboard() {
         val lines = logBuffer.lines().filter { it.isNotBlank() }
-        val last50 = lines.takeLast(50).joinToString("\n")
+        // Filter to show only important logs (errors, state changes, audio events)
+        val importantLogs = lines.filter { line ->
+            val lower = line.lowercase()
+            lower.contains("error") || lower.contains("call") || lower.contains("connected") ||
+                    lower.contains("warning") || lower.contains("fatal") || lower.contains("ended") ||
+                    lower.contains("started") || lower.contains("audio capture") || lower.contains("websocket") ||
+                    lower.contains("dtmf") || lower.contains("service") || lower.contains("permission")
+        }
+        val last30 = importantLogs.takeLast(30).joinToString("\n")
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", last50))
-        addLog("📋 Copied last ${lines.takeLast(50).size} logs to clipboard")
+        clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", last30))
+        addLog("📋 Copied ${importantLogs.takeLast(30).size} important logs to clipboard")
     }
 
     override fun onDestroy() {

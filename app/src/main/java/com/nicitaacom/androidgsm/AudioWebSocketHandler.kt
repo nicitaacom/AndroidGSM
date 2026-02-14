@@ -23,7 +23,7 @@ import java.nio.ByteOrder
 class AudioWebSocketHandler(
     private val context: Context,
     private val config: Config,
-    private val onAudioReceived: (Int16Array) -> Unit
+    private val onAudioReceived: (ShortArray) -> Unit
 ) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null
@@ -285,7 +285,7 @@ class AudioWebSocketHandler(
         scope.launch {
             try {
                 // ✅ DEBUG: Log packet details
-                Log.d(TAG, "🎵 Received audio chunk: size=${base64Audio.length}")
+                Log.d(TAG, "Received audio chunk: size=${base64Audio.length}")
 
                 // Validate
                 if (base64Audio.isBlank()) {
@@ -300,50 +300,74 @@ class AudioWebSocketHandler(
                     Log.e(TAG, "❌ Base64 decode failed: ${e.message}")
                     MainActivity.log("ERROR: Invalid base64 audio")
                     return@launch
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Unexpected decode error: ${e.message}")
+                    return@launch
                 }
 
                 Log.d(TAG, "Decoded: ${audioBytes.size} bytes")
 
                 // Validate size
-                if (audioBytes.size % 2 != 0) {
-                    Log.e(TAG, "❌ Odd bytes: ${audioBytes.size}")
+                if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) {
+                    Log.e(TAG, "❌ Invalid audio size: ${audioBytes.size}")
                     return@launch
                 }
 
                 // ✅ CRITICAL: Use explicit byte order
                 val shortBuffer = ShortArray(audioBytes.size / 2)
-                ByteBuffer.wrap(audioBytes)
-                    .order(ByteOrder.LITTLE_ENDIAN)
-                    .asShortBuffer()
-                    .get(shortBuffer)
-
-                // Verify AudioTrack state
-                if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
-                    Log.w(TAG, "⚠️ AudioTrack not ready, restarting")
-                    startAudioPlayback()
+                try {
+                    ByteBuffer.wrap(audioBytes)
+                        .order(ByteOrder.LITTLE_ENDIAN)
+                        .asShortBuffer()
+                        .get(shortBuffer)
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ Buffer conversion error: ${e.message}")
+                    return@launch
                 }
 
-                // Write audio
-                val written = audioTrack?.write(shortBuffer, 0, shortBuffer.size) ?: -1
+                // Verify AudioTrack exists and is initialized
+                val track = audioTrack
+                if (track == null) {
+                    Log.w(TAG, "⚠️ AudioTrack is null, restarting")
+                    startAudioPlayback()
+                    return@launch
+                }
 
-                when {
-                    written == AudioTrack.ERROR_INVALID_OPERATION -> {
-                        Log.e(TAG, "❌ AudioTrack ERROR_INVALID_OPERATION")
-                        isPlaying = false
+                if (track.state != AudioTrack.STATE_INITIALIZED) {
+                    Log.w(TAG, "⚠️ AudioTrack not initialized (state=${track.state}), restarting")
+                    startAudioPlayback()
+                    return@launch
+                }
+
+                // Write audio with bounds checking
+                try {
+                    val written = track.write(shortBuffer, 0, shortBuffer.size)
+
+                    when {
+                        written == AudioTrack.ERROR_INVALID_OPERATION -> {
+                            Log.e(TAG, "❌ AudioTrack ERROR_INVALID_OPERATION")
+                            isPlaying = false
+                        }
+                        written == AudioTrack.ERROR_BAD_VALUE -> {
+                            Log.e(TAG, "❌ AudioTrack ERROR_BAD_VALUE")
+                            isPlaying = false
+                        }
+                        written < 0 -> {
+                            Log.e(TAG, "❌ AudioTrack write error: $written")
+                        }
+                        written != shortBuffer.size -> {
+                            Log.w(TAG, "⚠️ Partial write: $written/${shortBuffer.size}")
+                        }
+                        else -> {
+                            Log.d(TAG, "✅ Wrote ${shortBuffer.size} samples")
+                        }
                     }
-                    written == AudioTrack.ERROR_BAD_VALUE -> {
-                        Log.e(TAG, "❌ AudioTrack ERROR_BAD_VALUE")
-                        isPlaying = false
-                    }
-                    written < 0 -> {
-                        Log.e(TAG, "❌ AudioTrack write error: $written")
-                    }
-                    written != shortBuffer.size -> {
-                        Log.w(TAG, "⚠️ Partial write: $written/${shortBuffer.size}")
-                    }
-                    else -> {
-                        Log.d(TAG, "✅ Wrote ${shortBuffer.size} samples")
-                    }
+                } catch (e: IllegalStateException) {
+                    Log.e(TAG, "❌ AudioTrack IllegalStateException (released?): ${e.message}")
+                    isPlaying = false
+                } catch (e: Exception) {
+                    Log.e(TAG, "❌ AudioTrack write exception: ${e.message}")
+                    e.printStackTrace()
                 }
 
             } catch (e: Exception) {

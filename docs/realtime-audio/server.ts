@@ -87,11 +87,16 @@ function authOk(auth?: string) {
 }
 
 async function sendCommand(deviceToken: string, type: string, data: any = {}) {
-  await pusher.trigger(`private-device-${deviceToken}`, 'command', {
-    type,
-    data,
-    timestamp: new Date().toISOString(),
-  })
+  try {
+    // Fire the pusher event and handle errors - don't let a Pusher failure crash the server
+    await pusher.trigger(`private-device-${deviceToken}`, 'command', {
+      type,
+      data,
+      timestamp: new Date().toISOString(),
+    })
+  } catch (err) {
+    console.error('❌ [sendCommand] failed to trigger pusher command', { deviceToken, type, err: String(err) })
+  }
 }
 
 app.get('/health', (_req, res) => {
@@ -161,72 +166,78 @@ app.get('/api/device-status/:deviceToken', (req, res) => {
 })
 
 app.post('/api/events', async (req, res) => {
-  console.log('ℹ️ [api/events] request received')
   if (!authOk(req.headers.authorization)) {
     const incoming = extractBearerToken(req.headers.authorization)
     const expected = (BACKEND_AUTH_KEY || "").trim()
-    console.log('❌ [api/events] unauthorized', {
-      incomingToken: incoming,
+    console.error('❌ [api/events] unauthorized', {
       incomingLen: incoming.length,
-      expectedToken: expected,
       expectedLen: expected.length,
-      rawAuthorization: req.headers.authorization,
     })
     return res.status(401).json({ error: 'Unauthorized' })
   }
 
   const { deviceToken, type, data } = req.body
   if (!deviceToken || !type) {
-    console.log('❌ [api/events] missing deviceToken/type', { deviceToken, type })
+    console.error('❌ [api/events] missing deviceToken/type')
     return res.status(400).json({ error: 'Missing deviceToken or type' })
   }
 
-  console.log('ℹ️ [api/events] accepted', { deviceToken, type })
+  console.log(`📱 [api/events] ${type}`, { deviceToken })
 
   connectedDevices.set(deviceToken, { deviceToken, lastSeen: new Date() })
 
   switch (type) {
     case 'CONNECTED':
-      await pusher.trigger('gsm-devices', 'device-connected', { deviceToken, timestamp: new Date().toISOString() })
+      await pusher.trigger('gsm-devices', 'gsm:device-connected', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'CALL_STARTED':
-      await pusher.trigger('gsm-calls', 'call-started', { deviceToken, number: data?.number, timestamp: new Date().toISOString() })
+      console.log(`📞 [api/events] CALL_STARTED to ${data?.number}`)
+      await pusher.trigger('gsm-calls', 'gsm:call-started', { deviceToken, number: data?.number, timestamp: new Date().toISOString() })
       break
     case 'CALL_CONNECTED':
-      await pusher.trigger('gsm-calls', 'call-connected', { deviceToken, timestamp: new Date().toISOString() })
+      console.log(`✅ [api/events] CALL_CONNECTED - call is being answered`)
+      await pusher.trigger('gsm-calls', 'gsm:call-connected', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'CALL_ENDED':
-      await pusher.trigger('gsm-calls', 'call-ended', { deviceToken, timestamp: new Date().toISOString() })
+      console.log(`❌ [api/events] CALL_ENDED`)
+      await pusher.trigger('gsm-calls', 'gsm:call-ended', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'DTMF_SENT':
+      console.log(`🔢 [api/events] DTMF sent: ${data?.digit}`)
       await sendCommand(deviceToken, 'SEND_DTMF', data)
       break
     case 'AUDIO_CHUNK': {
-      // Keep backwards compatibility with current Android app flow (Pusher events)
-      await pusher.trigger('gsm-calls', 'audio-chunk', {
-        deviceToken,
-        audio: data?.audio,
-        timestamp: new Date().toISOString(),
-      })
-
+      // Route audio to browser WebSocket peer (primary path)
       const browserPeer = browserByDevice.get(deviceToken)
       if (browserPeer?.readyState === WebSocket.OPEN) {
-        browserPeer.send(
-          JSON.stringify({
-            role: 'android',
-            deviceToken,
-            dir: 'toBrowser',
-            codec: data?.codec || 'pcm16',
-            seq: data?.seq,
-            ts: data?.ts,
-            sampleRate: data?.sampleRate || 16000,
-            audio: data?.audio,
-          }),
-        )
+        try {
+          browserPeer.send(
+            JSON.stringify({
+              role: 'android',
+              deviceToken,
+              dir: 'toBrowser',
+              codec: data?.codec || 'pcm16',
+              seq: data?.seq,
+              ts: data?.ts,
+              sampleRate: data?.sampleRate || 16000,
+              audio: data?.audio,
+            }),
+          )
+        } catch (err) {
+          console.error('❌ [api/events/audio] failed to send to browser ws peer', String(err))
+        }
+      } else {
+        // Fallback: Route via Pusher for backward compatibility
+        await pusher.trigger('gsm-calls', 'gsm:audio-chunk', {
+          deviceToken,
+          audio: data?.audio,
+          timestamp: new Date().toISOString(),
+        })
       }
       break
     }
     default:
+      console.warn(`⚠️ [api/events] unknown event type: ${type}`)
       break
   }
 
@@ -329,35 +340,49 @@ wss.on('connection', (ws, req) => {
       return
     }
 
-    const { role, deviceToken, dir } = msg
-    if (!role || !deviceToken || !dir) return
+    try {
+      const { role, deviceToken, dir } = msg
+      if (!role || !deviceToken || !dir) return
 
-    // First message from browser is often a registration packet (no audio/seq yet).
-    console.log('ℹ️ [ws/audio] packet', { role, deviceToken, dir, seq: msg.seq })
+      // First message from browser is often a registration packet (no audio/seq yet).
+      console.log('ℹ️ [ws/audio] packet', { role, deviceToken, dir, seq: msg.seq })
 
-    if (role === 'browser') browserByDevice.set(deviceToken, ws)
-    if (role === 'android') androidByDevice.set(deviceToken, ws)
+      if (role === 'browser') browserByDevice.set(deviceToken, ws)
+      if (role === 'android') androidByDevice.set(deviceToken, ws)
 
-    // Relay with sequence/timestamp untouched (receiver jitter buffer uses these)
-    if (dir === 'toAndroid') {
-      const peer = androidByDevice.get(deviceToken)
-      if (peer?.readyState === WebSocket.OPEN) {
-        peer.send(JSON.stringify(msg))
-      } else if (msg.audio) {
-        // Backward-compatible fallback: Android app currently receives media via Pusher command events.
-        await sendCommand(deviceToken, 'AUDIO_CHUNK', {
-          audio: msg.audio,
-          codec: msg.codec || 'pcm16',
-          seq: msg.seq,
-          ts: msg.ts,
-          sampleRate: msg.sampleRate || 16000,
-        })
-        console.log('⚠️ [ws/audio] no android ws peer, relayed chunk via pusher command', { deviceToken, seq: msg.seq })
+      // Relay with sequence/timestamp untouched (receiver jitter buffer uses these)
+      if (dir === 'toAndroid') {
+        const peer = androidByDevice.get(deviceToken)
+        if (peer?.readyState === WebSocket.OPEN) {
+          try {
+            peer.send(JSON.stringify(msg))
+          } catch (err) {
+            console.error('❌ [ws/audio] failed to send to android peer', { deviceToken, err: String(err) })
+          }
+        } else if (msg.audio) {
+          // Backward-compatible fallback: Android app currently receives media via Pusher command events.
+          // Don't await here in the hot path to avoid blocking the message loop; sendCommand itself handles errors.
+          void sendCommand(deviceToken, 'AUDIO_CHUNK', {
+            audio: msg.audio,
+            codec: msg.codec || 'pcm16',
+            seq: msg.seq,
+            ts: msg.ts,
+            sampleRate: msg.sampleRate || 16000,
+          })
+          console.log('⚠️ [ws/audio] no android ws peer, relayed chunk via pusher command', { deviceToken, seq: msg.seq })
+        }
+      } else if (dir === 'toBrowser') {
+        const peer = browserByDevice.get(deviceToken)
+        if (peer?.readyState === WebSocket.OPEN) {
+          try {
+            peer.send(JSON.stringify(msg))
+          } catch (err) {
+            console.error('❌ [ws/audio] failed to send to browser peer', { deviceToken, err: String(err) })
+          }
+        } else console.log('⚠️ [ws/audio] no browser ws peer for toBrowser packet', { deviceToken, seq: msg.seq })
       }
-    } else if (dir === 'toBrowser') {
-      const peer = browserByDevice.get(deviceToken)
-      if (peer?.readyState === WebSocket.OPEN) peer.send(JSON.stringify(msg))
-      else console.log('⚠️ [ws/audio] no browser ws peer for toBrowser packet', { deviceToken, seq: msg.seq })
+    } catch (err) {
+      console.error('❌ [ws/audio] unexpected error processing message', { err: String(err), raw: msg })
     }
   })
 

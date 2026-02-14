@@ -180,29 +180,57 @@ class GsmDialer(private val context: Context) {
         try {
             MainActivity.log("GsmDialer: Attempting to end call")
 
+            // Try multiple methods to ensure call is terminated
+            var endCallSuccess = false
+
+            // Method 1: Android 9+ TelecomManager
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                // 9. Android 9+ - use TelecomManager if permission granted
                 if (hasPermission(Manifest.permission.ANSWER_PHONE_CALLS)) {
                     try {
                         val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
-                        @Suppress("MissingPermission") // we already checked permission above (in init)
-                        val ended = telecomManager?.endCall() ?: false
-                        MainActivity.log(if (ended) "✅ Call ended programmatically" else "⚠️ endCall() returned false")
-                        return
-                    } catch (securityException: SecurityException) {
-                        MainActivity.log("ERROR: SecurityException calling endCall() - ${securityException.message}")
+                        @Suppress("MissingPermission")
+                        endCallSuccess = telecomManager?.endCall() ?: false
+                        if (endCallSuccess) {
+                            MainActivity.log("✅ Call ended via TelecomManager")
+                            return
+                        }
+                    } catch (e: Exception) {
+                        MainActivity.log("⚠️ TelecomManager.endCall() failed: ${e.message}")
                     }
                 } else {
-                    MainActivity.log("⚠️ ANSWER_PHONE_CALLS permission not granted - using fallback")
+                    MainActivity.log("⚠️ ANSWER_PHONE_CALLS permission not granted")
                 }
             }
 
-            // 10. Fallback for Android <9 or missing permission - simulate headset hook
-            val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-                putExtra(Intent.EXTRA_KEY_EVENT, KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HEADSETHOOK))
+            // Method 2: Headset hook (fallback for older Android or if TelecomManager fails)
+            try {
+                val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+                    putExtra(Intent.EXTRA_KEY_EVENT, KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HEADSETHOOK))
+                }
+                context.sendOrderedBroadcast(intent, null)
+                MainActivity.log("✅ Call end requested via headset hook")
+                return
+            } catch (e: Exception) {
+                MainActivity.log("⚠️ Headset hook failed: ${e.message}")
             }
-            context.sendOrderedBroadcast(intent, null)
-            MainActivity.log("⚠️ Call end requested via headset hook (fallback method)")
+
+            // Method 3: Try with MANAGE_OWN_CALLS permission (Android 10+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    if (hasPermission("android.permission.MANAGE_OWN_CALLS")) {
+                        val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
+                        @Suppress("MissingPermission")
+                        if (telecomManager?.endCall() == true) {
+                            MainActivity.log("✅ Call ended via MANAGE_OWN_CALLS")
+                            return
+                        }
+                    }
+                } catch (e: Exception) {
+                    MainActivity.log("⚠️ MANAGE_OWN_CALLS endCall failed: ${e.message}")
+                }
+            }
+
+            MainActivity.log("⚠️ Call end requested (result unknown - multiple methods attempted)")
         } catch (error: Exception) {
             MainActivity.log("ERROR ending call: ${error.message}")
             Log.e("GsmDialer", "Failed to end call", error)
