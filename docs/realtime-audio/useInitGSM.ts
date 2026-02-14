@@ -92,11 +92,24 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const devicesChannel = pusher.subscribe("gsm-devices")
     const callsChannel = pusher.subscribe("gsm-calls")
 
-    const onDeviceConnected = (eventData: { deviceToken?: string }) => {
-      if (!eventData?.deviceToken) return
-      setDeviceToken(eventData.deviceToken)
-      setIsReady(true)
-      console.info("[gsm/pusher] device-connected", eventData)
+    const onDeviceConnected = async (eventData: { deviceToken?: string }) => {
+      // If payload has token, apply immediately; otherwise fallback to status endpoint.
+      if (eventData?.deviceToken) {
+        setDeviceToken(eventData.deviceToken)
+        setIsReady(true)
+        console.info("[gsm/pusher] device-connected", eventData)
+        return
+      }
+
+      try {
+        const res = await fetch("/api/gsm/status")
+        if (!res.ok) return
+        const data = await res.json()
+        if (data?.deviceToken) setDeviceToken(data.deviceToken)
+        setIsReady(!!data?.isAuthorized)
+      } catch {
+        // no-op
+      }
     }
 
     const onCallStarted = (eventData: GsmCallsEvent) => {
@@ -123,27 +136,18 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       enqueueBase64Audio(eventData.audio)
     }
 
-    devicesChannel.bind("device-connected", onDeviceConnected)
+    // Bind only namespaced events from your PusherEventMap (`gsm:*`) to avoid duplication/confusion.
     devicesChannel.bind("gsm:device-connected", onDeviceConnected)
-    callsChannel.bind("call-started", onCallStarted)
     callsChannel.bind("gsm:call-started", onCallStarted)
-    callsChannel.bind("call-connected", onCallConnected)
     callsChannel.bind("gsm:call-connected", onCallConnected)
-    callsChannel.bind("call-ended", onCallEnded)
     callsChannel.bind("gsm:call-ended", onCallEnded)
-    callsChannel.bind("audio-chunk", onAudioChunk)
     callsChannel.bind("gsm:audio-chunk", onAudioChunk)
 
     return () => {
-      devicesChannel.unbind("device-connected", onDeviceConnected)
       devicesChannel.unbind("gsm:device-connected", onDeviceConnected)
-      callsChannel.unbind("call-started", onCallStarted)
       callsChannel.unbind("gsm:call-started", onCallStarted)
-      callsChannel.unbind("call-connected", onCallConnected)
       callsChannel.unbind("gsm:call-connected", onCallConnected)
-      callsChannel.unbind("call-ended", onCallEnded)
       callsChannel.unbind("gsm:call-ended", onCallEnded)
-      callsChannel.unbind("audio-chunk", onAudioChunk)
       callsChannel.unbind("gsm:audio-chunk", onAudioChunk)
       pusher.unsubscribe("gsm-devices")
       pusher.unsubscribe("gsm-calls")
