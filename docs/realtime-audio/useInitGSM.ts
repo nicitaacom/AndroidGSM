@@ -1,3 +1,4 @@
+// Note: this is from frontend github repository - this file exist only for context for AI
 import { RefObject, useEffect, useRef } from 'react'
 import { useCallingSetup } from '../store/useCallingSetup'
 import { useGSM } from '../store/useGSM'
