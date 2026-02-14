@@ -32,3 +32,8 @@ For true Opus+RTP, prefer WebRTC end-to-end. In plain WS mode above, packet head
 - `wss://your-domain/ws/audio` is a **WebSocket upgrade endpoint**, not a normal browser page route.
 - Opening it in the browser address bar via `https://.../ws/audio` will not prove much; use DevTools WS tab or `wscat`.
 - If WS never connects, the usual issue is reverse proxy config not forwarding `Upgrade`/`Connection` headers.
+
+## 8) If `/api/commands` is unauthorized but `/api/events` works
+- Your website Next.js API routes and Android app may be using different bearer values.
+- Verify the exact token used by website proxy routes matches backend `BACKEND_BEARER` byte-for-byte (no extra quotes/spaces/newlines).
+- Prefer reading bearer from server-side env in Next routes, not hardcoded literals.

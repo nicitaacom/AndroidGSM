@@ -284,6 +284,7 @@ wss.on('connection', (ws, req) => {
     const { role, deviceToken, dir } = msg
     if (!role || !deviceToken || !dir) return
 
+    // First message from browser is often a registration packet (no audio/seq yet).
     console.log('ℹ️ [ws/audio] packet', { role, deviceToken, dir, seq: msg.seq })
 
     if (role === 'browser') browserByDevice.set(deviceToken, ws)

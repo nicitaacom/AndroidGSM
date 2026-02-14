@@ -72,7 +72,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         if (!res.ok) throw new Error(await res.text())
         const data = await res.json()
         if (data?.deviceToken) {
-          setDeviceToken(data.deviceToken)
+          // Avoid token flapping when multiple devices are online.
+          if (!deviceToken) {
+            setDeviceToken(data.deviceToken)
+          } else if (deviceToken !== data.deviceToken) {
+            console.warn("[gsm/status] multiple devices online, keeping selected token", {
+              selected: deviceToken,
+              suggested: data.deviceToken,
+            })
+          }
           setIsReady(!!data.isAuthorized)
           console.info("[gsm/status] fetched", data)
         }
@@ -85,7 +93,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     fetchDeviceToken()
     const id = setInterval(fetchDeviceToken, 5000)
     return () => clearInterval(id)
-  }, [setDeviceToken, setError, setIsReady])
+  }, [deviceToken, setDeviceToken, setError, setIsReady])
 
   useEffect(() => {
     const pusher = getPusherClient()
@@ -270,7 +278,18 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         sampleRate: 16000,
         audio,
       }
-      wsRef.current!.send(JSON.stringify(pkt))
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify(pkt))
+      } else {
+        // Backward-compatible fallback path via Next.js API route -> backend /api/commands (AUDIO_CHUNK)
+        fetch("/api/gsm/send-audio-chunk", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audio, deviceToken }),
+        }).catch(() => {
+          // no-op to avoid spamming UI errors during temporary reconnects
+        })
+      }
     }
 
     source.connect(processor)
@@ -298,17 +317,26 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ num, deviceToken }),
     })
-    if (!res.ok) throw new Error(await res.text())
+    if (!res.ok) {
+      const errorText = await res.text()
+      console.error("[gsm/call] start failed", { status: res.status, errorText })
+      throw new Error(errorText)
+    }
     setIsConnected(true)
   }
 
   const hungUp = async () => {
     console.info("[gsm/call] end requested", { deviceToken })
-    await fetch("/api/gsm/call-ended", {
+    const res = await fetch("/api/gsm/call-ended", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ deviceToken }),
     })
+    if (!res.ok) {
+      const errorText = await res.text()
+      console.error("[gsm/call] end failed", { status: res.status, errorText })
+      throw new Error(errorText)
+    }
     setIsConnected(false)
     setIsCalling(false)
   }
