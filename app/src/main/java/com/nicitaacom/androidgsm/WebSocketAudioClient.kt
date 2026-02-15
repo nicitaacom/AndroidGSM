@@ -53,6 +53,18 @@ class WebSocketAudioClient(
         isConnected = true
         MainActivity.log("✅ WebSocket: Connected")
         Log.d(TAG, "Connected: ${response.code} ${response.message}")
+
+        try {
+            // Register android peer immediately so server can relay browser -> android audio over WS.
+            val registerPacket = JSONObject().apply {
+                put("role", "android")
+                put("deviceToken", deviceToken)
+                put("dir", "toBrowser")
+            }
+            webSocket.send(registerPacket.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Register packet send error: ${e.message}")
+        }
     }
 
     override fun onMessage(webSocket: WebSocket, text: String) {

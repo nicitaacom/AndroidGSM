@@ -21,6 +21,55 @@ type GsmCallsEvent = {
   audio?: string
 }
 
+
+/**
+ * Utility: Downsample Float32Array audio buffer to 16kHz.
+ */
+function downsampleTo16k(buffer: Float32Array, inputSampleRate: number): Float32Array {
+  if (inputSampleRate === 16000) return buffer
+  const sampleRateRatio = inputSampleRate / 16000
+  const newLength = Math.round(buffer.length / sampleRateRatio)
+  const result = new Float32Array(newLength)
+  let offsetResult = 0
+  let offsetBuffer = 0
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio)
+    let accum = 0
+    let count = 0
+
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i]
+      count++
+    }
+
+    result[offsetResult] = count > 0 ? accum / count : 0
+    offsetResult++
+    offsetBuffer = nextOffsetBuffer
+  }
+
+  return result
+}
+
+/**
+ * Converts a Float32Array of audio samples (range -1..1) to base64-encoded PCM16 (little-endian).
+ */
+function cleanAndEncodePcm16(downsampled: Float32Array) {
+  const pcm16 = new Int16Array(downsampled.length)
+  for (let i = 0; i < downsampled.length; i++) {
+    const s = Math.max(-1, Math.min(1, downsampled[i]))
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+
+  const bytes = new Uint8Array(pcm16.buffer)
+  let binary = ""
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+
+  return btoa(binary)
+}
+
 /**
  * useInitGSM - Comprehensive GSM calling hook
  * Manages:
@@ -48,6 +97,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const nextRxSeqRef = useRef(0)
   const rxEnqueueSeqRef = useRef(0)
   const playoutTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const isPlayoutRunningRef = useRef(false)
 
   // Playout delay: ~250ms (good enough for <=1000ms user requirement)
   const PLAYOUT_INTERVAL_MS = 20
@@ -55,6 +105,24 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
   // Cleanup refs to prevent memory leaks
   const isCleaningUpRef = useRef(false)
+  const statusFailureCountRef = useRef(0)
+  const wsReconnectTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const duplexValidationModeRef = useRef(false)
+
+  const isDuplexValidationEnabled = () => {
+    if (typeof window === "undefined") return false
+
+    try {
+      const fromStorage = window.localStorage.getItem("gsm.duplexValidation")
+      if (fromStorage === "1" || fromStorage === "true") return true
+    } catch {
+      // localStorage can fail in strict browser/privacy modes
+    }
+
+    const params = new URLSearchParams(window.location.search)
+    const fromQuery = params.get("gsmDuplexValidation")
+    return fromQuery === "1" || fromQuery === "true"
+  }
 
   /**
    * 0. INITIALIZE AUDIO CONTEXT
@@ -70,6 +138,13 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         console.error("[gsm] failed to create AudioContext", err)
         setError("Audio system not available")
       }
+    }
+
+    duplexValidationModeRef.current = isDuplexValidationEnabled()
+    if (duplexValidationModeRef.current) {
+      console.info(
+        "[gsm/duplex-test] enabled (query: ?gsmDuplexValidation=1 or localStorage[gsm.duplexValidation]=1); uses existing ws+pusher channels",
+      )
     }
   }, [setError])
 
@@ -114,6 +189,62 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
   }
 
+  const resetInboundAudioState = () => {
+    rxQueueRef.current.clear()
+    nextRxSeqRef.current = 0
+    rxEnqueueSeqRef.current = 0
+  }
+
+  const ensurePlayoutLoop = () => {
+    const ctx = audioContextRef.current
+    if (!ctx || isPlayoutRunningRef.current) return
+
+    if (ctx.state === "suspended") {
+      ctx.resume().catch((e) => console.error("[gsm/playback] resume error", e))
+    }
+
+    isPlayoutRunningRef.current = true
+    let playoutCount = 0
+    console.info("[gsm/playback] loop started", { state: ctx.state })
+
+    playoutTimerRef.current = setInterval(() => {
+      const seq = nextRxSeqRef.current
+      const chunk = rxQueueRef.current.get(seq)
+      if (!chunk || chunk.length === 0) return
+
+      rxQueueRef.current.delete(seq)
+      nextRxSeqRef.current = seq + 1
+      playoutCount++
+
+      try {
+        const buf = ctx.createBuffer(1, chunk.length, 16000)
+        const channelData = buf.getChannelData(0)
+        channelData.set(chunk)
+
+        const src = ctx.createBufferSource()
+        src.buffer = buf
+
+        const gainNode = ctx.createGain()
+        gainNode.gain.value = 1.0
+        src.connect(gainNode)
+        gainNode.connect(ctx.destination)
+        src.start(ctx.currentTime)
+
+        if (playoutCount % 50 === 0) {
+          console.log("[gsm/playback] playing chunk seq", seq, "total played:", playoutCount)
+        }
+      } catch (err) {
+        console.error("[gsm/playback] error playing chunk", err)
+      }
+    }, PLAYOUT_INTERVAL_MS)
+  }
+
+  const stopPlayoutLoop = () => {
+    if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
+    playoutTimerRef.current = null
+    isPlayoutRunningRef.current = false
+  }
+
   /**
    * 1. DEVICE DISCOVERY & REGISTRATION
    * Polls /api/gsm/status to find connected device and keep it alive
@@ -121,31 +252,41 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   useEffect(() => {
     async function fetchDeviceToken() {
       try {
-        const res = await fetch("/api/gsm/status")
+        const res = await fetch("/api/gsm/status", { cache: "no-store" })
         if (!res.ok) throw new Error(await res.text())
         const data = await res.json()
 
-        if (data?.deviceToken) {
+        const authorized = !!data?.isAuthorized
+        const nextDeviceToken = data?.deviceToken as string | undefined
+
+        if (nextDeviceToken) {
           // Avoid token flapping when multiple devices are online
           if (!deviceToken) {
-            setDeviceToken(data.deviceToken)
-            console.info("[gsm] device discovered", { deviceToken: data.deviceToken })
-          } else if (deviceToken !== data.deviceToken) {
+            setDeviceToken(nextDeviceToken)
+            console.info("[gsm] device discovered", { deviceToken: nextDeviceToken })
+          } else if (deviceToken !== nextDeviceToken) {
             console.warn("[gsm] multiple devices detected, keeping selected token", {
               selected: deviceToken,
-              suggested: data.deviceToken,
+              suggested: nextDeviceToken,
             })
           }
-          setIsReady(!!data.isAuthorized)
         }
+
+        statusFailureCountRef.current = 0
+        setIsReady(authorized && !!nextDeviceToken)
+        if (authorized && nextDeviceToken) setError("")
       } catch (error) {
+        statusFailureCountRef.current += 1
+        if (statusFailureCountRef.current >= 2) {
+          setIsReady(false)
+        }
         setError(String(error))
         console.error("[gsm/status] error", error)
       }
     }
 
     fetchDeviceToken()
-    const id = setInterval(fetchDeviceToken, 5000) // Poll every 5s
+    const id = setInterval(fetchDeviceToken, 2000) // Poll every 2s for near real-time readiness
     return () => clearInterval(id)
   }, [deviceToken, setDeviceToken, setError, setIsReady])
 
@@ -163,6 +304,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       if (eventData?.deviceToken) {
         setDeviceToken(eventData.deviceToken)
         setIsReady(true)
+        setError("")
         console.info("[gsm/pusher] device-connected", eventData.deviceToken)
         return
       }
@@ -209,6 +351,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const onAudioChunk = (eventData: GsmCallsEvent) => {
       if (!deviceToken || eventData?.deviceToken !== deviceToken || !eventData?.audio) return
       enqueueBase64Audio(eventData.audio)
+      ensurePlayoutLoop()
     }
 
     // Bind Pusher events with gsm: namespace
@@ -241,6 +384,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   useEffect(() => {
     if (callingSetup !== "gsm" || !deviceToken) return
 
+    let isUnmounted = false
+
     console.info("[gsm/ws] init", { callingSetup, deviceToken })
 
     // Create audio context if needed
@@ -257,55 +402,81 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       return
     }
 
-    console.info("[gsm/ws] connecting", { wsBase, deviceToken })
-    const ws = new WebSocket(`${wsBase}/ws/audio?token=${encodeURIComponent(bearerToken)}`)
-    wsRef.current = ws
+    const connect = () => {
+      if (isUnmounted) return
+      if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current)
 
-    ws.onopen = () => {
-      setIsReady(true)
-      // Ensure AudioContext is running
-      if (audioContextRef.current?.state === "suspended") {
-        audioContextRef.current.resume().catch(() => {})
-      }
-      console.info("[gsm/ws] connected, AudioContext state:", audioContextRef.current?.state)
-      // Send registration packet to identify as browser
-      ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
-    }
+      console.info("[gsm/ws] connecting", { wsBase, deviceToken })
+      const ws = new WebSocket(`${wsBase}/ws/audio?token=${encodeURIComponent(bearerToken)}`)
+      wsRef.current = ws
 
-    ws.onerror = (event) => {
-      setIsReady(false)
-      setError("WebSocket connection error")
-      console.error("[gsm/ws] error", event)
-    }
-
-    ws.onclose = (event) => {
-      setIsReady(false)
-      console.warn("[gsm/ws] closed", { code: event.code, reason: event.reason })
-    }
-
-    ws.onmessage = (ev) => {
-      try {
-        const pkt: AudioPacket = JSON.parse(ev.data)
-        if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
-
-        // Queue incoming audio from Android device
-        if (pkt.audio) {
-          enqueueBase64Audio(pkt.audio)
-          // Log every 100 packets
-          if (pkt.seq % 100 === 0) {
-            console.log("[gsm/ws-rx] received audio packet", pkt.seq)
-          }
+      ws.onopen = () => {
+        resetInboundAudioState()
+        setIsReady(true)
+        setError("")
+        if (audioContextRef.current?.state === "suspended") {
+          audioContextRef.current.resume().catch(() => {})
         }
-      } catch (err) {
-        console.error("[gsm/ws] onmessage parse error", err)
+        console.info("[gsm/ws] connected, AudioContext state:", audioContextRef.current?.state)
+        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
+
+        if (duplexValidationModeRef.current) {
+          console.info("[gsm/duplex-test] ws connected; forcing duplex path without waiting for CALL_CONNECTED")
+          ensurePlayoutLoop()
+          startMicCapture().catch((e) => {
+            console.error("[gsm/duplex-test] failed to start mic capture", e)
+          })
+        }
+      }
+
+      ws.onerror = (event) => {
+        setError("WebSocket connection error")
+        console.error("[gsm/ws] error", event)
+      }
+
+      ws.onclose = (event) => {
+        setIsReady(false)
+        console.warn("[gsm/ws] closed", { code: event.code, reason: event.reason })
+
+        if (!isUnmounted) {
+          wsReconnectTimerRef.current = setTimeout(() => connect(), 1500)
+        }
+      }
+
+      ws.onmessage = (ev) => {
+        try {
+          const pkt: AudioPacket = JSON.parse(ev.data)
+          if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
+
+          if (pkt.audio) {
+            enqueueBase64Audio(pkt.audio)
+            ensurePlayoutLoop() // test-audio works even before CALL_CONNECTED arrives
+            if (pkt.seq % 100 === 0) {
+              if (duplexValidationModeRef.current) {
+                console.log("[gsm/duplex-test] ws-rx toBrowser packet", pkt.seq)
+              } else {
+                console.log("[gsm/ws-rx] received audio packet", pkt.seq)
+              }
+            }
+          }
+        } catch (err) {
+          console.error("[gsm/ws] onmessage parse error", err)
+        }
       }
     }
+
+    connect()
 
     return () => {
-      ws.close()
+      isUnmounted = true
+      if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current)
+      wsReconnectTimerRef.current = null
+      wsRef.current?.close()
       wsRef.current = null
       stopMicCapture()
-      if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
+      stopPlayoutLoop()
+      resetInboundAudioState()
+      setIsReady(false)
     }
   }, [callingSetup, deviceToken, setError, setIsReady])
 
@@ -314,63 +485,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    * Dequeues audio in order and plays via AudioContext with gain control
    */
   useEffect(() => {
-    if (!isConnected || !audioContextRef.current) {
-      console.log("[gsm/playback] skipping - connected:", isConnected, "ctx:", !!audioContextRef.current)
-      return
-    }
-    if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
-
-    const ctx = audioContextRef.current
-    let playoutCount = 0
-
-    // Ensure audio context is running
-    if (ctx.state === "suspended") {
-      console.log("[gsm/playback] resuming suspended AudioContext")
-      ctx.resume().catch((e) => console.error("[gsm/playback] resume error", e))
-    }
-
-    console.info("[gsm/playback] started, AudioContext state:", ctx.state, "destination:", ctx.destination)
-
-    playoutTimerRef.current = setInterval(() => {
-      const seq = nextRxSeqRef.current
-      const chunk = rxQueueRef.current.get(seq)
-      if (!chunk || chunk.length === 0) return
-
-      rxQueueRef.current.delete(seq)
-      nextRxSeqRef.current = seq + 1
-      playoutCount++
-
-      try {
-        // Create buffer from chunk
-        const buf = ctx.createBuffer(1, chunk.length, 16000)
-        const channelData = buf.getChannelData(0)
-        channelData.set(chunk)
-
-        // Create source with gain control
-        const src = ctx.createBufferSource()
-        src.buffer = buf
-
-        // Add gain node to ensure audio is audible (volume control)
-        const gainNode = ctx.createGain()
-        gainNode.gain.value = 1.0 // Full volume (100%)
-        src.connect(gainNode)
-        gainNode.connect(ctx.destination)
-
-        // Play immediately
-        src.start(ctx.currentTime)
-
-        // Log every 50 chunks for debugging
-        if (playoutCount % 50 === 0) {
-          console.log("[gsm/playback] playing chunk seq", seq, "total played:", playoutCount)
-        }
-      } catch (err) {
-        console.error("[gsm/playback] error playing chunk", err)
-      }
-    }, PLAYOUT_INTERVAL_MS)
-
-    return () => {
-      if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
-    }
+    if (!isConnected) return
+    ensurePlayoutLoop()
   }, [isConnected])
 
   /**
@@ -394,13 +510,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
         try {
           const inF32 = e.inputBuffer.getChannelData(0)
-          const i16 = new Int16Array(inF32.length)
-          for (let i = 0; i < inF32.length; i++) {
-            i16[i] = Math.max(-32768, Math.min(32767, inF32[i] * 32767))
-          }
-
-          const bytes = new Uint8Array(i16.buffer)
-          const audio = btoa(String.fromCharCode(...bytes))
+          const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
+          const audio = cleanAndEncodePcm16(downsampled)
 
           const pkt: AudioPacket = {
             role: "browser",
@@ -415,6 +526,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
           if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify(pkt))
+            if (duplexValidationModeRef.current && pkt.seq % 100 === 0) {
+              console.log("[gsm/duplex-test] ws-tx toAndroid packet", pkt.seq)
+            }
           } else {
             // Fallback: Send via Next.js API route (handled by frontend server)
             fetch("/api/gsm/send-audio-chunk", {
@@ -452,7 +566,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    * When not connected: stop everything cleanly
    */
   useEffect(() => {
-    if (isConnected) {
+    if (isConnected || duplexValidationModeRef.current) {
+      if (duplexValidationModeRef.current && !isConnected) {
+        console.info("[gsm/duplex-test] forcing mic capture while call is not connected")
+      }
       startMicCapture().catch((e) => setError(String(e)))
     } else {
       stopMicCapture()
@@ -500,6 +617,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     setIsConnected(false)
     setIsCalling(false)
     stopMicCapture()
+    stopPlayoutLoop()
+    resetInboundAudioState()
 
     try {
       const res = await fetch("/api/gsm/call-ended", {

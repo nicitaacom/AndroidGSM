@@ -212,14 +212,13 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🔊 Starting audio playback...")
 
-            // 1. Audio mode MUST be IN_CALL for voice communication (not MEDIA)
-            audioManager.mode = AudioManager.MODE_IN_CALL
-            audioManager.isSpeakerphoneOn = false
+            // Route playback to default media output device (speaker/headphones).
+            audioManager.mode = AudioManager.MODE_NORMAL
+            audioManager.isSpeakerphoneOn = true
 
-            // 2. Set max volume for voice call stream
             audioManager.setStreamVolume(
-                AudioManager.STREAM_VOICE_CALL,
-                audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
+                AudioManager.STREAM_MUSIC,
+                audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
                 0
             )
 
@@ -234,11 +233,10 @@ class AudioStreamHandler(
                 return
             }
 
-            // 3. Use VOICE_COMMUNICATION for proper routing (NOT MEDIA)
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)  // CRITICAL: Not USAGE_MEDIA!
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -261,7 +259,7 @@ class AudioStreamHandler(
             isPlaying = true
             audioTrack?.play()
 
-            MainActivity.log("✅ Audio playback started (USAGE_VOICE_COMMUNICATION)")
+            MainActivity.log("✅ Audio playback started (default media output)")
         } catch (e: Exception) {
             MainActivity.log("ERROR starting playback: ${e.message}")
             Log.e(TAG, "Failed to start audio playback", e)
