@@ -26,6 +26,7 @@ class GsmService : Service() {
         private const val CALL_NOTIFICATION_ID = 2
         private const val CHANNEL_ID = "gsm_gateway_channel"
         private const val CALL_CHANNEL_ID = "gsm_call_channel"
+        const val ACTION_START_TEST_AUDIO = "com.nicitaacom.androidgsm.action.START_TEST_AUDIO"
     }
 
     override fun onCreate() {
@@ -95,6 +96,11 @@ class GsmService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             MainActivity.log("GsmService: onStartCommand called")
+
+            if (intent?.action == ACTION_START_TEST_AUDIO) {
+                startTestAudioStreaming()
+                return START_STICKY
+            }
 
             // 1. Start foreground IMMEDIATELY - before any async work
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -182,6 +188,50 @@ class GsmService : Service() {
             .setContentIntent(pendingIntent)
 
         return builder.build()
+    }
+
+    private fun startTestAudioStreaming() {
+        try {
+            val baseUrl = config?.BACKEND_URL
+            val bearerToken = config?.BACKEND_BEARER
+            val deviceToken = config?.DEVICE_TOKEN
+
+            if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
+                MainActivity.log("⚠️ Test audio unavailable: missing backend configuration")
+                return
+            }
+
+            if (audioWsHandler == null) {
+                audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                MainActivity.log("Test audio: WebSocket handler initialized on demand")
+            }
+
+            val ws = audioWsHandler ?: run {
+                MainActivity.log("⚠️ Test audio unavailable: WebSocket handler not ready")
+                return
+            }
+
+            MainActivity.log("Test audio: starting phone -> website stream using call-connected pipeline")
+
+            Thread {
+                try {
+                    val wsUrl = baseUrl
+                        .replace("http://", "ws://")
+                        .replace("https://", "wss://")
+                        .removeSuffix("/") + "/ws/audio"
+
+                    ws.connect(wsUrl, bearerToken, deviceToken)
+                    ws.startAudioCapture()
+                    MainActivity.log("✅ Test audio streaming started (phone -> website)")
+                } catch (e: Exception) {
+                    MainActivity.log("ERROR starting test audio stream: ${e.message}")
+                    e.printStackTrace()
+                }
+            }.start()
+        } catch (e: Exception) {
+            MainActivity.log("ERROR in test audio action: ${e.message}")
+            e.printStackTrace()
+        }
     }
 
     // central command dispatcher - single entrypoint
