@@ -20,6 +20,7 @@ class GsmService : Service() {
     private var audioStreamHandler: AudioStreamHandler? = null
     private var audioWsHandler: AudioWebSocketHandler? = null
     private var config: Config? = null
+    private var isTestAudioActive = false
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -27,6 +28,7 @@ class GsmService : Service() {
         private const val CHANNEL_ID = "gsm_gateway_channel"
         private const val CALL_CHANNEL_ID = "gsm_call_channel"
         const val ACTION_START_TEST_AUDIO = "com.nicitaacom.androidgsm.action.START_TEST_AUDIO"
+        const val ACTION_STOP_TEST_AUDIO = "com.nicitaacom.androidgsm.action.STOP_TEST_AUDIO"
     }
 
     override fun onCreate() {
@@ -99,6 +101,11 @@ class GsmService : Service() {
 
             if (intent?.action == ACTION_START_TEST_AUDIO) {
                 startTestAudioStreaming()
+                return START_STICKY
+            }
+
+            if (intent?.action == ACTION_STOP_TEST_AUDIO) {
+                stopTestAudioStreaming()
                 return START_STICKY
             }
 
@@ -191,6 +198,12 @@ class GsmService : Service() {
     }
 
     private fun startTestAudioStreaming() {
+        if (isTestAudioActive) {
+            MainActivity.log("Test audio already running")
+            return
+        }
+        isTestAudioActive = true
+
         try {
             val baseUrl = config?.BACKEND_URL
             val bearerToken = config?.BACKEND_BEARER
@@ -198,6 +211,7 @@ class GsmService : Service() {
 
             if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
                 MainActivity.log("⚠️ Test audio unavailable: missing backend configuration")
+                isTestAudioActive = false
                 return
             }
 
@@ -208,10 +222,11 @@ class GsmService : Service() {
 
             val ws = audioWsHandler ?: run {
                 MainActivity.log("⚠️ Test audio unavailable: WebSocket handler not ready")
+                isTestAudioActive = false
                 return
             }
 
-            MainActivity.log("Test audio: starting phone -> website stream using call-connected pipeline")
+            MainActivity.log("Test audio: starting phone -> website stream")
 
             Thread {
                 try {
@@ -225,13 +240,23 @@ class GsmService : Service() {
                     MainActivity.log("✅ Test audio streaming started (phone -> website)")
                 } catch (e: Exception) {
                     MainActivity.log("ERROR starting test audio stream: ${e.message}")
+                    isTestAudioActive = false
                     e.printStackTrace()
                 }
             }.start()
         } catch (e: Exception) {
-            MainActivity.log("ERROR in test audio action: ${e.message}")
+            MainActivity.log("ERROR in startTestAudioStreaming: ${e.message}")
+            isTestAudioActive = false
             e.printStackTrace()
         }
+    }
+
+    private fun stopTestAudioStreaming() {
+        isTestAudioActive = false
+        audioWsHandler?.disconnect()
+        audioStreamHandler?.stopAudioCapture()
+        audioStreamHandler?.stopAudioPlayback()
+        MainActivity.log("Test audio streaming stopped")
     }
 
     // central command dispatcher - single entrypoint
