@@ -88,13 +88,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         bytes[i] = binaryString.charCodeAt(i)
       }
 
-      // Convert bytes to Int16Array (little-endian PCM16)
-      const int16Array = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2)
+      // Convert bytes to Int16 explicitly as little-endian PCM16
+      const sampleCount = Math.floor(bytes.byteLength / 2)
+      const float32Array = new Float32Array(sampleCount)
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
-      // Convert Int16 to Float32 (-1 to 1 range)
-      const float32Array = new Float32Array(int16Array.length)
-      for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / 32768.0 // Normalize to [-1, 1]
+      for (let i = 0; i < sampleCount; i++) {
+        const s16 = view.getInt16(i * 2, true)
+        float32Array[i] = s16 / 32768.0 // Normalize to [-1, 1]
       }
 
       // Queue audio with sequence number for ordering
@@ -426,13 +427,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
         try {
           const inF32 = e.inputBuffer.getChannelData(0)
-          const i16 = new Int16Array(inF32.length)
-          for (let i = 0; i < inF32.length; i++) {
-            i16[i] = Math.max(-32768, Math.min(32767, inF32[i] * 32767))
-          }
-
-          const bytes = new Uint8Array(i16.buffer)
-          const audio = btoa(String.fromCharCode(...bytes))
+          const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
+          const audio = cleanAndEncodePcm16(downsampled)
 
           const pkt: AudioPacket = {
             role: "browser",

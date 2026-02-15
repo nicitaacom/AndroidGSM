@@ -114,7 +114,7 @@ app.get('/api/devices', (_req, res) => {
   const now = Date.now()
 
   for (const [token, info] of [...connectedDevices.entries()]) {
-    if (now - info.lastSeen.getTime() > 30000) {
+    if (now - info.lastSeen.getTime() > 10000) {
       connectedDevices.delete(token)
       console.log('ℹ️ [api/devices] removed stale device', { token })
     }
@@ -149,7 +149,7 @@ app.get('/api/device-status/:deviceToken', (req, res) => {
   const now = Date.now()
   const device = connectedDevices.get(deviceToken)
 
-  if (!device || now - device.lastSeen.getTime() > 30000) {
+  if (!device || now - device.lastSeen.getTime() > 10000) {
     if (device) {
       connectedDevices.delete(deviceToken)
       console.log('ℹ️ [api/device-status] removed stale device', { deviceToken })
