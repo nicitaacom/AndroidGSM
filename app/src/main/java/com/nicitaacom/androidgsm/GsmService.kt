@@ -357,7 +357,7 @@ class GsmService : Service() {
     private fun stopTestAudioStreaming() {
         isTestAudioActive = false
         pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap())
-        audioWsHandler?.disconnect()
+        audioWsHandler?.stopAudioCapture()
         audioStreamHandler?.stopAudioCapture()
         audioStreamHandler?.stopAudioPlayback()
         MainActivity.log("Test audio streaming stopped")

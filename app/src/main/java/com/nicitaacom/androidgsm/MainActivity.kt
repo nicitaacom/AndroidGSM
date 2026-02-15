@@ -43,6 +43,7 @@ class MainActivity : AppCompatActivity() {
     private var hasSimAvailable = true
     private var pendingAllowStartWithoutSim = false
     private var pendingStartAudioTest = false
+    private var isTestAudioActive = false
 
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -81,12 +82,16 @@ class MainActivity : AppCompatActivity() {
         }
 
         testAudioButton.setOnClickListener {
-            pendingStartAudioTest = true
-            if (!isServiceRunning) {
-                addLog("🎧 Test audio requested - starting service in audio-test mode")
-                requestPermissionsAndStart(allowWithoutSim = true)
+            if (isTestAudioActive) {
+                stopTestAudio()
             } else {
-                dispatchTestAudioRequest()
+                pendingStartAudioTest = true
+                if (!isServiceRunning) {
+                    addLog("🎧 Test audio requested - starting service in audio-test mode")
+                    requestPermissionsAndStart(allowWithoutSim = true)
+                } else {
+                    dispatchTestAudioRequest()
+                }
             }
         }
 
@@ -166,6 +171,7 @@ class MainActivity : AppCompatActivity() {
             toggleButton.alpha = 0.5f
             testAudioButton.isEnabled = true
             testAudioButton.alpha = 1f
+            testAudioButton.text = if (isTestAudioActive) "STOP TEST" else "TEST AUDIO"
             statusTextView.text = if (isServiceRunning) "Status: Active (No SIM)" else "Status: No SIM"
             return
         }
@@ -176,6 +182,8 @@ class MainActivity : AppCompatActivity() {
         testAudioButton.alpha = 1f
         toggleButton.text = if (isServiceRunning) "STOP SERVICE" else "START SERVICE"
         toggleButton.setBackgroundColor(ContextCompat.getColor(this, if (isServiceRunning) R.color.error_red else R.color.brand_green))
+        testAudioButton.text = if (isTestAudioActive) "STOP TEST" else "TEST AUDIO"
+        testAudioButton.setBackgroundColor(ContextCompat.getColor(this, if (isTestAudioActive) R.color.error_red else R.color.brand_green))
         statusTextView.text = if (isServiceRunning) "Status: Active" else "Status: Inactive"
     }
 
@@ -358,8 +366,20 @@ class MainActivity : AppCompatActivity() {
             action = GsmService.ACTION_START_TEST_AUDIO
         }
         startService(testIntent)
+        isTestAudioActive = true
+        updateButtonState()
         addLog("🎧 Test audio requested: streaming phone audio as active call")
         pendingStartAudioTest = false
+    }
+
+    private fun stopTestAudio() {
+        val testIntent = Intent(this, GsmService::class.java).apply {
+            action = GsmService.ACTION_STOP_TEST_AUDIO
+        }
+        startService(testIntent)
+        isTestAudioActive = false
+        updateButtonState()
+        addLog("🛑 Test audio stopped")
     }
 
     fun addLog(message: String) {

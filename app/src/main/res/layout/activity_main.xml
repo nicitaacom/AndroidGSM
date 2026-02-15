@@ -43,15 +43,13 @@
     <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:padding="24dp"
-            android:gravity="center">
+            android:orientation="vertical"
+            android:padding="16dp">
 
         <Button
                 android:id="@+id/toggleButton"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="64dp"
+                android:layout_width="match_parent"
+                android:layout_height="56dp"
                 android:text="START SERVICE"
                 android:textSize="16sp"
                 android:textStyle="bold"
@@ -59,35 +57,42 @@
                 android:background="@color/brand_green"
                 android:elevation="8dp"
                 android:letterSpacing="0.1"
-                android:stateListAnimator="@null" />
+                android:stateListAnimator="@null"
+                android:layout_marginBottom="8dp" />
 
-        <Button
-                android:id="@+id/testAudioButton"
-                android:layout_width="wrap_content"
-                android:layout_height="64dp"
-                android:layout_marginStart="12dp"
-                android:minWidth="0dp"
-                android:text="TEST AUDIO"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:textColor="@color/black"
-                android:background="@color/brand_green"
-                android:elevation="8dp"
-                android:stateListAnimator="@null" />
-        
-        <Button
-                android:id="@+id/defaultDialerButton"
-                android:layout_width="wrap_content"
-                android:layout_height="64dp"
-                android:layout_marginStart="12dp"
-                android:minWidth="0dp"
-                android:text="SET DEFAULT DIALER"
-                android:textSize="12sp"
-                android:textStyle="bold"
-                android:textColor="@color/black"
-                android:background="@color/brand_green"
-                android:elevation="8dp"
-                android:stateListAnimator="@null" />
+        <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
+
+            <Button
+                    android:id="@+id/testAudioButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="56dp"
+                    android:text="TEST AUDIO"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/black"
+                    android:background="@color/brand_green"
+                    android:elevation="8dp"
+                    android:stateListAnimator="@null"
+                    android:layout_marginEnd="4dp" />
+            
+            <Button
+                    android:id="@+id/defaultDialerButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="56dp"
+                    android:text="SET DIALER"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:textColor="@color/black"
+                    android:background="@color/brand_green"
+                    android:elevation="8dp"
+                    android:stateListAnimator="@null"
+                    android:layout_marginStart="4dp" />
+        </LinearLayout>
     </LinearLayout>
 
     <LinearLayout

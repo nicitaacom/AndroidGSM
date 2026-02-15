@@ -55,6 +55,9 @@ class AudioStreamHandler(
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             audioManager.isSpeakerphoneOn = false
             
+            // 2. Route audio from phone receiver (earpiece/downlink only)
+            audioManager.volumeControlStream = AudioManager.STREAM_VOICE_CALL
+            
             // Log routing info
             MainActivity.log("Audio mode set to MODE_IN_COMMUNICATION, speaker: OFF")
 
