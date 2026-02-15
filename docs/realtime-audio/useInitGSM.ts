@@ -48,6 +48,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const nextRxSeqRef = useRef(0)
   const rxEnqueueSeqRef = useRef(0)
   const playoutTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const isPlayoutRunningRef = useRef(false)
 
   // Playout delay: ~250ms (good enough for <=1000ms user requirement)
   const PLAYOUT_INTERVAL_MS = 20
@@ -112,6 +113,62 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     } catch (err) {
       console.error("[gsm/audio-decode] failed to decode audio chunk", err)
     }
+  }
+
+  const resetInboundAudioState = () => {
+    rxQueueRef.current.clear()
+    nextRxSeqRef.current = 0
+    rxEnqueueSeqRef.current = 0
+  }
+
+  const ensurePlayoutLoop = () => {
+    const ctx = audioContextRef.current
+    if (!ctx || isPlayoutRunningRef.current) return
+
+    if (ctx.state === "suspended") {
+      ctx.resume().catch((e) => console.error("[gsm/playback] resume error", e))
+    }
+
+    isPlayoutRunningRef.current = true
+    let playoutCount = 0
+    console.info("[gsm/playback] loop started", { state: ctx.state })
+
+    playoutTimerRef.current = setInterval(() => {
+      const seq = nextRxSeqRef.current
+      const chunk = rxQueueRef.current.get(seq)
+      if (!chunk || chunk.length === 0) return
+
+      rxQueueRef.current.delete(seq)
+      nextRxSeqRef.current = seq + 1
+      playoutCount++
+
+      try {
+        const buf = ctx.createBuffer(1, chunk.length, 16000)
+        const channelData = buf.getChannelData(0)
+        channelData.set(chunk)
+
+        const src = ctx.createBufferSource()
+        src.buffer = buf
+
+        const gainNode = ctx.createGain()
+        gainNode.gain.value = 1.0
+        src.connect(gainNode)
+        gainNode.connect(ctx.destination)
+        src.start(ctx.currentTime)
+
+        if (playoutCount % 50 === 0) {
+          console.log("[gsm/playback] playing chunk seq", seq, "total played:", playoutCount)
+        }
+      } catch (err) {
+        console.error("[gsm/playback] error playing chunk", err)
+      }
+    }, PLAYOUT_INTERVAL_MS)
+  }
+
+  const stopPlayoutLoop = () => {
+    if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
+    playoutTimerRef.current = null
+    isPlayoutRunningRef.current = false
   }
 
   /**
@@ -262,6 +319,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     wsRef.current = ws
 
     ws.onopen = () => {
+      resetInboundAudioState()
       setIsReady(true)
       // Ensure AudioContext is running
       if (audioContextRef.current?.state === "suspended") {
@@ -291,6 +349,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         // Queue incoming audio from Android device
         if (pkt.audio) {
           enqueueBase64Audio(pkt.audio)
+          ensurePlayoutLoop() // test-audio works even before CALL_CONNECTED arrives
           // Log every 100 packets
           if (pkt.seq % 100 === 0) {
             console.log("[gsm/ws-rx] received audio packet", pkt.seq)
@@ -305,7 +364,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       ws.close()
       wsRef.current = null
       stopMicCapture()
-      if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
+      stopPlayoutLoop()
+      resetInboundAudioState()
     }
   }, [callingSetup, deviceToken, setError, setIsReady])
 
@@ -314,63 +374,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    * Dequeues audio in order and plays via AudioContext with gain control
    */
   useEffect(() => {
-    if (!isConnected || !audioContextRef.current) {
-      console.log("[gsm/playback] skipping - connected:", isConnected, "ctx:", !!audioContextRef.current)
-      return
-    }
-    if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
-
-    const ctx = audioContextRef.current
-    let playoutCount = 0
-
-    // Ensure audio context is running
-    if (ctx.state === "suspended") {
-      console.log("[gsm/playback] resuming suspended AudioContext")
-      ctx.resume().catch((e) => console.error("[gsm/playback] resume error", e))
-    }
-
-    console.info("[gsm/playback] started, AudioContext state:", ctx.state, "destination:", ctx.destination)
-
-    playoutTimerRef.current = setInterval(() => {
-      const seq = nextRxSeqRef.current
-      const chunk = rxQueueRef.current.get(seq)
-      if (!chunk || chunk.length === 0) return
-
-      rxQueueRef.current.delete(seq)
-      nextRxSeqRef.current = seq + 1
-      playoutCount++
-
-      try {
-        // Create buffer from chunk
-        const buf = ctx.createBuffer(1, chunk.length, 16000)
-        const channelData = buf.getChannelData(0)
-        channelData.set(chunk)
-
-        // Create source with gain control
-        const src = ctx.createBufferSource()
-        src.buffer = buf
-
-        // Add gain node to ensure audio is audible (volume control)
-        const gainNode = ctx.createGain()
-        gainNode.gain.value = 1.0 // Full volume (100%)
-        src.connect(gainNode)
-        gainNode.connect(ctx.destination)
-
-        // Play immediately
-        src.start(ctx.currentTime)
-
-        // Log every 50 chunks for debugging
-        if (playoutCount % 50 === 0) {
-          console.log("[gsm/playback] playing chunk seq", seq, "total played:", playoutCount)
-        }
-      } catch (err) {
-        console.error("[gsm/playback] error playing chunk", err)
-      }
-    }, PLAYOUT_INTERVAL_MS)
-
-    return () => {
-      if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
-    }
+    if (!isConnected) return
+    ensurePlayoutLoop()
   }, [isConnected])
 
   /**
@@ -500,6 +505,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     setIsConnected(false)
     setIsCalling(false)
     stopMicCapture()
+    stopPlayoutLoop()
+    resetInboundAudioState()
 
     try {
       const res = await fetch("/api/gsm/call-ended", {
