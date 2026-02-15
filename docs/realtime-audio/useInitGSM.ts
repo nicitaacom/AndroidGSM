@@ -58,6 +58,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const isCleaningUpRef = useRef(false)
   const statusFailureCountRef = useRef(0)
   const wsReconnectTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const hpLastInRef = useRef(0)
+  const hpLastOutRef = useRef(0)
 
   /**
    * 0. INITIALIZE AUDIO CONTEXT
@@ -88,13 +90,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         bytes[i] = binaryString.charCodeAt(i)
       }
 
-      // Convert bytes to Int16Array (little-endian PCM16)
-      const int16Array = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2)
+      // Convert bytes to Int16 explicitly as little-endian PCM16
+      const sampleCount = Math.floor(bytes.byteLength / 2)
+      const float32Array = new Float32Array(sampleCount)
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
-      // Convert Int16 to Float32 (-1 to 1 range)
-      const float32Array = new Float32Array(int16Array.length)
-      for (let i = 0; i < int16Array.length; i++) {
-        float32Array[i] = int16Array[i] / 32768.0 // Normalize to [-1, 1]
+      for (let i = 0; i < sampleCount; i++) {
+        const s16 = view.getInt16(i * 2, true)
+        float32Array[i] = s16 / 32768.0 // Normalize to [-1, 1]
       }
 
       // Queue audio with sequence number for ordering
@@ -173,6 +176,57 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     isPlayoutRunningRef.current = false
   }
 
+  const downsampleTo16k = (input: Float32Array, inputSampleRate: number) => {
+    if (inputSampleRate <= 16000) return input
+
+    const ratio = inputSampleRate / 16000
+    const outputLength = Math.max(1, Math.floor(input.length / ratio))
+    const output = new Float32Array(outputLength)
+
+    let inPos = 0
+    for (let i = 0; i < outputLength; i++) {
+      const start = Math.floor(inPos)
+      const end = Math.min(input.length, Math.floor(inPos + ratio))
+      let sum = 0
+      let count = 0
+      for (let j = start; j < end; j++) {
+        sum += input[j]
+        count++
+      }
+      output[i] = count > 0 ? sum / count : input[start] || 0
+      inPos += ratio
+    }
+
+    return output
+  }
+
+  const cleanAndEncodePcm16 = (input: Float32Array) => {
+    const i16 = new Int16Array(input.length)
+    const HP_ALPHA = 0.995
+    const NOISE_GATE = 0.008
+
+    for (let i = 0; i < input.length; i++) {
+      const x = input[i]
+
+      // Simple DC blocker / high-pass to reduce low-frequency rumble.
+      const y = x - hpLastInRef.current + HP_ALPHA * hpLastOutRef.current
+      hpLastInRef.current = x
+      hpLastOutRef.current = y
+
+      // Gentle noise gate for background hiss/wind.
+      const gated = Math.abs(y) < NOISE_GATE ? y * 0.2 : y
+
+      // Soft clip to avoid harsh clipping artefacts.
+      const shaped = Math.tanh(gated * 1.25)
+      i16[i] = Math.max(-32768, Math.min(32767, shaped * 32767))
+    }
+
+    const bytes = new Uint8Array(i16.buffer)
+    let binary = ""
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
+    return btoa(binary)
+  }
+
   /**
    * 1. DEVICE DISCOVERY & REGISTRATION
    * Polls /api/gsm/status to find connected device and keep it alive
@@ -202,6 +256,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
         statusFailureCountRef.current = 0
         setIsReady(authorized && !!nextDeviceToken)
+        if (authorized && nextDeviceToken) setError("")
       } catch (error) {
         statusFailureCountRef.current += 1
         if (statusFailureCountRef.current >= 2) {
@@ -231,6 +286,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       if (eventData?.deviceToken) {
         setDeviceToken(eventData.deviceToken)
         setIsReady(true)
+        setError("")
         console.info("[gsm/pusher] device-connected", eventData.deviceToken)
         return
       }
@@ -339,6 +395,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       ws.onopen = () => {
         resetInboundAudioState()
         setIsReady(true)
+        setError("")
         if (audioContextRef.current?.state === "suspended") {
           audioContextRef.current.resume().catch(() => {})
         }
@@ -423,13 +480,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
         try {
           const inF32 = e.inputBuffer.getChannelData(0)
-          const i16 = new Int16Array(inF32.length)
-          for (let i = 0; i < inF32.length; i++) {
-            i16[i] = Math.max(-32768, Math.min(32767, inF32[i] * 32767))
-          }
-
-          const bytes = new Uint8Array(i16.buffer)
-          const audio = btoa(String.fromCharCode(...bytes))
+          const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
+          const audio = cleanAndEncodePcm16(downsampled)
 
           const pkt: AudioPacket = {
             role: "browser",
