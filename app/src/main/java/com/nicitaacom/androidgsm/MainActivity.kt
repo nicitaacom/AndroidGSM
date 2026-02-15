@@ -33,6 +33,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var logTextView: TextView
     private lateinit var scrollView: ScrollView
     private lateinit var toggleButton: Button
+    private lateinit var testAudioButton: Button
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private var isServiceRunning = false
@@ -61,6 +62,7 @@ class MainActivity : AppCompatActivity() {
         logTextView = findViewById(R.id.logTextView)
         scrollView = findViewById(R.id.scrollView)
         toggleButton = findViewById(R.id.toggleButton)
+        testAudioButton = findViewById(R.id.testAudioButton)
         copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
 
@@ -69,6 +71,18 @@ class MainActivity : AppCompatActivity() {
 
         toggleButton.setOnClickListener {
             if (isServiceRunning) stopService() else requestPermissionsAndStart()
+        }
+
+        testAudioButton.setOnClickListener {
+            if (!isServiceRunning) {
+                addLog("⚠️ Start service first, then test audio")
+            } else {
+                val testIntent = Intent(this, GsmService::class.java).apply {
+                    action = GsmService.ACTION_START_TEST_AUDIO
+                }
+                startService(testIntent)
+                addLog("🎧 Test audio requested: streaming phone audio as active call")
+            }
         }
 
         copyLogsButton.setOnClickListener {
@@ -136,11 +150,13 @@ class MainActivity : AppCompatActivity() {
             toggleButton.text = "NO SIM DETECTED"
             toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.bg_card))
             toggleButton.isEnabled = false
+            testAudioButton.isEnabled = false
             statusTextView.text = "Status: No SIM"
             return
         }
 
         toggleButton.isEnabled = true
+        testAudioButton.isEnabled = isServiceRunning
         toggleButton.text = if (isServiceRunning) "STOP SERVICE" else "START SERVICE"
         toggleButton.setBackgroundColor(ContextCompat.getColor(this, if (isServiceRunning) R.color.error_red else R.color.brand_green))
         statusTextView.text = if (isServiceRunning) "Status: Active" else "Status: Inactive"
