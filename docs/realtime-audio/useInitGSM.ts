@@ -21,6 +21,55 @@ type GsmCallsEvent = {
   audio?: string
 }
 
+
+/**
+ * Utility: Downsample Float32Array audio buffer to 16kHz.
+ */
+function downsampleTo16k(buffer: Float32Array, inputSampleRate: number): Float32Array {
+  if (inputSampleRate === 16000) return buffer
+  const sampleRateRatio = inputSampleRate / 16000
+  const newLength = Math.round(buffer.length / sampleRateRatio)
+  const result = new Float32Array(newLength)
+  let offsetResult = 0
+  let offsetBuffer = 0
+
+  while (offsetResult < result.length) {
+    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio)
+    let accum = 0
+    let count = 0
+
+    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+      accum += buffer[i]
+      count++
+    }
+
+    result[offsetResult] = count > 0 ? accum / count : 0
+    offsetResult++
+    offsetBuffer = nextOffsetBuffer
+  }
+
+  return result
+}
+
+/**
+ * Converts a Float32Array of audio samples (range -1..1) to base64-encoded PCM16 (little-endian).
+ */
+function cleanAndEncodePcm16(downsampled: Float32Array) {
+  const pcm16 = new Int16Array(downsampled.length)
+  for (let i = 0; i < downsampled.length; i++) {
+    const s = Math.max(-1, Math.min(1, downsampled[i]))
+    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+
+  const bytes = new Uint8Array(pcm16.buffer)
+  let binary = ""
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i])
+  }
+
+  return btoa(binary)
+}
+
 /**
  * useInitGSM - Comprehensive GSM calling hook
  * Manages:
@@ -58,6 +107,22 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const isCleaningUpRef = useRef(false)
   const statusFailureCountRef = useRef(0)
   const wsReconnectTimerRef = useRef<NodeJS.Timeout | null>(null)
+  const duplexValidationModeRef = useRef(false)
+
+  const isDuplexValidationEnabled = () => {
+    if (typeof window === "undefined") return false
+
+    try {
+      const fromStorage = window.localStorage.getItem("gsm.duplexValidation")
+      if (fromStorage === "1" || fromStorage === "true") return true
+    } catch {
+      // localStorage can fail in strict browser/privacy modes
+    }
+
+    const params = new URLSearchParams(window.location.search)
+    const fromQuery = params.get("gsmDuplexValidation")
+    return fromQuery === "1" || fromQuery === "true"
+  }
 
   /**
    * 0. INITIALIZE AUDIO CONTEXT
@@ -73,6 +138,13 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         console.error("[gsm] failed to create AudioContext", err)
         setError("Audio system not available")
       }
+    }
+
+    duplexValidationModeRef.current = isDuplexValidationEnabled()
+    if (duplexValidationModeRef.current) {
+      console.info(
+        "[gsm/duplex-test] enabled (query: ?gsmDuplexValidation=1 or localStorage[gsm.duplexValidation]=1); uses existing ws+pusher channels",
+      )
     }
   }, [setError])
 
@@ -348,6 +420,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         }
         console.info("[gsm/ws] connected, AudioContext state:", audioContextRef.current?.state)
         ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
+
+        if (duplexValidationModeRef.current) {
+          console.info("[gsm/duplex-test] ws connected; forcing duplex path without waiting for CALL_CONNECTED")
+          ensurePlayoutLoop()
+          startMicCapture().catch((e) => {
+            console.error("[gsm/duplex-test] failed to start mic capture", e)
+          })
+        }
       }
 
       ws.onerror = (event) => {
@@ -373,7 +453,11 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
             enqueueBase64Audio(pkt.audio)
             ensurePlayoutLoop() // test-audio works even before CALL_CONNECTED arrives
             if (pkt.seq % 100 === 0) {
-              console.log("[gsm/ws-rx] received audio packet", pkt.seq)
+              if (duplexValidationModeRef.current) {
+                console.log("[gsm/duplex-test] ws-rx toBrowser packet", pkt.seq)
+              } else {
+                console.log("[gsm/ws-rx] received audio packet", pkt.seq)
+              }
             }
           }
         } catch (err) {
@@ -443,6 +527,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
           if (wsRef.current?.readyState === WebSocket.OPEN) {
             wsRef.current.send(JSON.stringify(pkt))
+            if (duplexValidationModeRef.current && pkt.seq % 100 === 0) {
+              console.log("[gsm/duplex-test] ws-tx toAndroid packet", pkt.seq)
+            }
           } else {
             // Fallback: Send via Next.js API route (handled by frontend server)
             fetch("/api/gsm/send-audio-chunk", {
@@ -480,7 +567,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    * When not connected: stop everything cleanly
    */
   useEffect(() => {
-    if (isConnected) {
+    if (isConnected || duplexValidationModeRef.current) {
+      if (duplexValidationModeRef.current && !isConnected) {
+        console.info("[gsm/duplex-test] forcing mic capture while call is not connected")
+      }
       startMicCapture().catch((e) => setError(String(e)))
     } else {
       stopMicCapture()

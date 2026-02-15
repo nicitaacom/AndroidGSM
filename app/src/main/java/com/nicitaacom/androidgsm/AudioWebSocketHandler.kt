@@ -74,7 +74,7 @@ class AudioWebSocketHandler(
             val audio = packet.optString("audio", "")
             val seq = packet.optLong("seq", -1)
             
-            if (dir != "toAndroid" || role != "browser" || audio.isEmpty()) {
+            if (dir != "toAndroid" || audio.isEmpty()) {
                 Log.d(TAG, "Skipping packet: dir=$dir, role=$role, hasAudio=${audio.isNotEmpty()}")
                 return
             }
@@ -224,11 +224,12 @@ class AudioWebSocketHandler(
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
-            audioManager.mode = AudioManager.MODE_IN_CALL
+            // Use default media route/output device for reliable speaker playback outside telephony call context.
+            audioManager.mode = AudioManager.MODE_NORMAL
             audioManager.isSpeakerphoneOn = true
             audioManager.setStreamVolume(
-                AudioManager.STREAM_VOICE_CALL,
-                audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
+                AudioManager.STREAM_MUSIC,
+                audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
                 0
             )
 
@@ -243,11 +244,10 @@ class AudioWebSocketHandler(
                 return
             }
 
-            // ✅ CRITICAL: Use VOICE_COMMUNICATION (not MEDIA!)
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -270,7 +270,7 @@ class AudioWebSocketHandler(
             isPlaying = true
             audioTrack?.play()
 
-            MainActivity.log("✅ Playback started (WS, VOICE_COMMUNICATION)")
+            MainActivity.log("✅ Playback started (WS, default media output)")
             
         } catch (e: Exception) {
             MainActivity.log("ERROR starting playback: ${e.message}")
