@@ -3,7 +3,6 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
@@ -25,23 +24,26 @@ fun gitCount(ref: String): Int? =
         }
     }.getOrNull()
 
-fun gitShortSuffixForRef(ref: String, length: Int = 3): String? =
+fun gitShortSuffixForRef(ref: String, shortLength: Int = 7, finalLength: Int = 3): String? =
     runCatching {
         ByteArrayOutputStream().use { output ->
             exec {
-                commandLine("git", "rev-parse", ref)
+                commandLine("git", "rev-parse", "--short=$shortLength", ref)
                 standardOutput = output
             }
-            output.toString().trim().takeLast(length)
+            val shortHash = output.toString().trim()
+            shortHash.takeLast(finalLength)
         }
     }.getOrNull()
 
-val todayCommitCount = (gitCount("origin/production") ?: gitCount("HEAD") ?: 1).coerceAtLeast(1)
+val todayCommitCount =
+    (gitCount("origin/production") ?: gitCount("HEAD") ?: 1).coerceAtLeast(1)
 
-// try to get a short suffix from the same refs we checked for counts
-val commitSuffix = gitShortSuffixForRef("origin/production") ?: gitShortSuffixForRef("HEAD") ?: ""
+val commitSuffix =
+    gitShortSuffixForRef("origin/production")
+        ?: gitShortSuffixForRef("HEAD")
+        ?: "000"
 
-// final version name: yy-MM-dd-<count><suffix> -> e.g. 25-12-25-9.ff4
 val versionNameComputed = "$todayDate-$todayCommitCount.$commitSuffix"
 
 /* ---------- android ---------- */
@@ -52,7 +54,7 @@ android {
 
     defaultConfig {
         applicationId = "com.nicitaacom.androidgsm"
-        minSdk = 23 // minSdk for android 5.0/android 5.1 and with pusher it crashes even on android 5.1 so no sense from minSdk 21
+        minSdk = 23
         targetSdk = 36
 
         versionCode = todayCommitCount
@@ -78,14 +80,19 @@ android {
         }
     }
 
-    compileOptions { sourceCompatibility = JavaVersion.VERSION_1_8; targetCompatibility = JavaVersion.VERSION_1_8 }
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_1_8
+        targetCompatibility = JavaVersion.VERSION_1_8
+    }
+
     kotlinOptions { jvmTarget = "1.8" }
 
     lint { abortOnError = false; warningsAsErrors = false }
+
     buildFeatures { buildConfig = true }
 }
 
-/* ---------- rename APKs after assemble (AGP-agnostic) ---------- */
+/* ---------- rename APKs after assemble ---------- */
 
 tasks.register("renameApk") {
     group = "build"
@@ -93,27 +100,19 @@ tasks.register("renameApk") {
 
     doLast {
         val apkRoot = file("${buildDir}/outputs/apk")
-        if (!apkRoot.exists()) {
-            println("renameApk: no outputs/apk folder found, nothing to rename.")
-            return@doLast
-        }
+        if (!apkRoot.exists()) return@doLast
 
         val apkFiles = fileTree(apkRoot) { include("**/*.apk") }.files.sorted()
-        if (apkFiles.isEmpty()) {
-            println("renameApk: no APK files found under $apkRoot")
-            return@doLast
-        }
+        if (apkFiles.isEmpty()) return@doLast
 
         apkFiles.forEach { apk ->
             val dest = apk.parentFile.resolve("gsm-v.$versionNameComputed.apk")
-            if (apk.absolutePath == dest.absolutePath) {
-                println("renameApk: already named ${dest.name}, skipping.")
-                return@forEach
-            }
+            if (apk.absolutePath == dest.absolutePath) return@forEach
+
             if (dest.exists()) dest.delete()
+
             val moved = apk.renameTo(dest)
             if (!moved) {
-                // fallback: copy & delete original
                 copy {
                     from(apk)
                     into(apk.parentFile)
@@ -121,13 +120,12 @@ tasks.register("renameApk") {
                 }
                 apk.delete()
             }
-            println("renameApk: ${apk.name} -> ${dest.name}")
         }
     }
 }
 
-// ensure renameApk runs after any assemble* task
-tasks.matching { it.name.startsWith("assemble") }.configureEach { finalizedBy(tasks.named("renameApk")) }
+tasks.matching { it.name.startsWith("assemble") }
+    .configureEach { finalizedBy(tasks.named("renameApk")) }
 
 /* ---------- deps ---------- */
 
