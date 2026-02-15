@@ -681,59 +681,19 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
   }
 
-  // Auto test mode: send generated test tones to phone
+  // Auto test mode: capture mic and send to phone - this works commit 2f7be79
   useEffect(() => {
     const isTestMode = typeof window !== "undefined" && (new URLSearchParams(window.location.search).get("testAudio") === "1")
     if (!isTestMode || !deviceToken || !wsRef.current) return
 
-    console.info("[gsm/test-mode] auto-generating test tones")
-    const ctx = audioContextRef.current
-    if (!ctx) return
-
-    let isRunning = true
-    let audioFreq = 440 // Start at A4
-    let phaseOffset = 0
-
-    const interval = setInterval(() => {
-      if (!isRunning || wsRef.current?.readyState !== WebSocket.OPEN) return
-
-      try {
-        // Generate 1024 samples of sine wave
-        const samples = new Float32Array(1024)
-        for (let i = 0; i < 1024; i++) {
-          phaseOffset += (2 * Math.PI * audioFreq) / 16000
-          samples[i] = Math.sin(phaseOffset) * 0.3
-        }
-
-        // Convert to PCM16
-        const i16 = new Int16Array(samples.length)
-        for (let i = 0; i < samples.length; i++) {
-          i16[i] = Math.max(-32768, Math.min(32767, samples[i] * 32767))
-        }
-
-        const bytes = new Uint8Array(i16.buffer)
-        const audio = btoa(String.fromCharCode(...bytes))
-
-        const pkt: AudioPacket = {
-          role: "browser",
-          deviceToken,
-          dir: "toAndroid",
-          codec: "pcm16",
-          seq: seqTxRef.current++,
-          ts: performance.now(),
-          sampleRate: 16000,
-          audio,
-        }
-
-        wsRef.current.send(JSON.stringify(pkt))
-      } catch (err) {
-        console.error("[gsm/test-mode] error", err)
-      }
-    }, 50)
+    console.info("[gsm/test-mode] capturing mic audio")
+    startMicCapture().catch((e) => {
+      console.error("[gsm/test-mode] mic error", e)
+    })
+    ensurePlayoutLoop()
 
     return () => {
-      isRunning = false
-      clearInterval(interval)
+      stopMicCapture()
       console.info("[gsm/test-mode] stopped")
     }
   }, [deviceToken])
