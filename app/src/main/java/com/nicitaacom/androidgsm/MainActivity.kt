@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.app.Activity
+import android.app.role.RoleManager
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -34,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var scrollView: ScrollView
     private lateinit var toggleButton: Button
     private lateinit var testAudioButton: Button
+    private lateinit var defaultDialerButton: Button
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private var isServiceRunning = false
@@ -48,6 +51,7 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
+        private const val REQUEST_ROLE_DIALER = 200
         private var instance: WeakReference<MainActivity>? = null
 
         fun log(message: String) {
@@ -65,6 +69,7 @@ class MainActivity : AppCompatActivity() {
         scrollView = findViewById(R.id.scrollView)
         toggleButton = findViewById(R.id.toggleButton)
         testAudioButton = findViewById(R.id.testAudioButton)
+        defaultDialerButton = findViewById(R.id.defaultDialerButton)
         copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
 
@@ -83,6 +88,10 @@ class MainActivity : AppCompatActivity() {
             } else {
                 dispatchTestAudioRequest()
             }
+        }
+
+        defaultDialerButton.setOnClickListener {
+            requestDefaultDialer()
         }
 
         copyLogsButton.setOnClickListener {
@@ -213,6 +222,34 @@ class MainActivity : AppCompatActivity() {
                 dispatchTestAudioRequest()
             }
             pendingAllowStartWithoutSim = false
+        }
+    }
+
+    private fun requestDefaultDialer() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val roleManager = getSystemService(RoleManager::class.java)
+                if (roleManager != null && !roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
+                    val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+                    startActivityForResult(intent, REQUEST_ROLE_DIALER)
+                    addLog("Requesting dialer role via RoleManager")
+                    return
+                }
+            }
+
+            // Fallback for older devices or if RoleManager not available
+            startActivity(Intent(this, DefaultDialerRequestActivity::class.java))
+            addLog("Opening system UI to change default dialer")
+        } catch (e: Exception) {
+            addLog("Error requesting default dialer: ${e.message}")
+        }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == REQUEST_ROLE_DIALER) {
+            if (resultCode == Activity.RESULT_OK) addLog("✅ App set as default dialer")
+            else addLog("❌ Default dialer request declined or failed")
         }
     }
 

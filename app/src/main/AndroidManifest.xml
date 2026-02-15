@@ -69,6 +69,23 @@
         <service android:name=".GsmService" android:enabled="true" android:exported="false"
                  android:foregroundServiceType="connectedDevice|microphone|mediaPlayback" />  <!-- Updated types -->
 
+        <!-- ConnectionService to allow app to be set as default dialer -->
+        <service
+            android:name=".GsmConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+
+        <!-- Activity that requests the user to set this app as the default dialer -->
+        <activity
+            android:name=".DefaultDialerRequestActivity"
+            android:exported="true"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:theme="@style/Theme.AndroidGSM" />
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

@@ -11,6 +11,8 @@ import android.content.pm.ServiceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.os.PowerManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
@@ -27,6 +29,77 @@ class GsmService : Service() {
     private var isTestAudioActive = false
     private var telephonyManager: TelephonyManager? = null
     private var phoneStateListener: PhoneStateListener? = null
+    private val callStateReceiver: BroadcastReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            try {
+                val action = intent?.action
+                when (action) {
+                    ACTION_CALL_CONNECTED_BROADCAST -> {
+                        MainActivity.log("callStateReceiver: CALL_CONNECTED received")
+                        try {
+                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                            audioManager.isSpeakerphoneOn = true
+
+                            Thread {
+                                try {
+                                    audioStreamHandler?.startAudioCapture()
+                                    MainActivity.log("callStateReceiver: audio capture started")
+                                } catch (e: Exception) {
+                                    MainActivity.log("callStateReceiver startAudioCapture error: ${e.message}")
+                                }
+                            }.start()
+
+                            Thread {
+                                try {
+                                    val baseUrl = config?.BACKEND_URL ?: ""
+                                    val wsUrl = baseUrl
+                                        .replace("http://", "ws://")
+                                        .replace("https://", "wss://")
+                                        .removeSuffix("") + "/ws/audio"
+                                    val bearerToken = config?.BACKEND_BEARER ?: ""
+
+                                    audioWsHandler?.connect(wsUrl, bearerToken, config?.DEVICE_TOKEN ?: "")
+                                    audioWsHandler?.setCallActive(true)
+                                    audioWsHandler?.startAudioCapture()
+                                    audioWsHandler?.startAudioPlayback()
+                                    MainActivity.log("callStateReceiver: WebSocket audio connected (call mode)")
+                                } catch (e: Exception) {
+                                    MainActivity.log("callStateReceiver WS error: ${e.message}")
+                                }
+                            }.start()
+
+                            Thread {
+                                try {
+                                    pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
+                                } catch (e: Exception) {
+                                    MainActivity.log("callStateReceiver pusher error: ${e.message}")
+                                }
+                            }.start()
+                        } catch (e: Exception) {
+                            MainActivity.log("callStateReceiver error: ${e.message}")
+                        }
+                    }
+                    ACTION_CALL_DISCONNECTED_BROADCAST -> {
+                        MainActivity.log("callStateReceiver: CALL_DISCONNECTED received")
+                        try {
+                            audioStreamHandler?.stopAudioCapture()
+                            audioStreamHandler?.stopAudioPlayback()
+                            audioWsHandler?.setCallActive(false)
+                            audioWsHandler?.disconnect()
+                            Thread {
+                                try { pusherClient?.sendEvent("CALL_ENDED", emptyMap()) } catch (_: Exception) {}
+                            }.start()
+                        } catch (e: Exception) {
+                            MainActivity.log("callStateReceiver disconnect error: ${e.message}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                MainActivity.log("callStateReceiver unexpected error: ${e.message}")
+            }
+        }
+    }
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -35,6 +108,8 @@ class GsmService : Service() {
         private const val CALL_CHANNEL_ID = "gsm_call_channel"
         const val ACTION_START_TEST_AUDIO = "com.nicitaacom.androidgsm.action.START_TEST_AUDIO"
         const val ACTION_STOP_TEST_AUDIO = "com.nicitaacom.androidgsm.action.STOP_TEST_AUDIO"
+        const val ACTION_CALL_CONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_CONNECTED"
+        const val ACTION_CALL_DISCONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_DISCONNECTED"
     }
 
     override fun onCreate() {
@@ -93,6 +168,17 @@ class GsmService : Service() {
                 // init dialer
                 gsmDialer = GsmDialer(this)
                 MainActivity.log("GsmService: GsmDialer initialized")
+                // Register for broadcasts from ConnectionService (default-dialer)
+                try {
+                    val filter = IntentFilter().apply {
+                        addAction(ACTION_CALL_CONNECTED_BROADCAST)
+                        addAction(ACTION_CALL_DISCONNECTED_BROADCAST)
+                    }
+                    registerReceiver(callStateReceiver, filter)
+                    MainActivity.log("GsmService: callStateReceiver registered")
+                } catch (e: Exception) {
+                    MainActivity.log("Failed to register callStateReceiver: ${e.message}")
+                }
             } catch (error: Exception) {
                 MainActivity.log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
                 error.printStackTrace()
@@ -168,6 +254,12 @@ class GsmService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         try {
+            try {
+                unregisterReceiver(callStateReceiver)
+                MainActivity.log("GsmService: callStateReceiver unregistered")
+            } catch (e: Exception) {
+                MainActivity.log("Error unregistering callStateReceiver: ${e.message}")
+            }
             unregisterPhoneStateListener()
             wakeLock?.let { lock ->
                 if (lock.isHeld) {
@@ -386,6 +478,8 @@ class GsmService : Service() {
                 if (started) {
                     MainActivity.log("Call started via GsmDialer to $number")
                 } else {
+                                    // expose application context to other components
+                                    AppContextHolder.ctx = applicationContext
                     MainActivity.log("Call start failed - syncing CALL_ENDED state")
                     audioStreamHandler?.stopAudioCapture()
                     audioStreamHandler?.stopAudioPlayback()
