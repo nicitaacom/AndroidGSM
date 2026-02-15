@@ -5,11 +5,15 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.telephony.PhoneStateListener
+import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
 
 class GsmService : Service() {
@@ -21,6 +25,8 @@ class GsmService : Service() {
     private var audioWsHandler: AudioWebSocketHandler? = null
     private var config: Config? = null
     private var isTestAudioActive = false
+    private var telephonyManager: TelephonyManager? = null
+    private var phoneStateListener: PhoneStateListener? = null
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -80,6 +86,9 @@ class GsmService : Service() {
                 MainActivity.log("GsmService: Config loaded")
                 MainActivity.log("Backend URL: ${config?.BACKEND_URL}")
                 MainActivity.log("Device Token: ${config?.DEVICE_TOKEN}")
+
+                // Setup phone state listener to maintain audio during system dialer
+                setupPhoneStateListener()
 
                 // init dialer
                 gsmDialer = GsmDialer(this)
@@ -159,6 +168,7 @@ class GsmService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         try {
+            unregisterPhoneStateListener()
             wakeLock?.let { lock ->
                 if (lock.isHeld) {
                     lock.release()
@@ -298,6 +308,11 @@ class GsmService : Service() {
                 try {
                     MainActivity.log("Call connected (OFFHOOK) - starting audio capture and WebSocket")
 
+                    // Ensure audio mode is set correctly for call
+                    val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                    audioManager.isSpeakerphoneOn = true
+
                     // Start audio capture with retry
                     Thread {
                         try {
@@ -418,6 +433,49 @@ class GsmService : Service() {
         } catch (e: Exception) {
             MainActivity.log("ERROR in handleSendDtmf: ${e.message}")
             e.printStackTrace()
+        }
+    }
+
+    private fun setupPhoneStateListener() {
+        try {
+            telephonyManager = getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager
+            phoneStateListener = object : PhoneStateListener() {
+                override fun onCallStateChanged(state: Int, phoneNumber: String?) {
+                    when (state) {
+                        TelephonyManager.CALL_STATE_OFFHOOK -> {
+                            // Call is active - ensure audio mode is set correctly
+                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                            audioManager.isSpeakerphoneOn = true
+                            MainActivity.log("PhoneStateListener: OFFHOOK - set MODE_IN_COMMUNICATION")
+                        }
+                        TelephonyManager.CALL_STATE_IDLE -> {
+                            // Call ended - reset audio mode
+                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                            audioManager.mode = AudioManager.MODE_NORMAL
+                            MainActivity.log("PhoneStateListener: IDLE - reset audio mode")
+                        }
+                        TelephonyManager.CALL_STATE_RINGING -> {
+                            MainActivity.log("PhoneStateListener: RINGING")
+                        }
+                    }
+                }
+            }
+            telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
+            MainActivity.log("PhoneStateListener registered")
+        } catch (e: Exception) {
+            MainActivity.log("Error setting up PhoneStateListener: ${e.message}")
+        }
+    }
+
+    private fun unregisterPhoneStateListener() {
+        try {
+            if (phoneStateListener != null && telephonyManager != null) {
+                telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
+                MainActivity.log("PhoneStateListener unregistered")
+            }
+        } catch (e: Exception) {
+            MainActivity.log("Error unregistering PhoneStateListener: ${e.message}")
         }
     }
 
