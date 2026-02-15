@@ -203,6 +203,7 @@ class GsmService : Service() {
             return
         }
         isTestAudioActive = true
+        pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
 
         try {
             val baseUrl = config?.BACKEND_URL
@@ -253,6 +254,7 @@ class GsmService : Service() {
 
     private fun stopTestAudioStreaming() {
         isTestAudioActive = false
+        pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap())
         audioWsHandler?.disconnect()
         audioStreamHandler?.stopAudioCapture()
         audioStreamHandler?.stopAudioPlayback()
@@ -324,9 +326,10 @@ class GsmService : Service() {
                             Thread.sleep(500)
 
                             audioWsHandler?.connect(wsUrl, bearerToken, config?.DEVICE_TOKEN ?: "")
+                            audioWsHandler?.setCallActive(true)
                             audioWsHandler?.startAudioCapture()
                             audioWsHandler?.startAudioPlayback()
-                            MainActivity.log("WebSocket audio connected")
+                            MainActivity.log("WebSocket audio connected (call mode)")
                         } catch (e: Exception) {
                             MainActivity.log("Error connecting WebSocket: ${e.message}")
                             e.printStackTrace()
@@ -353,6 +356,7 @@ class GsmService : Service() {
                     MainActivity.log("Call ended - stopping audio and WebSocket")
                     audioStreamHandler?.stopAudioCapture()
                     audioStreamHandler?.stopAudioPlayback()
+                    audioWsHandler?.setCallActive(false)
                     audioWsHandler?.disconnect()
                     pusherClient?.sendEvent("CALL_ENDED", emptyMap())
                 } catch (e: Exception) {

@@ -108,6 +108,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const statusFailureCountRef = useRef(0)
   const wsReconnectTimerRef = useRef<NodeJS.Timeout | null>(null)
   const duplexValidationModeRef = useRef(false)
+  const isTestAudioActiveRef = useRef(false)
 
   const isDuplexValidationEnabled = () => {
     if (typeof window === "undefined") return false
@@ -366,7 +367,26 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       if (!deviceToken || eventData?.deviceToken !== deviceToken) return
       setIsConnected(false)
       setIsCalling(false)
-      console.info("[gsm/pusher] call-ended (hangup/reject)", { deviceToken })
+      // Stop audio streams and clear queues when call ends
+      stopMicCapture()
+      rxQueueRef.current.clear()
+      nextRxSeqRef.current = 0
+      rxEnqueueSeqRef.current = 0
+      console.info("[gsm/pusher] call-ended (hangup/reject) - audio stopped", { deviceToken })
+    }
+
+    // Test audio events from Android
+    const onTestAudioStarted = () => {
+      console.info("[gsm/pusher] test-audio-started")
+      isTestAudioActiveRef.current = true
+      startMicCapture().catch((e) => console.error("[gsm/test-mode] mic error", e))
+      ensurePlayoutLoop()
+    }
+
+    const onTestAudioStopped = () => {
+      console.info("[gsm/pusher] test-audio-stopped")
+      isTestAudioActiveRef.current = false
+      stopMicCapture()
     }
 
     // Incoming audio from Android device (fallback path via Pusher)
@@ -381,6 +401,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     callsChannel.bind("gsm:call-started", onCallStarted)
     callsChannel.bind("gsm:call-connected", onCallConnected)
     callsChannel.bind("gsm:call-ended", onCallEnded)
+    callsChannel.bind("gsm:test-audio-started", onTestAudioStarted)
+    callsChannel.bind("gsm:test-audio-stopped", onTestAudioStopped)
     callsChannel.bind("gsm:audio-chunk", onAudioChunk)
 
     return () => {
@@ -388,6 +410,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       callsChannel.unbind("gsm:call-started", onCallStarted)
       callsChannel.unbind("gsm:call-connected", onCallConnected)
       callsChannel.unbind("gsm:call-ended", onCallEnded)
+      callsChannel.unbind("gsm:test-audio-started", onTestAudioStarted)
+      callsChannel.unbind("gsm:test-audio-stopped", onTestAudioStopped)
       callsChannel.unbind("gsm:audio-chunk", onAudioChunk)
       pusher.unsubscribe("gsm-devices")
       pusher.unsubscribe("gsm-calls")
@@ -582,6 +606,11 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     processorRef.current = null
   }
 
+  const stopTestAudio = () => {
+    isTestAudioActiveRef.current = false
+    stopMicCapture()
+  }
+
   /**
    * 7. START/STOP AUDIO BASED ON CALL STATE
    * When connected: start mic capture and audio playback
@@ -589,14 +618,11 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    */
   useEffect(() => {
     if (isConnected || duplexValidationModeRef.current) {
-      if (duplexValidationModeRef.current && !isConnected) {
-        console.info("[gsm/duplex-test] forcing mic capture while call is not connected")
-      }
       startMicCapture().catch((e) => setError(String(e)))
     } else {
       stopMicCapture()
     }
-  }, [isConnected])
+  }, [isConnected, setError])
 
   /**
    * 8. CALL MANAGEMENT - Initiate or end calls
@@ -681,22 +707,13 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
   }
 
-  // Auto test mode: capture mic and send to phone - this works commit 2f7be79
+  // Test audio mode is controlled by Android button via Pusher events
+  // No need for URL params anymore
   useEffect(() => {
-    const isTestMode = typeof window !== "undefined" && (new URLSearchParams(window.location.search).get("testAudio") === "1")
-    if (!isTestMode || !deviceToken || !wsRef.current) return
-
-    console.info("[gsm/test-mode] capturing mic audio")
-    startMicCapture().catch((e) => {
-      console.error("[gsm/test-mode] mic error", e)
-    })
-    ensurePlayoutLoop()
-
     return () => {
       stopMicCapture()
-      console.info("[gsm/test-mode] stopped")
     }
-  }, [deviceToken])
+  }, [])
 
-  return { call, hungUp, sendDTMF }
+  return { call, hungUp, sendDTMF, stopTestAudio, isTestAudioActiveRef }
 }

@@ -29,6 +29,7 @@ class AudioWebSocketHandler(
     private var audioTrack: AudioTrack? = null
     private var isRecording = false
     private var isPlaying = false
+    private var isCallActive = false
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     
@@ -224,9 +225,17 @@ class AudioWebSocketHandler(
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
-            // Use default media route/output device for reliable speaker playback outside telephony call context.
-            audioManager.mode = AudioManager.MODE_NORMAL
-            audioManager.isSpeakerphoneOn = true
+            if (isCallActive) {
+                // During active call: use MODE_IN_COMMUNICATION so played audio gets picked up by call mic
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.isSpeakerphoneOn = true
+                MainActivity.log("Playback: MODE_IN_COMMUNICATION (call active)")
+            } else {
+                // Outside call: use MODE_NORMAL for regular media playback
+                audioManager.mode = AudioManager.MODE_NORMAL
+                audioManager.isSpeakerphoneOn = true
+            }
+            
             audioManager.setStreamVolume(
                 AudioManager.STREAM_MUSIC,
                 audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
@@ -276,6 +285,11 @@ class AudioWebSocketHandler(
             MainActivity.log("ERROR starting playback: ${e.message}")
             Log.e(TAG, "Error", e)
         }
+    }
+
+    fun setCallActive(active: Boolean) {
+        isCallActive = active
+        MainActivity.log("WebSocket call state: $active")
     }
 
     private fun playAudioChunk(base64Audio: String) {
