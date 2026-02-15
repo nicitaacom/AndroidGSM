@@ -496,6 +496,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
           if (pkt.audio) {
             enqueueBase64Audio(pkt.audio)
+            console.debug(`[gsm/ws-rx] seq=${pkt.seq} size=${pkt.audio.length}`)
             ensurePlayoutLoop() // test-audio works even before CALL_CONNECTED arrives
             if (pkt.seq % 100 === 0) {
               if (duplexValidationModeRef.current) {

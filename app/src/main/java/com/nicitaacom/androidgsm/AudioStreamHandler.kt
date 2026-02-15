@@ -21,7 +21,8 @@ import java.nio.ByteOrder
 
 class AudioStreamHandler(
     private val context: Context,
-    private val pusherClient: PusherClient
+    private val pusherClient: PusherClient,
+    private val onAudioCaptured: ((String) -> Unit)? = null
 ) {
     private var audioRecord: AudioRecord? = null
     private var audioTrack: AudioTrack? = null

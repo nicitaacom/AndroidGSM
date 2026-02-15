@@ -76,7 +76,7 @@ class AudioWebSocketHandler(
             val seq = packet.optLong("seq", -1)
             
             if (dir != "toAndroid" || audio.isEmpty()) {
-                Log.d(TAG, "Skipping packet: dir=$dir, role=$role, hasAudio=${audio.isNotEmpty()}")
+                Log.d(TAG, "WS-RX skip dir=$dir role=$role hasAudio=${audio.isNotEmpty()}")
                 return
             }
 
@@ -89,8 +89,9 @@ class AudioWebSocketHandler(
                 seqRx = seq
             }
 
-            // Decode and play audio
-            playAudioChunk(audio)
+            // Decode and play audio (log concise info)
+            Log.d(TAG, "WS-RX seq=$seq size=${audio.length}")
+            playAudioChunk(audio, seq)
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Error handling audio packet: ${e.message}")
@@ -98,14 +99,124 @@ class AudioWebSocketHandler(
     }
 
     fun startAudioCapture() {
-        // Note: Actual mic capture is done by AudioStreamHandler
-        // This WebSocket handler only RECEIVES browser audio and plays it
-        MainActivity.log("WebSocket: Ready to receive browser audio")
+        if (isRecording) return
+
+        try {
+            MainActivity.log("🎤 WebSocket: Starting capture...")
+
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
+            
+            val bufferSize = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
+                CHANNEL_IN,
+                AUDIO_FORMAT
+            ) * BUFFER_SIZE_FACTOR
+
+            if (bufferSize <= 0) {
+                MainActivity.log("ERROR: Invalid buffer size")
+                return
+            }
+
+            var selectedRecord: AudioRecord? = null
+            for (source in CAPTURE_SOURCES) {
+                try {
+                    val record = AudioRecord(
+                        source,
+                        SAMPLE_RATE,
+                        CHANNEL_IN,
+                        AUDIO_FORMAT,
+                        bufferSize
+                    )
+                    if (record.state == AudioRecord.STATE_INITIALIZED) {
+                        MainActivity.log("✅ Capture source: $source")
+                        selectedRecord = record
+                        break
+                    }
+                    record.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed source $source: ${e.message}")
+                }
+            }
+
+            audioRecord = selectedRecord
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                MainActivity.log("ERROR: AudioRecord not initialized")
+                return
+            }
+
+            isRecording = true
+            audioRecord?.startRecording()
+
+            scope.launch {
+                captureAndStreamAudio(bufferSize)
+            }
+
+            MainActivity.log("✅ Capture started (WS)")
+            
+        } catch (e: Exception) {
+            MainActivity.log("ERROR starting capture: ${e.message}")
+            Log.e(TAG, "Error", e)
+        }
+    }
+
+    private suspend fun captureAndStreamAudio(bufferSize: Int) = withContext(Dispatchers.IO) {
+        val buffer = ShortArray(bufferSize / 2)
+        var chunkCount = 0
+
+        while (isRecording) {
+            try {
+                val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+
+                if (read > 0) {
+                    val byteBuffer = ByteArray(read * 2)
+                    ByteBuffer.wrap(byteBuffer)
+                        .order(ByteOrder.LITTLE_ENDIAN)
+                        .asShortBuffer()
+                        .put(buffer, 0, read)
+
+                        val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
+                        val seq = seqTx++
+                        wsConnection?.sendAudioChunk(
+                            audio = base64Audio,
+                            seq = seq,
+                            sampleRate = SAMPLE_RATE,
+                            codec = "pcm16"
+                        )
+
+                        // concise send log (every 10th chunk)
+                        if (seq % 10L == 0L) {
+                            Log.d(TAG, "WS-SEND seq=$seq size=${base64Audio.length}")
+                        }
+
+                        chunkCount++
+                } else if (read < 0) {
+                    Log.e(TAG, "❌ Read error: $read")
+                    break
+                }
+
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in capture loop: ${e.message}")
+                break
+            }
+        }
+        Log.d(TAG, "Capture ended: $chunkCount chunks")
     }
 
     fun stopAudioCapture() {
-        // WebSocket handler doesn't capture, only plays received audio
-        MainActivity.log("WebSocket: Stop receive mode")
+        try {
+            isRecording = false
+            audioRecord?.stop()
+            audioRecord?.release()
+            audioRecord = null
+            
+            audioManager.mode = AudioManager.MODE_NORMAL
+            audioManager.isSpeakerphoneOn = false
+
+            MainActivity.log("🎤 Capture stopped")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping capture", e)
+        }
     }
 
     fun startAudioPlayback() {
@@ -145,7 +256,7 @@ class AudioWebSocketHandler(
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                         .build()
                 )
@@ -181,7 +292,7 @@ class AudioWebSocketHandler(
         MainActivity.log("WebSocket call state: $active")
     }
 
-    private fun playAudioChunk(base64Audio: String) {
+    private fun playAudioChunk(base64Audio: String, seq: Long = -1) {
         if (!isPlaying) {
             startAudioPlayback()
         }
@@ -209,7 +320,7 @@ class AudioWebSocketHandler(
                     return@launch
                 }
 
-                Log.d(TAG, "Decoded: ${audioBytes.size} bytes")
+                Log.d(TAG, "WS-DECODE seq=$seq bytes=${audioBytes.size}")
 
                 // Validate size
                 if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) {
@@ -227,6 +338,19 @@ class AudioWebSocketHandler(
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Buffer conversion error: ${e.message}")
                     return@launch
+                }
+
+                // Apply gentle gain to improve pick-up by call microphone
+                val gain = 1.6f
+                var i = 0
+                while (i < shortBuffer.size) {
+                    val v = (shortBuffer[i] * gain).toInt()
+                    shortBuffer[i] = when {
+                        v > Short.MAX_VALUE -> Short.MAX_VALUE
+                        v < Short.MIN_VALUE -> Short.MIN_VALUE
+                        else -> v.toShort()
+                    }
+                    i++
                 }
 
                 // Verify AudioTrack exists and is initialized

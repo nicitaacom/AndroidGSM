@@ -207,6 +207,8 @@ app.post('/api/events', async (req, res) => {
       await sendCommand(deviceToken, 'SEND_DTMF', data)
       break
     case 'AUDIO_CHUNK': {
+      // concise debug log for inbound audio from android
+      console.log(`[ws/audio] RX AUDIO_CHUNK device=${deviceToken} seq=${data?.seq} size=${data?.audio ? data.audio.length : 0}`)
       // Route audio to browser WebSocket peer (primary path)
       const browserPeer = browserByDevice.get(deviceToken)
       if (browserPeer?.readyState === WebSocket.OPEN) {
@@ -223,6 +225,7 @@ app.post('/api/events', async (req, res) => {
               audio: data?.audio,
             }),
           )
+          console.log(`[ws/audio] SENT -> browser device=${deviceToken} seq=${data?.seq}`)
         } catch (err) {
           console.error('❌ [api/events/audio] failed to send to browser ws peer', String(err))
         }
@@ -233,6 +236,7 @@ app.post('/api/events', async (req, res) => {
           audio: data?.audio,
           timestamp: new Date().toISOString(),
         })
+        console.log(`[ws/audio] FALLBACK -> pusher device=${deviceToken} size=${data?.audio ? data.audio.length : 0}`)
       }
       break
     }
