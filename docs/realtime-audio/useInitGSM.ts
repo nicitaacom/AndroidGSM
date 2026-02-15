@@ -58,8 +58,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const isCleaningUpRef = useRef(false)
   const statusFailureCountRef = useRef(0)
   const wsReconnectTimerRef = useRef<NodeJS.Timeout | null>(null)
-  const hpLastInRef = useRef(0)
-  const hpLastOutRef = useRef(0)
 
   /**
    * 0. INITIALIZE AUDIO CONTEXT
@@ -176,51 +174,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     isPlayoutRunningRef.current = false
   }
 
-  const downsampleTo16k = (input: Float32Array, inputSampleRate: number) => {
-    if (!Number.isFinite(inputSampleRate) || inputSampleRate < 1000 || inputSampleRate <= 16000) return input
-
-    const ratio = inputSampleRate / 16000
-    const outputLength = Math.max(1, Math.floor(input.length / ratio))
-    const output = new Float32Array(outputLength)
-
-    let inPos = 0
-    for (let i = 0; i < outputLength; i++) {
-      const start = Math.floor(inPos)
-      const end = Math.min(input.length, Math.floor(inPos + ratio))
-      let sum = 0
-      let count = 0
-      for (let j = start; j < end; j++) {
-        sum += input[j]
-        count++
-      }
-      output[i] = count > 0 ? sum / count : input[start] || 0
-      inPos += ratio
-    }
-
-    return output
-  }
-
-  const cleanAndEncodePcm16 = (input: Float32Array) => {
-    const i16 = new Int16Array(input.length)
-    const HP_ALPHA = 0.995
-
-    for (let i = 0; i < input.length; i++) {
-      const x = input[i]
-      const y = x - hpLastInRef.current + HP_ALPHA * hpLastOutRef.current
-      hpLastInRef.current = x
-      hpLastOutRef.current = y
-
-      // Keep processing very mild to avoid muting speech.
-      const boosted = y * 1.08
-      i16[i] = Math.max(-32768, Math.min(32767, boosted * 32767))
-    }
-
-    const bytes = new Uint8Array(i16.buffer)
-    let binary = ""
-    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i])
-    return btoa(binary)
-  }
-
   /**
    * 1. DEVICE DISCOVERY & REGISTRATION
    * Polls /api/gsm/status to find connected device and keep it alive
@@ -262,7 +215,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
 
     fetchDeviceToken()
-    const id = setInterval(fetchDeviceToken, 2000) // Poll every 2s for faster stale-state detection
+    const id = setInterval(fetchDeviceToken, 2000) // Poll every 2s for near real-time readiness
     return () => clearInterval(id)
   }, [deviceToken, setDeviceToken, setError, setIsReady])
 
