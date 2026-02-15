@@ -106,8 +106,13 @@ class MainActivity : AppCompatActivity() {
 
         checkServiceStatus()
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED) {
-            loadSimSelection()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED) {
+            try {
+                loadSimSelection()
+            } catch (se: SecurityException) {
+                addLog("SecurityException reading SIM info: ${se.message}")
+            }
         }
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -178,6 +183,7 @@ class MainActivity : AppCompatActivity() {
         pendingAllowStartWithoutSim = allowWithoutSim
         val permissions = mutableListOf<String>().apply {
             add(Manifest.permission.CALL_PHONE)
+            add(Manifest.permission.READ_PHONE_NUMBERS)
             add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.READ_PHONE_STATE)
             add(Manifest.permission.MODIFY_AUDIO_SETTINGS)
