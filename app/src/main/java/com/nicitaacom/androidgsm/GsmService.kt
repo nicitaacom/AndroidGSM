@@ -192,18 +192,22 @@ class GsmService : Service() {
 
     private fun startTestAudioStreaming() {
         try {
-            val ws = audioWsHandler
-            if (ws == null) {
-                MainActivity.log("⚠️ Test audio unavailable: WebSocket handler not initialized yet")
-                return
-            }
-
             val baseUrl = config?.BACKEND_URL
             val bearerToken = config?.BACKEND_BEARER
             val deviceToken = config?.DEVICE_TOKEN
 
             if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
                 MainActivity.log("⚠️ Test audio unavailable: missing backend configuration")
+                return
+            }
+
+            if (audioWsHandler == null) {
+                audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                MainActivity.log("Test audio: WebSocket handler initialized on demand")
+            }
+
+            val ws = audioWsHandler ?: run {
+                MainActivity.log("⚠️ Test audio unavailable: WebSocket handler not ready")
                 return
             }
 
