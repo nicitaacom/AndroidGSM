@@ -177,7 +177,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   const downsampleTo16k = (input: Float32Array, inputSampleRate: number) => {
-    if (inputSampleRate <= 16000) return input
+    if (!Number.isFinite(inputSampleRate) || inputSampleRate < 1000 || inputSampleRate <= 16000) return input
 
     const ratio = inputSampleRate / 16000
     const outputLength = Math.max(1, Math.floor(input.length / ratio))
@@ -203,22 +203,16 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const cleanAndEncodePcm16 = (input: Float32Array) => {
     const i16 = new Int16Array(input.length)
     const HP_ALPHA = 0.995
-    const NOISE_GATE = 0.008
 
     for (let i = 0; i < input.length; i++) {
       const x = input[i]
-
-      // Simple DC blocker / high-pass to reduce low-frequency rumble.
       const y = x - hpLastInRef.current + HP_ALPHA * hpLastOutRef.current
       hpLastInRef.current = x
       hpLastOutRef.current = y
 
-      // Gentle noise gate for background hiss/wind.
-      const gated = Math.abs(y) < NOISE_GATE ? y * 0.2 : y
-
-      // Soft clip to avoid harsh clipping artefacts.
-      const shaped = Math.tanh(gated * 1.25)
-      i16[i] = Math.max(-32768, Math.min(32767, shaped * 32767))
+      // Keep processing very mild to avoid muting speech.
+      const boosted = y * 1.08
+      i16[i] = Math.max(-32768, Math.min(32767, boosted * 32767))
     }
 
     const bytes = new Uint8Array(i16.buffer)
@@ -268,7 +262,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
 
     fetchDeviceToken()
-    const id = setInterval(fetchDeviceToken, 5000) // Poll every 5s
+    const id = setInterval(fetchDeviceToken, 2000) // Poll every 2s for faster stale-state detection
     return () => clearInterval(id)
   }, [deviceToken, setDeviceToken, setError, setIsReady])
 

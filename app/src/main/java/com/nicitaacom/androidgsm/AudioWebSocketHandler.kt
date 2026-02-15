@@ -34,7 +34,7 @@ class AudioWebSocketHandler(
     
     private var wsConnection: WebSocketAudioClient? = null
     private var seqTx = 0L
-    private var seqRx = 0L
+    private var seqRx = -1L
 
     companion object {
         private const val TAG = "AudioWebSocket"
@@ -44,16 +44,17 @@ class AudioWebSocketHandler(
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_SIZE_FACTOR = 4
         private val CAPTURE_SOURCES = intArrayOf(
-            MediaRecorder.AudioSource.VOICE_DOWNLINK,
-            MediaRecorder.AudioSource.VOICE_CALL,
-            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.VOICE_CALL,
+            MediaRecorder.AudioSource.VOICE_DOWNLINK,
         )
     }
 
     fun connect(wsUrl: String, bearerToken: String, deviceToken: String) {
         MainActivity.log("🔌 WebSocket Audio: Connecting to $wsUrl")
-        
+        seqRx = -1L
+
         wsConnection = WebSocketAudioClient(wsUrl, bearerToken, deviceToken) { packet ->
             handleAudioPacket(packet)
         }
@@ -80,7 +81,7 @@ class AudioWebSocketHandler(
 
             // Validate sequence
             if (seq != -1L) {
-                if (seq <= seqRx) {
+                if (seq < seqRx) {
                     Log.w(TAG, "⚠️ Out of order: got seq=$seq, expected > $seqRx")
                     return
                 }
@@ -224,7 +225,7 @@ class AudioWebSocketHandler(
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
             audioManager.mode = AudioManager.MODE_IN_CALL
-            audioManager.isSpeakerphoneOn = false
+            audioManager.isSpeakerphoneOn = true
             audioManager.setStreamVolume(
                 AudioManager.STREAM_VOICE_CALL,
                 audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL),
