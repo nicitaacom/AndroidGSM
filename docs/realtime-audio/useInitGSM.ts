@@ -178,6 +178,13 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       if (rxQueueRef.current.size > MAX_QUEUE) {
         const oldestSeq = Math.min(...Array.from(rxQueueRef.current.keys()))
         rxQueueRef.current.delete(oldestSeq)
+
+        // Keep playout cursor in sync with queue drops; otherwise we can stall forever
+        // waiting for a sequence number that was already evicted.
+        if (nextRxSeqRef.current <= oldestSeq) {
+          nextRxSeqRef.current = oldestSeq + 1
+        }
+
         console.warn("[gsm/audio-queue] dropped old packet", oldestSeq, "queue size:", rxQueueRef.current.size)
       }
 
@@ -209,12 +216,26 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     console.info("[gsm/playback] loop started", { state: ctx.state })
 
     playoutTimerRef.current = setInterval(() => {
-      const seq = nextRxSeqRef.current
-      const chunk = rxQueueRef.current.get(seq)
+      const expectedSeq = nextRxSeqRef.current
+      let seqToPlay = expectedSeq
+      let chunk = rxQueueRef.current.get(seqToPlay)
+
+      // Recover from packet loss/eviction gaps by jumping to the next available chunk.
+      if (!chunk && rxQueueRef.current.size > 0) {
+        const availableSeqs = Array.from(rxQueueRef.current.keys())
+        const minAvailableSeq = Math.min(...availableSeqs)
+        if (minAvailableSeq > expectedSeq) {
+          console.warn("[gsm/playback] seq gap detected, skipping", { expected: expectedSeq, next: minAvailableSeq })
+          seqToPlay = minAvailableSeq
+          nextRxSeqRef.current = minAvailableSeq
+          chunk = rxQueueRef.current.get(seqToPlay)
+        }
+      }
+
       if (!chunk || chunk.length === 0) return
 
-      rxQueueRef.current.delete(seq)
-      nextRxSeqRef.current = seq + 1
+      rxQueueRef.current.delete(seqToPlay)
+      nextRxSeqRef.current = seqToPlay + 1
       playoutCount++
 
       try {
@@ -232,7 +253,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         src.start(ctx.currentTime)
 
         if (playoutCount % 50 === 0) {
-          console.log("[gsm/playback] playing chunk seq", seq, "total played:", playoutCount)
+          console.log("[gsm/playback] playing chunk seq", seqToPlay, "total played:", playoutCount)
         }
       } catch (err) {
         console.error("[gsm/playback] error playing chunk", err)
