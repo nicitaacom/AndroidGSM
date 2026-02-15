@@ -56,6 +56,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
   // Cleanup refs to prevent memory leaks
   const isCleaningUpRef = useRef(false)
+  const statusFailureCountRef = useRef(0)
+  const wsReconnectTimerRef = useRef<NodeJS.Timeout | null>(null)
 
   /**
    * 0. INITIALIZE AUDIO CONTEXT
@@ -178,24 +180,33 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   useEffect(() => {
     async function fetchDeviceToken() {
       try {
-        const res = await fetch("/api/gsm/status")
+        const res = await fetch("/api/gsm/status", { cache: "no-store" })
         if (!res.ok) throw new Error(await res.text())
         const data = await res.json()
 
-        if (data?.deviceToken) {
+        const authorized = !!data?.isAuthorized
+        const nextDeviceToken = data?.deviceToken as string | undefined
+
+        if (nextDeviceToken) {
           // Avoid token flapping when multiple devices are online
           if (!deviceToken) {
-            setDeviceToken(data.deviceToken)
-            console.info("[gsm] device discovered", { deviceToken: data.deviceToken })
-          } else if (deviceToken !== data.deviceToken) {
+            setDeviceToken(nextDeviceToken)
+            console.info("[gsm] device discovered", { deviceToken: nextDeviceToken })
+          } else if (deviceToken !== nextDeviceToken) {
             console.warn("[gsm] multiple devices detected, keeping selected token", {
               selected: deviceToken,
-              suggested: data.deviceToken,
+              suggested: nextDeviceToken,
             })
           }
-          setIsReady(!!data.isAuthorized)
         }
+
+        statusFailureCountRef.current = 0
+        setIsReady(authorized && !!nextDeviceToken)
       } catch (error) {
+        statusFailureCountRef.current += 1
+        if (statusFailureCountRef.current >= 2) {
+          setIsReady(false)
+        }
         setError(String(error))
         console.error("[gsm/status] error", error)
       }
@@ -266,6 +277,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const onAudioChunk = (eventData: GsmCallsEvent) => {
       if (!deviceToken || eventData?.deviceToken !== deviceToken || !eventData?.audio) return
       enqueueBase64Audio(eventData.audio)
+      ensurePlayoutLoop()
     }
 
     // Bind Pusher events with gsm: namespace
@@ -298,6 +310,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   useEffect(() => {
     if (callingSetup !== "gsm" || !deviceToken) return
 
+    let isUnmounted = false
+
     console.info("[gsm/ws] init", { callingSetup, deviceToken })
 
     // Create audio context if needed
@@ -314,58 +328,68 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       return
     }
 
-    console.info("[gsm/ws] connecting", { wsBase, deviceToken })
-    const ws = new WebSocket(`${wsBase}/ws/audio?token=${encodeURIComponent(bearerToken)}`)
-    wsRef.current = ws
+    const connect = () => {
+      if (isUnmounted) return
+      if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current)
 
-    ws.onopen = () => {
-      resetInboundAudioState()
-      setIsReady(true)
-      // Ensure AudioContext is running
-      if (audioContextRef.current?.state === "suspended") {
-        audioContextRef.current.resume().catch(() => {})
-      }
-      console.info("[gsm/ws] connected, AudioContext state:", audioContextRef.current?.state)
-      // Send registration packet to identify as browser
-      ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
-    }
+      console.info("[gsm/ws] connecting", { wsBase, deviceToken })
+      const ws = new WebSocket(`${wsBase}/ws/audio?token=${encodeURIComponent(bearerToken)}`)
+      wsRef.current = ws
 
-    ws.onerror = (event) => {
-      setIsReady(false)
-      setError("WebSocket connection error")
-      console.error("[gsm/ws] error", event)
-    }
-
-    ws.onclose = (event) => {
-      setIsReady(false)
-      console.warn("[gsm/ws] closed", { code: event.code, reason: event.reason })
-    }
-
-    ws.onmessage = (ev) => {
-      try {
-        const pkt: AudioPacket = JSON.parse(ev.data)
-        if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
-
-        // Queue incoming audio from Android device
-        if (pkt.audio) {
-          enqueueBase64Audio(pkt.audio)
-          ensurePlayoutLoop() // test-audio works even before CALL_CONNECTED arrives
-          // Log every 100 packets
-          if (pkt.seq % 100 === 0) {
-            console.log("[gsm/ws-rx] received audio packet", pkt.seq)
-          }
+      ws.onopen = () => {
+        resetInboundAudioState()
+        setIsReady(true)
+        if (audioContextRef.current?.state === "suspended") {
+          audioContextRef.current.resume().catch(() => {})
         }
-      } catch (err) {
-        console.error("[gsm/ws] onmessage parse error", err)
+        console.info("[gsm/ws] connected, AudioContext state:", audioContextRef.current?.state)
+        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
+      }
+
+      ws.onerror = (event) => {
+        setError("WebSocket connection error")
+        console.error("[gsm/ws] error", event)
+      }
+
+      ws.onclose = (event) => {
+        setIsReady(false)
+        console.warn("[gsm/ws] closed", { code: event.code, reason: event.reason })
+
+        if (!isUnmounted) {
+          wsReconnectTimerRef.current = setTimeout(() => connect(), 1500)
+        }
+      }
+
+      ws.onmessage = (ev) => {
+        try {
+          const pkt: AudioPacket = JSON.parse(ev.data)
+          if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
+
+          if (pkt.audio) {
+            enqueueBase64Audio(pkt.audio)
+            ensurePlayoutLoop() // test-audio works even before CALL_CONNECTED arrives
+            if (pkt.seq % 100 === 0) {
+              console.log("[gsm/ws-rx] received audio packet", pkt.seq)
+            }
+          }
+        } catch (err) {
+          console.error("[gsm/ws] onmessage parse error", err)
+        }
       }
     }
+
+    connect()
 
     return () => {
-      ws.close()
+      isUnmounted = true
+      if (wsReconnectTimerRef.current) clearTimeout(wsReconnectTimerRef.current)
+      wsReconnectTimerRef.current = null
+      wsRef.current?.close()
       wsRef.current = null
       stopMicCapture()
       stopPlayoutLoop()
       resetInboundAudioState()
+      setIsReady(false)
     }
   }, [callingSetup, deviceToken, setError, setIsReady])
 
