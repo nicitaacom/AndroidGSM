@@ -108,6 +108,8 @@ class MainActivity : AppCompatActivity() {
         addLog("App started")
         addLog("Android version: ${Build.VERSION.RELEASE}")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
+        val isRooted = RootUtils.isRooted()
+        addLog(if (isRooted) "✅ Device is rooted - audio output capture available" else "❌ Device is NOT rooted - only mic input will stream")
 
         checkServiceStatus()
 
@@ -122,6 +124,7 @@ class MainActivity : AppCompatActivity() {
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         addLog("Screen will stay on while app is active")
+
     }
 
     override fun onResume() {
