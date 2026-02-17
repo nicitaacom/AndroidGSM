@@ -32,10 +32,18 @@ class AudioWebSocketHandler(
     private var isCallActive = false
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-    
+
     private var wsConnection: WebSocketAudioClient? = null
     private var seqTx = 0L
     private var seqRx = -1L
+
+    // 1. Check root once on init and log result clearly
+    private val isRooted: Boolean by lazy {
+        RootUtils.isRooted().also { rooted ->
+            if (rooted) MainActivity.log("✅ Root detected - audio output capture enabled")
+            else MainActivity.log("❌ Device is NOT rooted - audio output capture unavailable (only mic input will be streamed)")
+        }
+    }
 
     companion object {
         private const val TAG = "AudioWebSocket"
@@ -44,7 +52,9 @@ class AudioWebSocketHandler(
         private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_SIZE_FACTOR = 4
-        private val CAPTURE_SOURCES = intArrayOf(
+
+        // 2. Fallback sources used when NOT rooted (mic-based)
+        private val MIC_CAPTURE_SOURCES = intArrayOf(
             MediaRecorder.AudioSource.MIC,
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             MediaRecorder.AudioSource.VOICE_CALL,
@@ -55,10 +65,7 @@ class AudioWebSocketHandler(
     fun connect(wsUrl: String, bearerToken: String, deviceToken: String) {
         MainActivity.log("🔌 WebSocket Audio: Connecting to $wsUrl")
         seqRx = -1L
-
-        wsConnection = WebSocketAudioClient(wsUrl, bearerToken, deviceToken) { packet ->
-            handleAudioPacket(packet)
-        }
+        wsConnection = WebSocketAudioClient(wsUrl, bearerToken, deviceToken) { packet -> handleAudioPacket(packet) }
     }
 
     fun disconnect() {
@@ -74,27 +81,22 @@ class AudioWebSocketHandler(
             val role = packet.optString("role", "")
             val audio = packet.optString("audio", "")
             val seq = packet.optLong("seq", -1)
-            
+
             if (dir != "toAndroid" || audio.isEmpty()) {
                 Log.d(TAG, "WS-RX skip dir=$dir role=$role hasAudio=${audio.isNotEmpty()}")
                 return
             }
 
-            // Validate sequence
+            // 3. Validate sequence order
             if (seq != -1L) {
-                if (seq < seqRx) {
-                    Log.w(TAG, "⚠️ Out of order: got seq=$seq, expected > $seqRx")
-                    return
-                }
+                if (seq < seqRx) { Log.w(TAG, "⚠️ Out of order: got seq=$seq, expected > $seqRx"); return }
                 seqRx = seq
             }
 
-            // Decode and play audio (log concise info)
             Log.d(TAG, "WS-RX seq=$seq size=${audio.length}")
             playAudioChunk(audio, seq)
-
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Error handling audio packet: ${e.message}")
+        } catch (exception: Exception) {
+            Log.e(TAG, "❌ Error handling audio packet: ${exception.message}")
         }
     }
 
@@ -103,61 +105,73 @@ class AudioWebSocketHandler(
 
         try {
             MainActivity.log("🎤 WebSocket: Starting capture...")
-
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             audioManager.isSpeakerphoneOn = false
-            
-            val bufferSize = AudioRecord.getMinBufferSize(
-                SAMPLE_RATE,
-                CHANNEL_IN,
-                AUDIO_FORMAT
-            ) * BUFFER_SIZE_FACTOR
 
-            if (bufferSize <= 0) {
-                MainActivity.log("ERROR: Invalid buffer size")
-                return
-            }
+            val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
+            if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid buffer size"); return }
 
-            var selectedRecord: AudioRecord? = null
-            for (source in CAPTURE_SOURCES) {
-                try {
-                    val record = AudioRecord(
-                        source,
-                        SAMPLE_RATE,
-                        CHANNEL_IN,
-                        AUDIO_FORMAT,
-                        bufferSize
-                    )
-                    if (record.state == AudioRecord.STATE_INITIALIZED) {
-                        MainActivity.log("✅ Capture source: $source")
-                        selectedRecord = record
-                        break
-                    }
-                    record.release()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed source $source: ${e.message}")
-                }
-            }
+            // 4. If rooted - grant CAPTURE_AUDIO_OUTPUT and use REMOTE_SUBMIX to capture device audio output
+            audioRecord = if (isRooted) buildRootedAudioRecord(bufferSize) else buildMicAudioRecord(bufferSize)
 
-            audioRecord = selectedRecord
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                MainActivity.log("ERROR: AudioRecord not initialized")
+                MainActivity.log("❌ ERROR: AudioRecord not initialized")
                 return
             }
 
             isRecording = true
             audioRecord?.startRecording()
-
-            scope.launch {
-                captureAndStreamAudio(bufferSize)
-            }
-
-            MainActivity.log("✅ Capture started (WS)")
-            
-        } catch (e: Exception) {
-            MainActivity.log("ERROR starting capture: ${e.message}")
-            Log.e(TAG, "Error", e)
+            scope.launch { captureAndStreamAudio(bufferSize) }
+            MainActivity.log("✅ Capture started (WS) - source: ${if (isRooted) "REMOTE_SUBMIX (audio output)" else "MIC"}")
+        } catch (exception: Exception) {
+            MainActivity.log("❌ ERROR starting capture: ${exception.message}")
+            Log.e(TAG, "Error", exception)
         }
+    }
+
+    // 5. Build AudioRecord using REMOTE_SUBMIX (requires root + CAPTURE_AUDIO_OUTPUT permission)
+    private fun buildRootedAudioRecord(bufferSize: Int): AudioRecord? {
+        val granted = RootUtils.grantAudioOutputCapture(context)
+        if (!granted) {
+            MainActivity.log("❌ Failed to grant CAPTURE_AUDIO_OUTPUT via root - falling back to mic")
+            return buildMicAudioRecord(bufferSize)
+        }
+
+        return try {
+            val record = AudioRecord(
+                MediaRecorder.AudioSource.REMOTE_SUBMIX,
+                SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize
+            )
+            if (record.state == AudioRecord.STATE_INITIALIZED) {
+                MainActivity.log("✅ REMOTE_SUBMIX initialized - capturing device audio output")
+                record
+            } else {
+                record.release()
+                MainActivity.log("❌ REMOTE_SUBMIX failed to initialize - falling back to mic")
+                buildMicAudioRecord(bufferSize)
+            }
+        } catch (exception: Exception) {
+            Log.e(TAG, "❌ REMOTE_SUBMIX error: ${exception.message}")
+            MainActivity.log("❌ REMOTE_SUBMIX exception: ${exception.message} - falling back to mic")
+            buildMicAudioRecord(bufferSize)
+        }
+    }
+
+    // 6. Build AudioRecord using MIC sources as fallback
+    private fun buildMicAudioRecord(bufferSize: Int): AudioRecord? {
+        for (source in MIC_CAPTURE_SOURCES) {
+            try {
+                val record = AudioRecord(source, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
+                if (record.state == AudioRecord.STATE_INITIALIZED) {
+                    MainActivity.log("✅ Capture source: $source (mic fallback)")
+                    return record
+                }
+                record.release()
+            } catch (exception: Exception) {
+                Log.w(TAG, "Failed source $source: ${exception.message}")
+            }
+        }
+        return null
     }
 
     private suspend fun captureAndStreamAudio(bufferSize: Int) = withContext(Dispatchers.IO) {
@@ -170,33 +184,20 @@ class AudioWebSocketHandler(
 
                 if (read > 0) {
                     val byteBuffer = ByteArray(read * 2)
-                    ByteBuffer.wrap(byteBuffer)
-                        .order(ByteOrder.LITTLE_ENDIAN)
-                        .asShortBuffer()
-                        .put(buffer, 0, read)
+                    ByteBuffer.wrap(byteBuffer).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(buffer, 0, read)
 
-                        val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
-                        val seq = seqTx++
-                        wsConnection?.sendAudioChunk(
-                            audio = base64Audio,
-                            seq = seq,
-                            sampleRate = SAMPLE_RATE,
-                            codec = "pcm16"
-                        )
+                    val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
+                    val seq = seqTx++
+                    wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
 
-                        // concise send log (every 10th chunk)
-                        if (seq % 10L == 0L) {
-                            Log.d(TAG, "WS-SEND seq=$seq size=${base64Audio.length}")
-                        }
-
-                        chunkCount++
+                    if (seq % 10L == 0L) Log.d(TAG, "WS-SEND seq=$seq size=${base64Audio.length}")
+                    chunkCount++
                 } else if (read < 0) {
                     Log.e(TAG, "❌ Read error: $read")
                     break
                 }
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Error in capture loop: ${e.message}")
+            } catch (exception: Exception) {
+                Log.e(TAG, "❌ Error in capture loop: ${exception.message}")
                 break
             }
         }
@@ -209,13 +210,11 @@ class AudioWebSocketHandler(
             audioRecord?.stop()
             audioRecord?.release()
             audioRecord = null
-            
             audioManager.mode = AudioManager.MODE_NORMAL
             audioManager.isSpeakerphoneOn = false
-
             MainActivity.log("🎤 Capture stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping capture", e)
+        } catch (exception: Exception) {
+            Log.e(TAG, "❌ Error stopping capture", exception)
         }
     }
 
@@ -225,33 +224,24 @@ class AudioWebSocketHandler(
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
+            // 7. Route playback correctly based on call state
             if (isCallActive) {
-                // During active call: use MODE_IN_COMMUNICATION so played audio gets picked up by call mic
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 audioManager.isSpeakerphoneOn = true
                 MainActivity.log("Playback: MODE_IN_COMMUNICATION (call active)")
             } else {
-                // Outside call: use MODE_NORMAL for regular media playback
                 audioManager.mode = AudioManager.MODE_NORMAL
                 audioManager.isSpeakerphoneOn = true
             }
-            
+
             audioManager.setStreamVolume(
                 AudioManager.STREAM_MUSIC,
                 audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
                 0
             )
 
-            val bufferSize = AudioTrack.getMinBufferSize(
-                SAMPLE_RATE,
-                CHANNEL_OUT,
-                AUDIO_FORMAT
-            ) * BUFFER_SIZE_FACTOR
-
-            if (bufferSize <= 0) {
-                MainActivity.log("ERROR: Invalid playback buffer size")
-                return
-            }
+            val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
+            if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
 
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
@@ -271,19 +261,14 @@ class AudioWebSocketHandler(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
-                MainActivity.log("ERROR: AudioTrack not initialized")
-                return
-            }
+            if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) { MainActivity.log("❌ ERROR: AudioTrack not initialized"); return }
 
             isPlaying = true
             audioTrack?.play()
-
             MainActivity.log("✅ Playback started (WS, default media output)")
-            
-        } catch (e: Exception) {
-            MainActivity.log("ERROR starting playback: ${e.message}")
-            Log.e(TAG, "Error", e)
+        } catch (exception: Exception) {
+            MainActivity.log("❌ ERROR starting playback: ${exception.message}")
+            Log.e(TAG, "Error", exception)
         }
     }
 
@@ -293,114 +278,68 @@ class AudioWebSocketHandler(
     }
 
     private fun playAudioChunk(base64Audio: String, seq: Long = -1) {
-        if (!isPlaying) {
-            startAudioPlayback()
-        }
+        if (!isPlaying) startAudioPlayback()
 
         scope.launch {
             try {
-                // ✅ DEBUG: Log packet details
-                Log.d(TAG, "Received audio chunk: size=${base64Audio.length}")
+                if (base64Audio.isBlank()) { Log.w(TAG, "⚠️ Empty audio chunk"); return@launch }
 
-                // Validate
-                if (base64Audio.isBlank()) {
-                    Log.w(TAG, "⚠️ Empty audio chunk")
-                    return@launch
-                }
-
-                // Decode base64
+                // 8. Decode base64 with explicit error handling
                 val audioBytes = try {
                     Base64.decode(base64Audio, Base64.NO_WRAP)
-                } catch (e: IllegalArgumentException) {
-                    Log.e(TAG, "❌ Base64 decode failed: ${e.message}")
-                    MainActivity.log("ERROR: Invalid base64 audio")
-                    return@launch
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ Unexpected decode error: ${e.message}")
+                } catch (exception: IllegalArgumentException) {
+                    Log.e(TAG, "❌ Base64 decode failed: ${exception.message}")
+                    MainActivity.log("❌ ERROR: Invalid base64 audio")
                     return@launch
                 }
 
                 Log.d(TAG, "WS-DECODE seq=$seq bytes=${audioBytes.size}")
 
-                // Validate size
                 if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) {
                     Log.e(TAG, "❌ Invalid audio size: ${audioBytes.size}")
                     return@launch
                 }
 
-                // ✅ CRITICAL: Use explicit byte order
+                // 9. Convert bytes to shorts with explicit byte order
                 val shortBuffer = ShortArray(audioBytes.size / 2)
                 try {
-                    ByteBuffer.wrap(audioBytes)
-                        .order(ByteOrder.LITTLE_ENDIAN)
-                        .asShortBuffer()
-                        .get(shortBuffer)
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ Buffer conversion error: ${e.message}")
+                    ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
+                } catch (exception: Exception) {
+                    Log.e(TAG, "❌ Buffer conversion error: ${exception.message}")
                     return@launch
                 }
 
-                // Apply gentle gain to improve pick-up by call microphone
+                // 10. Apply gentle gain to improve pick-up by call microphone
                 val gain = 1.6f
-                var i = 0
-                while (i < shortBuffer.size) {
-                    val v = (shortBuffer[i] * gain).toInt()
-                    shortBuffer[i] = when {
-                        v > Short.MAX_VALUE -> Short.MAX_VALUE
-                        v < Short.MIN_VALUE -> Short.MIN_VALUE
-                        else -> v.toShort()
-                    }
-                    i++
+                for (index in shortBuffer.indices) {
+                    val amplified = (shortBuffer[index] * gain).toInt()
+                    shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                 }
 
-                // Verify AudioTrack exists and is initialized
                 val track = audioTrack
-                if (track == null) {
-                    Log.w(TAG, "⚠️ AudioTrack is null, restarting")
+                if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
+                    Log.w(TAG, "⚠️ AudioTrack unavailable (state=${track?.state}), restarting")
                     startAudioPlayback()
                     return@launch
                 }
 
-                if (track.state != AudioTrack.STATE_INITIALIZED) {
-                    Log.w(TAG, "⚠️ AudioTrack not initialized (state=${track.state}), restarting")
-                    startAudioPlayback()
-                    return@launch
-                }
-
-                // Write audio with bounds checking
+                // 11. Write audio with result validation
                 try {
                     val written = track.write(shortBuffer, 0, shortBuffer.size)
-
                     when {
-                        written == AudioTrack.ERROR_INVALID_OPERATION -> {
-                            Log.e(TAG, "❌ AudioTrack ERROR_INVALID_OPERATION")
-                            isPlaying = false
-                        }
-                        written == AudioTrack.ERROR_BAD_VALUE -> {
-                            Log.e(TAG, "❌ AudioTrack ERROR_BAD_VALUE")
-                            isPlaying = false
-                        }
-                        written < 0 -> {
-                            Log.e(TAG, "❌ AudioTrack write error: $written")
-                        }
-                        written != shortBuffer.size -> {
-                            Log.w(TAG, "⚠️ Partial write: $written/${shortBuffer.size}")
-                        }
-                        else -> {
-                            Log.d(TAG, "✅ Wrote ${shortBuffer.size} samples")
-                        }
+                        written == AudioTrack.ERROR_INVALID_OPERATION -> { Log.e(TAG, "❌ AudioTrack ERROR_INVALID_OPERATION"); isPlaying = false }
+                        written == AudioTrack.ERROR_BAD_VALUE -> { Log.e(TAG, "❌ AudioTrack ERROR_BAD_VALUE"); isPlaying = false }
+                        written < 0 -> { Log.e(TAG, "❌ AudioTrack write error: $written") }
+                        written != shortBuffer.size -> Log.w(TAG, "⚠️ Partial write: $written/${shortBuffer.size}")
+                        else -> Log.d(TAG, "✅ Wrote ${shortBuffer.size} samples")
                     }
-                } catch (e: IllegalStateException) {
-                    Log.e(TAG, "❌ AudioTrack IllegalStateException (released?): ${e.message}")
+                } catch (exception: IllegalStateException) {
+                    Log.e(TAG, "❌ AudioTrack released: ${exception.message}")
                     isPlaying = false
-                } catch (e: Exception) {
-                    Log.e(TAG, "❌ AudioTrack write exception: ${e.message}")
-                    e.printStackTrace()
                 }
-
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ Error playing chunk: ${e.message}")
-                e.printStackTrace()
+            } catch (exception: Exception) {
+                Log.e(TAG, "❌ Error playing chunk: ${exception.message}")
+                exception.printStackTrace()
             }
         }
     }
@@ -412,8 +351,8 @@ class AudioWebSocketHandler(
             audioTrack?.release()
             audioTrack = null
             MainActivity.log("🔊 Playback stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping playback", e)
+        } catch (exception: Exception) {
+            Log.e(TAG, "❌ Error stopping playback", exception)
         }
     }
 
