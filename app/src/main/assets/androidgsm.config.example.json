@@ -1,8 +1,9 @@
 {
   "BACKEND_URL": "https://your-backend.com/",
-  "DEVICE_TOKEN": "android-gateway-01",
   "BACKEND_BEARER": "your-secret-bearer-token",
 
-  "PUSHER_KEY": "your_pusher_key_here",
+  "PUSHER_APP_ID": "123456",
+  "PUSHER_KEY": "*************14f",
+  "PUSHER_SECRET": "************14bae",
   "PUSHER_CLUSTER": "eu"
 }
