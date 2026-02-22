@@ -9,6 +9,7 @@ Phone = modem. Backend = brain.
 
 ## Important!
 Create separated branch - test if app not crashes - only then merge changes to production
+BEFORE coding make sure `androidgsm.config.json` actually exists - implement validation if file is missing
 
 ## 📡 Architecture Overview
 
