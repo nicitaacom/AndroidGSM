@@ -1,9 +1,0 @@
-{
-  "BACKEND_URL": "https://gsm.nexgem.studio",
-  "BACKEND_BEARER": "backend-barer-1234",
-
-  "PUSHER_APP_ID": "2093123",
-  "PUSHER_KEY": "1ce1dcec8fd97743a14f",
-  "PUSHER_SECRET": "43a11a3d28d58fc14bae",
-  "PUSHER_CLUSTER": "eu"
-}
