@@ -53,10 +53,8 @@ class AudioWebSocketHandler(
 
         // 2. Fallback sources used when NOT rooted (mic-based)
         private val MIC_CAPTURE_SOURCES = intArrayOf(
-            MediaRecorder.AudioSource.MIC,
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-            MediaRecorder.AudioSource.VOICE_CALL,
-            MediaRecorder.AudioSource.VOICE_DOWNLINK,
+            MediaRecorder.AudioSource.MIC,
         )
     }
 
@@ -100,22 +98,21 @@ class AudioWebSocketHandler(
 
     fun startAudioCapture() {
         if (isRecording) return
-
-        // 4. Explicit RECORD_AUDIO permission check before any AudioRecord construction
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            MainActivity.log("❌ ERROR: RECORD_AUDIO permission not granted - cannot start capture")
+            MainActivity.log("❌ ERROR: RECORD_AUDIO permission not granted")
             return
         }
-
         try {
             MainActivity.log("🎤 WebSocket: Starting capture...")
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            audioManager.isSpeakerphoneOn = false
+            // 1. Only set communication mode if call is active - TEST mode uses normal mic
+            if (isCallActive) {
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.isSpeakerphoneOn = false
+            }
 
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid buffer size"); return }
 
-            // 5. If rooted - grant CAPTURE_AUDIO_OUTPUT and use REMOTE_SUBMIX, otherwise fall back to mic
             audioRecord = if (isRooted) buildRootedAudioRecord(bufferSize) else buildMicAudioRecord(bufferSize)
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
@@ -126,13 +123,11 @@ class AudioWebSocketHandler(
             isRecording = true
             audioRecord?.startRecording()
             scope.launch { captureAndStreamAudio(bufferSize) }
-            MainActivity.log("✅ Capture started (WS) - source: ${if (isRooted) "REMOTE_SUBMIX (audio output)" else "MIC"}")
+            MainActivity.log("✅ Capture started (WS) - source: ${if (isRooted) "REMOTE_SUBMIX" else "MIC/VOICE_COMMUNICATION"}")
         } catch (exception: SecurityException) {
-            MainActivity.log("❌ ERROR: Permission rejected by system during AudioRecord init: ${exception.message}")
-            Log.e(TAG, "SecurityException in startAudioCapture", exception)
+            MainActivity.log("❌ ERROR: Permission rejected: ${exception.message}")
         } catch (exception: Exception) {
             MainActivity.log("❌ ERROR starting capture: ${exception.message}")
-            Log.e(TAG, "Error", exception)
         }
     }
 
@@ -240,43 +235,35 @@ class AudioWebSocketHandler(
 
     fun startAudioPlayback() {
         if (isPlaying) return
-
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
-            // 8. Route playback correctly based on call state
+            // 1. Route based on call state - TEST = speaker, CALL = earpiece
             if (isCallActive) {
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = true
-                MainActivity.log("Playback: MODE_IN_COMMUNICATION (call active)")
+                audioManager.isSpeakerphoneOn = false
             } else {
                 audioManager.mode = AudioManager.MODE_NORMAL
                 audioManager.isSpeakerphoneOn = true
+                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC), 0)
             }
-
-            audioManager.setStreamVolume(
-                AudioManager.STREAM_MUSIC,
-                audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
-                0
-            )
 
             val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
 
+            // 2. Use USAGE_MEDIA for TEST (speaker), USAGE_VOICE_COMMUNICATION for CALL (earpiece)
+            val audioUsage = if (isCallActive) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA
+
             audioTrack = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AUDIO_FORMAT)
-                        .setSampleRate(SAMPLE_RATE)
-                        .setChannelMask(CHANNEL_OUT)
-                        .build()
-                )
+                .setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(audioUsage)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+                .setAudioFormat(AudioFormat.Builder()
+                    .setEncoding(AUDIO_FORMAT)
+                    .setSampleRate(SAMPLE_RATE)
+                    .setChannelMask(CHANNEL_OUT)
+                    .build())
                 .setBufferSizeInBytes(bufferSize)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
@@ -285,10 +272,9 @@ class AudioWebSocketHandler(
 
             isPlaying = true
             audioTrack?.play()
-            MainActivity.log("✅ Playback started (WS, default media output)")
+            MainActivity.log("✅ Playback started - mode: ${if (isCallActive) "CALL/earpiece" else "TEST/speaker"}")
         } catch (exception: Exception) {
             MainActivity.log("❌ ERROR starting playback: ${exception.message}")
-            Log.e(TAG, "Error", exception)
         }
     }
 

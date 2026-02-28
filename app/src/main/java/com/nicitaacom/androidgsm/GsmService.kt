@@ -300,66 +300,54 @@ class GsmService : Service() {
     }
 
     private fun startTestAudioStreaming() {
-        if (isTestAudioActive) {
-            MainActivity.log("Test audio already running")
+        if (isTestAudioActive) { MainActivity.log("Test audio already running"); return }
+        isTestAudioActive = true
+
+        val baseUrl = config?.BACKEND_URL
+        val bearerToken = config?.BACKEND_BEARER
+        val deviceToken = config?.DEVICE_TOKEN
+
+        if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
+            MainActivity.log("⚠️ Test audio unavailable: missing backend configuration")
+            isTestAudioActive = false
             return
         }
-        isTestAudioActive = true
-        pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
 
-        try {
-            val baseUrl = config?.BACKEND_URL
-            val bearerToken = config?.BACKEND_BEARER
-            val deviceToken = config?.DEVICE_TOKEN
-
-            if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
-                MainActivity.log("⚠️ Test audio unavailable: missing backend configuration")
-                isTestAudioActive = false
-                return
-            }
-
-            if (audioWsHandler == null) {
-                audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
-                MainActivity.log("Test audio: WebSocket handler initialized on demand")
-            }
-
-            val ws = audioWsHandler ?: run {
-                MainActivity.log("⚠️ Test audio unavailable: WebSocket handler not ready")
-                isTestAudioActive = false
-                return
-            }
-
-            MainActivity.log("Test audio: starting phone -> website stream")
-
-            Thread {
-                try {
-                    val wsUrl = baseUrl
-                        .replace("http://", "ws://")
-                        .replace("https://", "wss://")
-                        .removeSuffix("/") + "/ws/audio"
-
-                    ws.connect(wsUrl, bearerToken, deviceToken)
-                    ws.startAudioCapture()
-                    MainActivity.log("✅ Test audio streaming started (phone -> website)")
-                } catch (e: Exception) {
-                    MainActivity.log("ERROR starting test audio stream: ${e.message}")
-                    isTestAudioActive = false
-                    e.printStackTrace()
-                }
-            }.start()
-        } catch (e: Exception) {
-            MainActivity.log("ERROR in startTestAudioStreaming: ${e.message}")
-            isTestAudioActive = false
-            e.printStackTrace()
+        if (audioWsHandler == null) {
+            audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+            MainActivity.log("Test audio: WebSocket handler initialized on demand")
         }
-    }
 
+        val ws = audioWsHandler ?: run {
+            MainActivity.log("⚠️ Test audio unavailable: WebSocket handler not ready")
+            isTestAudioActive = false
+            return
+        }
+
+        Thread {
+            try {
+                val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
+                // 1. TEST mode - isCallActive stays false → speaker output
+                ws.setCallActive(false)
+                ws.connect(wsUrl, bearerToken, deviceToken)
+                Thread.sleep(500) // wait for WS handshake
+                ws.startAudioCapture()
+                ws.startAudioPlayback() // 2. must start playback to receive audio from server
+                pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
+                MainActivity.log("✅ Test audio streaming started - mic→server + server→speaker")
+            } catch (error: Exception) {
+                MainActivity.log("ERROR starting test audio: ${error.message}")
+                isTestAudioActive = false
+            }
+        }.start()
+    }
     private fun stopTestAudioStreaming() {
         isTestAudioActive = false
-        pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap())
         audioWsHandler?.stopAudioCapture()
-        audioStreamHandler?.stopAudioCapture()
-        audioStreamHandler?.stopAudioPlayback()
+        audioWsHandler?.stopAudioPlayback()
+        audioWsHandler?.disconnect()
+        audioWsHandler = null // 1. force re-init on next test start to avoid stale WS state
+        pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap())
         MainActivity.log("Test audio streaming stopped")
     }
 
