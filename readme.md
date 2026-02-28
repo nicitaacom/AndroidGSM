@@ -5,6 +5,9 @@ Android foreground service that exposes **real GSM calls** to a backend via
 
 Phone = modem. Backend = brain.
 
+Be a default dialer app (replaces the system dialer entirely)
+Use CAPTURE_AUDIO_OUTPUT permission — system-only, requires root or system signing
+
 ---
 
 ## Important!
