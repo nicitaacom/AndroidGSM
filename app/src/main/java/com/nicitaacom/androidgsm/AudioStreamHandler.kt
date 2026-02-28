@@ -41,8 +41,9 @@ class AudioStreamHandler(
         private const val AUDIO_CHUNK_SIZE_MS = 20  // 20ms chunks at 16kHz = 320 samples
         private const val EXPECTED_CHUNK_SIZE = SAMPLE_RATE * AUDIO_CHUNK_SIZE_MS / 1000 * 2  // in bytes
         private val CAPTURE_SOURCES = intArrayOf(
-            MediaRecorder.AudioSource.VOICE_DOWNLINK,  // ONLY capture what other person says, not our mic
-        )
+        MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+        MediaRecorder.AudioSource.MIC,
+    )
     }
 
     fun startAudioCapture() {

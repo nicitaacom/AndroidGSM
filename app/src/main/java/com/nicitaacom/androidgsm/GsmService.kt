@@ -397,65 +397,25 @@ class GsmService : Service() {
 
             // 1. set callbacks BEFORE starting call
             gsmDialer?.setCallConnectedCallback {
-                try {
-                    MainActivity.log("Call connected (OFFHOOK) - starting audio capture and WebSocket")
+                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.isSpeakerphoneOn = false // earpiece, not speaker
 
-                    // Ensure audio mode is set correctly for call
-                    val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                    audioManager.isSpeakerphoneOn = true
-
-                    // Start audio capture with retry
-                    Thread {
-                        try {
-                            audioStreamHandler?.startAudioCapture()
-                            MainActivity.log("Audio capture started successfully")
-                        } catch (e: Exception) {
-                            MainActivity.log("Error starting audio capture: ${e.message}")
-                            e.printStackTrace()
-                        }
-                    }.start()
-
-                    // Connect WebSocket for bidirectional audio (non-blocking)
-                    Thread {
-                        try {
-                            val baseUrl = config?.BACKEND_URL ?: ""
-                            val wsUrl = baseUrl
-                                .replace("http://", "ws://")
-                                .replace("https://", "wss://")
-                                .removeSuffix("/") + "/ws/audio"
-                            val bearerToken = config?.BACKEND_BEARER ?: ""
-
-                            MainActivity.log("WS URL: $wsUrl")
-                            MainActivity.log("Bearer token: ${bearerToken.take(10)}...")
-
-                            // Small delay to ensure Pusher CALL_CONNECTED reaches server first
-                            Thread.sleep(500)
-
-                            audioWsHandler?.connect(wsUrl, bearerToken, config?.DEVICE_TOKEN ?: "")
-                            audioWsHandler?.setCallActive(true)
-                            audioWsHandler?.startAudioCapture()
-                            audioWsHandler?.startAudioPlayback()
-                            MainActivity.log("WebSocket audio connected (call mode)")
-                        } catch (e: Exception) {
-                            MainActivity.log("Error connecting WebSocket: ${e.message}")
-                            e.printStackTrace()
-                        }
-                    }.start()
-
-                    // Send CALL_CONNECTED to server (non-blocking)
-                    Thread {
-                        try {
-                            pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                            MainActivity.log("CALL_CONNECTED sent to server")
-                        } catch (e: Exception) {
-                            MainActivity.log("Error sending CALL_CONNECTED: ${e.message}")
-                        }
-                    }.start()
-                } catch (e: Exception) {
-                    MainActivity.log("ERROR in CALL_CONNECTED callback: ${e.message}")
-                    e.printStackTrace()
-                }
+                Thread {
+                    try {
+                        val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")
+                            ?.replace("https://", "wss://")?.removeSuffix("/") + "/ws/audio"
+                        Thread.sleep(300)
+                        audioWsHandler?.connect(wsUrl, config?.BACKEND_BEARER ?: "", config?.DEVICE_TOKEN ?: "")
+                        audioWsHandler?.setCallActive(true)
+                        audioWsHandler?.startAudioCapture()
+                        audioWsHandler?.startAudioPlayback()
+                        pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
+                        MainActivity.log("Call connected - WS audio active")
+                    } catch (error: Exception) {
+                        MainActivity.log("ERROR in CALL_CONNECTED callback: ${error.message}")
+                    }
+                }.start()
             }
 
             gsmDialer?.setCallEndedCallback {
