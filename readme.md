@@ -1,12 +1,39 @@
 # 📞 Android GSM Gateway
 
 Android foreground service that exposes **real GSM calls** to a backend via
-**Pusher (commands)** + **HTTP (events + audio)**.
+
+**ROOT** - Pusher (commands)** + **HTTP (events + audio)**.
 
 Phone = modem. Backend = brain.
 
 Be a default dialer app (replaces the system dialer entirely)
 Use CAPTURE_AUDIO_OUTPUT permission — system-only, requires root or system signing
+
+Without root — you can only capture microphone input (MIC / VOICE_COMMUNICATION), not the phone's audio output (what speakers play).
+REMOTE_SUBMIX / CAPTURE_AUDIO_OUTPUT = system permission = root only.
+
+
+# Remove Android App via ADB
+
+## 1. Check device connected
+```bash
+adb devices
+```
+
+Uninstall the app
+```bash
+adb uninstall com.nicitaacom.androidgsm
+```
+
+Stop app
+```bash
+adb shell am force-stop com.nicitaacom.androidgsm
+```
+
+Install app
+```bash
+adb install -r $(ls -t ~/Documents/GitHub/AndroidGSM/app/build/outputs/apk/debug/*.apk | head -n1) && adb shell monkey -p com.nicitaacom.androidgsm -c android.intent.category.LAUNCHER 1
+```
 
 ---
 

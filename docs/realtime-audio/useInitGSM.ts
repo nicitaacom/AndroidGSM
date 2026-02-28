@@ -460,19 +460,17 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         resetInboundAudioState()
         setIsReady(true)
         setError("")
-        if (audioContextRef.current?.state === "suspended") {
-          audioContextRef.current.resume().catch(() => {})
-        }
-        console.info("[gsm/ws] connected, AudioContext state:", audioContextRef.current?.state)
-        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toAndroid" }))
+        if (audioContextRef.current?.state === "suspended") audioContextRef.current.resume().catch(() => {})
 
-        if (duplexValidationModeRef.current) {
-          console.info("[gsm/duplex-test] ws connected; forcing duplex path without waiting for CALL_CONNECTED")
-          ensurePlayoutLoop()
-          startMicCapture().catch((e) => {
-            console.error("[gsm/duplex-test] failed to start mic capture", e)
-          })
+        // 1. Re-read deviceToken from closure — ensure it's current at connect time
+        if (!deviceToken) {
+          console.error("[gsm/ws] connected but deviceToken is empty — browser will not receive audio")
+          return
         }
+
+        console.info("[gsm/ws] connected, registering browser peer", { deviceToken })
+        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toBrowser" }))  // 2. dir toBrowser = I want to receive
+        ensurePlayoutLoop()  // 3. start playout immediately so TEST audio plays without waiting for call
       }
 
       ws.onerror = (event) => {

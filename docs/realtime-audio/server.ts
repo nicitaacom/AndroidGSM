@@ -377,6 +377,7 @@ wss.on('connection', (ws, req) => {
         }
       } else if (dir === 'toBrowser') {
         const peer = browserByDevice.get(deviceToken)
+        console.log('[ws/audio] toBrowser relay', { deviceToken, hasPeer: !!peer, peerState: peer?.readyState, browserKeys: [...browserByDevice.keys()] })
         if (peer?.readyState === WebSocket.OPEN) {
           try {
             peer.send(JSON.stringify(msg))
