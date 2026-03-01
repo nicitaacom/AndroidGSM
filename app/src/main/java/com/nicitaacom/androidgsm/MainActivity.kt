@@ -78,7 +78,14 @@ class MainActivity : AppCompatActivity() {
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
 
         toggleButton.setOnClickListener {
-            if (isServiceRunning) stopService() else requestPermissionsAndStart()
+            // SERVICE mode requires SIM; block action fully when no SIM is available.
+            if (!hasSimAvailable) {
+                addLog("❌ SERVICE mode unavailable: no SIM card detected")
+            } else if (isServiceRunning) {
+                stopService()
+            } else {
+                requestPermissionsAndStart()
+            }
         }
 
         testAudioButton.setOnClickListener {
@@ -422,9 +429,17 @@ class MainActivity : AppCompatActivity() {
             action = GsmService.ACTION_STOP_TEST_AUDIO
         }
         startService(testIntent)
+
+        // TEST session owns the temporary service instance; stop it when TEST stops
+        // so the UI cannot incorrectly switch to STOP SERVICE without explicit SERVICE start.
+        val serviceIntent = Intent(this, GsmService::class.java)
+        stopService(serviceIntent)
+
         isTestAudioActive = false
+        isServiceRunning = false
+        pendingStartAudioTest = false
         updateButtonState()
-        addLog("🛑 Test audio stopped")
+        addLog("🛑 Test audio stopped (duplex disconnected)")
     }
 
     fun addLog(message: String) {

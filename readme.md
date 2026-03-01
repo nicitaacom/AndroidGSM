@@ -139,8 +139,7 @@ AUDIO_CHUNK
 DTMF_SENT
 ```
 
-Endpoint: `POST /api/events
-`
+Endpoint: `POST /api/events`
 
 🎙️ Audio Streaming
  - Format: - 16kHz
@@ -151,12 +150,22 @@ Endpoint: `POST /api/events
 
 Flow
 ```agsl
-Android Mic → POST /api/events → Backend
-Backend     → Pusher AUDIO_CHUNK → Android Speaker
+Android audio input  -> POST /api/events -> Backend
+Backend AUDIO_CHUNK  -> Android audio output
 ```
 
+Mode notes
+- TEST mode (`START TEST` -> `STOP TEST`): duplex WebSocket audio is active.
+  - Android audio input -> server.ts
+  - server.ts -> Android audio output
+- SERVICE mode (`START SERVICE` -> `STOP SERVICE`): duplex call audio path is active.
+  - Android audio input -> server.ts
+  - server.ts -> Android audio input (call path)
+- `STOP TEST` or `STOP SERVICE` means duplex is stopped for that mode.
+- If no SIM card is detected, SERVICE is disabled in UI and logic.
+
 ⚙️ Configuration
-app/src/main/assets/androidgsm.config.json
+app/src/main/assets/androidgsm.config.example.json
 ```json
 {
   "BACKEND_URL": "https://your-backend.com",
