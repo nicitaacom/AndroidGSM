@@ -82,7 +82,7 @@ class MainActivity : AppCompatActivity() {
             if (!hasSimAvailable) {
                 addLog("❌ SERVICE mode unavailable: no SIM card detected")
             } else if (isServiceRunning) {
-                stopService()
+                stopServiceAudio()
             } else {
                 requestPermissionsAndStart()
             }
@@ -353,6 +353,11 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = true
             updateButtonState()
             addLog("Service started successfully!")
+
+            // Explicit SERVICE mode start (duplex ws audio) when user clicked START SERVICE.
+            if (!pendingStartAudioTest) {
+                dispatchServiceAudioRequest()
+            }
         } catch (error: Exception) {
             addLog("ERROR starting service: ${error.message}")
         }
@@ -382,6 +387,14 @@ class MainActivity : AppCompatActivity() {
         } catch (error: Exception) {
             addLog("ERROR stopping service: ${error.message}")
         }
+    }
+
+    private fun stopServiceAudio() {
+        val stopServiceAudioIntent = Intent(this, GsmService::class.java).apply {
+            action = GsmService.ACTION_STOP_SERVICE_AUDIO
+        }
+        startService(stopServiceAudioIntent)
+        stopService()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -422,6 +435,14 @@ class MainActivity : AppCompatActivity() {
         updateButtonState()
         addLog("🎧 Test audio requested: streaming phone audio as active call")
         pendingStartAudioTest = false
+    }
+
+    private fun dispatchServiceAudioRequest() {
+        val serviceIntent = Intent(this, GsmService::class.java).apply {
+            action = GsmService.ACTION_START_SERVICE_AUDIO
+        }
+        startService(serviceIntent)
+        addLog("📞 SERVICE audio requested: starting duplex stream")
     }
 
     private fun stopTestAudio() {

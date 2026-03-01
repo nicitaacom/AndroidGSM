@@ -27,6 +27,7 @@ class GsmService : Service() {
     private var audioWsHandler: AudioWebSocketHandler? = null
     private var config: Config? = null
     private var isTestAudioActive = false
+    private var isServiceAudioActive = false
     private var telephonyManager: TelephonyManager? = null
     private var phoneStateListener: PhoneStateListener? = null
     private val callStateReceiver: BroadcastReceiver = object : BroadcastReceiver() {
@@ -108,6 +109,8 @@ class GsmService : Service() {
         private const val CALL_CHANNEL_ID = "gsm_call_channel"
         const val ACTION_START_TEST_AUDIO = "com.nicitaacom.androidgsm.action.START_TEST_AUDIO"
         const val ACTION_STOP_TEST_AUDIO = "com.nicitaacom.androidgsm.action.STOP_TEST_AUDIO"
+        const val ACTION_START_SERVICE_AUDIO = "com.nicitaacom.androidgsm.action.START_SERVICE_AUDIO"
+        const val ACTION_STOP_SERVICE_AUDIO = "com.nicitaacom.androidgsm.action.STOP_SERVICE_AUDIO"
         const val ACTION_CALL_CONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_CONNECTED"
         const val ACTION_CALL_DISCONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_DISCONNECTED"
     }
@@ -174,7 +177,11 @@ class GsmService : Service() {
                         addAction(ACTION_CALL_CONNECTED_BROADCAST)
                         addAction(ACTION_CALL_DISCONNECTED_BROADCAST)
                     }
-                    registerReceiver(callStateReceiver, filter)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        registerReceiver(callStateReceiver, filter, RECEIVER_NOT_EXPORTED)
+                    } else {
+                        registerReceiver(callStateReceiver, filter)
+                    }
                     MainActivity.log("GsmService: callStateReceiver registered")
                 } catch (e: Exception) {
                     MainActivity.log("Failed to register callStateReceiver: ${e.message}")
@@ -201,6 +208,16 @@ class GsmService : Service() {
 
             if (intent?.action == ACTION_STOP_TEST_AUDIO) {
                 stopTestAudioStreaming()
+                return START_STICKY
+            }
+
+            if (intent?.action == ACTION_START_SERVICE_AUDIO) {
+                startServiceAudioStreaming()
+                return START_STICKY
+            }
+
+            if (intent?.action == ACTION_STOP_SERVICE_AUDIO) {
+                stopServiceAudioStreaming()
                 return START_STICKY
             }
 
@@ -341,18 +358,19 @@ class GsmService : Service() {
 
                 val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
 
-                // 3. Connect WS + start playback only (TEST = receive from server → speaker)
+                // 3. Connect WS for TEST mode duplex
                 ws.setCallActive(false)
                 ws.connect(wsUrl, bearerToken, deviceToken)
                 Thread.sleep(500) // wait for WS handshake
 
-                ws.startAudioPlayback() // 4. Android plays audio FROM server (speaker output)
-                // NOTE: no ws.startAudioCapture() here - Android mic NOT captured in TEST mode
-                // Browser mic → server → Android speaker is the TEST flow
+                // 4. TEST mode is duplex:
+                // Android mic -> server -> browser AND browser mic -> server -> Android speaker
+                ws.startAudioPlayback()
+                ws.startAudioCapture()
 
                 // 5. Notify browser AFTER WS is ready so browser starts mic capture immediately
                 pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
-                MainActivity.log("✅ TEST mode active: server→Android speaker only (browser mic→server→Android)")
+                MainActivity.log("✅ TEST mode active: duplex browser<->android over websocket")
             } catch (error: Exception) {
                 MainActivity.log("ERROR starting test audio: ${error.message}")
                 isTestAudioActive = false
@@ -368,6 +386,62 @@ class GsmService : Service() {
         audioWsHandler = null // 1. force re-init on next test start to avoid stale WS state
         pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap())
         MainActivity.log("🛑 STOP TEST active: duplex stopped (no TEST audio capture/playback)")
+    }
+
+    private fun startServiceAudioStreaming() {
+        if (isServiceAudioActive) {
+            MainActivity.log("SERVICE audio already running")
+            return
+        }
+        if (isTestAudioActive) {
+            MainActivity.log("⚠️ Cannot start SERVICE audio while TEST is active")
+            return
+        }
+
+        val baseUrl = config?.BACKEND_URL
+        val bearerToken = config?.BACKEND_BEARER
+        val deviceToken = config?.DEVICE_TOKEN
+
+        if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
+            MainActivity.log("⚠️ SERVICE audio unavailable: missing backend configuration")
+            isServiceAudioActive = false
+            return
+        }
+
+        isServiceAudioActive = true
+        Thread {
+            try {
+                if (audioWsHandler == null) {
+                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    MainActivity.log("SERVICE audio: WebSocket handler initialized")
+                }
+
+                val ws = audioWsHandler ?: run {
+                    isServiceAudioActive = false
+                    return@Thread
+                }
+
+                val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
+                ws.setCallActive(true)
+                ws.connect(wsUrl, bearerToken, deviceToken)
+                Thread.sleep(500)
+                ws.startAudioPlayback()
+                ws.startAudioCapture()
+                MainActivity.log("✅ SERVICE mode active: duplex android<->server<->browser")
+            } catch (error: Exception) {
+                MainActivity.log("ERROR starting SERVICE audio: ${error.message}")
+                isServiceAudioActive = false
+            }
+        }.start()
+    }
+
+    private fun stopServiceAudioStreaming() {
+        isServiceAudioActive = false
+        audioWsHandler?.stopAudioCapture()
+        audioWsHandler?.stopAudioPlayback()
+        audioWsHandler?.disconnect()
+        audioWsHandler = null
+        MainActivity.log("🛑 STOP SERVICE active: duplex stopped")
     }
 
     // central command dispatcher - single entrypoint

@@ -238,14 +238,25 @@ class AudioWebSocketHandler(
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
-            // 1. Route based on call state - TEST = speaker, CALL = earpiece
+            // 1. Route based on call state:
+            // - TEST mode: default media output (speaker/headphones/bluetooth decided by system)
+            // - SERVICE/CALL mode: voice call path (earpiece by default)
             if (isCallActive) {
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 audioManager.isSpeakerphoneOn = false
             } else {
                 audioManager.mode = AudioManager.MODE_NORMAL
-                audioManager.isSpeakerphoneOn = true
-                audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC), 0)
+                // Do not force speaker in TEST mode. Let Android route to the current default
+                // output device (wired headset / bluetooth / speaker).
+                audioManager.isSpeakerphoneOn = false
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    try {
+                        // Ensure we're not pinned to a communication device from call mode.
+                        audioManager.clearCommunicationDevice()
+                    } catch (_: Exception) {
+                        // best-effort only
+                    }
+                }
             }
 
             val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
@@ -272,7 +283,7 @@ class AudioWebSocketHandler(
 
             isPlaying = true
             audioTrack?.play()
-            MainActivity.log("✅ Playback started - mode: ${if (isCallActive) "CALL/earpiece" else "TEST/speaker"}")
+            MainActivity.log("✅ Playback started - mode: ${if (isCallActive) "SERVICE/call-input-path" else "TEST/default-output-route"}")
         } catch (exception: Exception) {
             MainActivity.log("❌ ERROR starting playback: ${exception.message}")
         }

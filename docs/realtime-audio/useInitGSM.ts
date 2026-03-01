@@ -110,6 +110,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const duplexValidationModeRef = useRef(false)
   const isTestAudioActiveRef = useRef(false)
 
+  const shouldStreamMic = () => isConnected || isTestAudioActiveRef.current || duplexValidationModeRef.current
+
   const isDuplexValidationEnabled = () => {
     if (typeof window === "undefined") return false
 
@@ -217,6 +219,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     console.info("[gsm/playback] loop started", { state: ctx.state })
 
     playoutTimerRef.current = setInterval(() => {
+      if (ctx.state !== "running") {
+        ctx.resume().catch(() => {
+          // Browser autoplay policy can reject resume until a user gesture exists.
+          // Keep queue intact and retry on next tick.
+        })
+        return
+      }
+
       const expectedSeq = nextRxSeqRef.current
       let seqToPlay = expectedSeq
       let chunk = rxQueueRef.current.get(seqToPlay)
@@ -394,7 +404,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const onTestAudioStopped = () => {
       console.info("[gsm/pusher] test-audio-stopped")
       isTestAudioActiveRef.current = false
-      stopMicCapture()
+      if (!shouldStreamMic()) {
+        stopMicCapture()
+      }
+
+      if (!isConnected) {
+        stopPlayoutLoop()
+        resetInboundAudioState()
+      }
     }
 
     // Incoming audio from Android device (fallback path via Pusher)
@@ -479,6 +496,11 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         console.info("[gsm/ws] connected, registering browser peer", { deviceToken })
         ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toBrowser" }))  // 2. dir toBrowser = I want to receive
         ensurePlayoutLoop()  // 3. start playout immediately so TEST audio plays without waiting for call
+
+        // If call/test mode was already requested before WS connected, start mic capture now.
+        if (shouldStreamMic()) {
+          startMicCapture().catch((err) => console.error("[gsm/ws] mic start after connect failed", err))
+        }
       }
 
       ws.onerror = (event) => {
@@ -548,6 +570,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    */
   const startMicCapture = async () => {
     if (!audioContextRef.current || !wsRef.current || !deviceToken || isCleaningUpRef.current) return
+    if (mediaStreamRef.current && processorRef.current) return
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -624,7 +647,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    * When not connected: stop everything cleanly
    */
   useEffect(() => {
-    if (isConnected || duplexValidationModeRef.current) {
+    if (shouldStreamMic()) {
       startMicCapture().catch((e) => setError(String(e)))
     } else {
       stopMicCapture()
