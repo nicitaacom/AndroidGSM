@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingAllowStartWithoutSim = false
     private var pendingStartAudioTest = false
     private var isTestAudioActive = false
+    private val meetsMinAndroid = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q // API 29
 
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -137,6 +138,7 @@ class MainActivity : AppCompatActivity() {
 
         addLog("App started")
         addLog("Android version: ${Build.VERSION.RELEASE}")
+        if (!meetsMinAndroid) addLog("❌ Android ${Build.VERSION.RELEASE} unsupported - SERVICE mode requires Android 10+ (API 29)")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         val isRooted = RootUtils.isRooted()
         addLog(if (isRooted) "✅ Device is rooted - audio output capture available" else "❌ Device is NOT rooted - only mic input will stream")
@@ -207,7 +209,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtonState() {
-        val controlsEnabled = hasInternetConnection && hasRequiredPermissions
+        val controlsEnabled = hasInternetConnection && hasRequiredPermissions && meetsMinAndroid
 
         if (!controlsEnabled) {
             toggleButton.text = if (!hasInternetConnection) "NO INTERNET" else "PERMISSIONS REQUIRED"
@@ -224,7 +226,11 @@ class MainActivity : AppCompatActivity() {
             defaultDialerButton.alpha = 0.5f
             copyLogsButton.isEnabled = true
             copyLogsButton.alpha = 1f
-            statusTextView.text = if (!hasInternetConnection) "Status: No Internet" else "Status: Waiting for permissions"
+            statusTextView.text = when {
+                !meetsMinAndroid -> "Status: Android 10+ required"
+                !hasInternetConnection -> "Status: No Internet"
+                else -> "Status: Waiting for permissions"
+            }
             return
         }
 
