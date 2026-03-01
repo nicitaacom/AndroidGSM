@@ -150,6 +150,25 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
   }, [setError])
 
+  // 0b. Unlock AudioContext on first user gesture (browser autoplay policy)
+  useEffect(() => {
+    const unlock = () => {
+      if (audioContextRef.current?.state === "suspended") {
+        audioContextRef.current
+          .resume()
+          .then(() => console.info("[gsm] AudioContext unlocked by user gesture"))
+          .catch(() => {})
+      }
+      document.removeEventListener("click", unlock)
+      document.removeEventListener("keydown", unlock)
+    }
+    document.addEventListener("click", unlock)
+    document.addEventListener("keydown", unlock)
+    return () => {
+      document.removeEventListener("click", unlock)
+      document.removeEventListener("keydown", unlock)
+    }
+  }, [])
   /**
    * Helper function to decode and queue audio chunks
    */
@@ -493,20 +512,23 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         setError("")
         if (audioContextRef.current?.state === "suspended") audioContextRef.current.resume().catch(() => {})
 
-        // 1. Re-read deviceToken from closure — ensure it's current at connect time
         if (!deviceToken) {
-          console.error("[gsm/ws] connected but deviceToken is empty — browser will not receive audio")
+          console.error("[gsm/ws] no deviceToken on open")
           return
         }
 
-        console.info("[gsm/ws] connected, registering browser peer", { deviceToken })
-        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toBrowser" })) // 2. dir toBrowser = I want to receive
-        ensurePlayoutLoop() // 3. start playout immediately so TEST audio plays without waiting for call
+        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toBrowser" }))
+        ensurePlayoutLoop()
 
-        // If call/test mode was already requested before WS connected, start mic capture now.
-        if (shouldStreamMic()) {
-          startMicCapture().catch(err => console.error("[gsm/ws] mic start after connect failed", err))
-        }
+        // 1. Re-fetch test state from Android via status endpoint after reconnect
+        fetch("/api/gsm/status", { cache: "no-store" })
+          .then(res => res.json())
+          .then(data => {
+            if (data?.isAuthorized && shouldStreamMic()) {
+              startMicCapture().catch(err => console.error("[gsm/ws] mic start failed", err))
+            }
+          })
+          .catch(() => {})
       }
 
       ws.onerror = event => {
@@ -527,19 +549,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         try {
           const pkt: AudioPacket = JSON.parse(ev.data)
           if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
+          if (!pkt.audio) return
 
-          if (pkt.audio) {
-            enqueueBase64Audio(pkt.audio)
-            console.debug(`[gsm/ws-rx] seq=${pkt.seq} size=${pkt.audio.length}`)
-            ensurePlayoutLoop() // test-audio works even before CALL_CONNECTED arrives
-            if (pkt.seq % 100 === 0) {
-              if (duplexValidationModeRef.current) {
-                console.log("[gsm/duplex-test] ws-rx toBrowser packet", pkt.seq)
-              } else {
-                console.log("[gsm/ws-rx] received audio packet", pkt.seq)
-              }
-            }
+          // 1. Resume AudioContext on first packet - covers post-refresh case
+          if (audioContextRef.current?.state === "suspended") {
+            audioContextRef.current.resume().catch(() => {})
           }
+
+          enqueueBase64Audio(pkt.audio)
+          ensurePlayoutLoop()
         } catch (err) {
           console.error("[gsm/ws] onmessage parse error", err)
         }
