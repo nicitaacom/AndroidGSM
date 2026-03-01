@@ -247,12 +247,18 @@ class GsmService : Service() {
 
                     if (!hasPusherCreds) { MainActivity.log("WARNING: Missing Pusher/Backend config"); return@Thread }
 
-                    pusherClient = PusherClient(this, config!!)
-                    pusherClient?.connect()
-                    MainActivity.log("GsmService: Pusher connecting...")
+                    if (pusherClient == null) {
+                        pusherClient = PusherClient(this, config!!)
+                        pusherClient?.connect()
+                        MainActivity.log("GsmService: Pusher connecting...")
+                    }
 
-                    audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
-                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    if (audioStreamHandler == null && pusherClient != null) {
+                        audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
+                    }
+                    if (audioWsHandler == null) {
+                        audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    }
                     MainActivity.log("GsmService: Audio handlers initialized")
                 } catch (error: Exception) {
                     MainActivity.log("WARNING: Pusher/Audio init failed: ${error.message}")
@@ -306,6 +312,10 @@ class GsmService : Service() {
 
     private fun startTestDuplexMicToServerAndServerToOutput() {
         if (isTestAudioActive) { MainActivity.log("Test audio already running"); return }
+        if (isServiceAudioActive) {
+            MainActivity.log("Stopping SERVICE audio before TEST start")
+            stopServiceDuplexOutputToServerAndServerToInput()
+        }
         isTestAudioActive = true
 
         val baseUrl = config?.BACKEND_URL
@@ -382,8 +392,8 @@ class GsmService : Service() {
             return
         }
         if (isTestAudioActive) {
-            MainActivity.log("⚠️ Cannot start SERVICE audio while TEST is active")
-            return
+            MainActivity.log("Stopping TEST audio before SERVICE start")
+            stopTestDuplexMicToServerAndServerToOutput()
         }
 
         val baseUrl = config?.BACKEND_URL
@@ -532,6 +542,7 @@ class GsmService : Service() {
     private fun handleCallEnded() {
         try {
             MainActivity.log("Ending call")
+            isServiceAudioActive = false
             gsmDialer?.endCall()
             audioStreamHandler?.stopAudioCapture()
             audioStreamHandler?.stopAudioPlayback()

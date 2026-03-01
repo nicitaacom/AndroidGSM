@@ -90,7 +90,7 @@ class AudioWebSocketHandler(
                 seqRx = seq
             }
 
-            Log.d(TAG, "WS-RX seq=$seq size=${audio.length}")
+            if (seq % 50L == 0L) MainActivity.log("WS-RX audio chunk seq=$seq")
             playAudioChunk(audio, seq)
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error handling audio packet: ${exception.message}")
@@ -117,11 +117,9 @@ class AudioWebSocketHandler(
                     return
                 }
             }
-            appOpsManager.startOp(android.app.AppOpsManager.OPSTR_RECORD_AUDIO, uid, packageName)
-            MainActivity.log("✅ RECORD_AUDIO app op started")
+            MainActivity.log("✅ RECORD_AUDIO app op allowed by system")
         } catch (exception: Exception) {
-            // startOp throws if op is not in started state - log but continue, AudioRecord itself will fail if truly blocked
-            MainActivity.log("⚠️ AppOps startOp warning: ${exception.message}")
+            MainActivity.log("⚠️ AppOps check warning: ${exception.message}")
         }
 
         try {
@@ -163,18 +161,6 @@ class AudioWebSocketHandler(
             audioRecord = null
             audioManager.mode = AudioManager.MODE_NORMAL
             audioManager.isSpeakerphoneOn = false
-
-            // 4. Stop the app op when capture ends
-            try {
-                appOpsManager.finishOp(
-                    android.app.AppOpsManager.OPSTR_RECORD_AUDIO,
-                    context.applicationInfo.uid,
-                    context.packageName
-                )
-                MainActivity.log("✅ RECORD_AUDIO app op finished")
-            } catch (exception: Exception) {
-                MainActivity.log("⚠️ AppOps finishOp warning: ${exception.message}")
-            }
 
             MainActivity.log("🎤 Capture stopped")
         } catch (exception: Exception) {
@@ -246,7 +232,7 @@ class AudioWebSocketHandler(
                     val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
                     val seq = seqTx++
                     wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-                    if (seq % 10L == 0L) Log.d(TAG, "WS-SEND seq=$seq size=${base64Audio.length}")
+                    if (seq % 50L == 0L) MainActivity.log("WS-SEND audio chunk seq=$seq")
                     chunkCount++
                 } else if (read < 0) {
                     Log.e(TAG, "❌ Read error: $read")

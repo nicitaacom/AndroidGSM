@@ -283,10 +283,8 @@ class AudioStreamHandler(
                 val audioBytes = try {
                     Base64.decode(base64Audio, Base64.NO_WRAP)
                 } catch (e: IllegalArgumentException) {
-                    Log.e(TAG, "❌ DEBUG: Failed to decode base64: ${e.message}")
-                    Log.e(TAG, "  Base64 length: ${base64Audio.length}")
-                    Log.e(TAG, "  First 50 chars: ${base64Audio.take(50)}")
-                    MainActivity.log("ERROR: Invalid base64 - check logs")
+                    Log.e(TAG, "❌ Failed to decode incoming audio chunk: ${e.message}")
+                    MainActivity.log("ERROR: Invalid audio chunk received (decode failed)")
                     return@launch
                 }
 
@@ -313,7 +311,6 @@ class AudioStreamHandler(
                 byteBuffer.asShortBuffer().get(shortBuffer)
 
                 Log.d(TAG, "✅ DEBUG: Converted to ${shortBuffer.size} samples")
-                Log.d(TAG, "  Sample values (first 10): ${shortBuffer.take(10).joinToString(",")}")
 
                 // 6. Verify AudioTrack is initialized before writing
                 if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
