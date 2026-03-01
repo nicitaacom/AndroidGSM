@@ -49,6 +49,7 @@ class MainActivity : AppCompatActivity() {
     private var pendingAllowStartWithoutSim = false
     private var pendingStartAudioTest = false
     private var isTestAudioActive = false
+    private val meetsMinAndroid = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q // API 29
 
     private val logBuffer = StringBuilder()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
@@ -137,6 +138,7 @@ class MainActivity : AppCompatActivity() {
 
         addLog("App started")
         addLog("Android version: ${Build.VERSION.RELEASE}")
+        if (!meetsMinAndroid) addLog("❌ Android ${Build.VERSION.RELEASE} unsupported - SERVICE mode requires Android 10+ (API 29)")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         val isRooted = RootUtils.isRooted()
         addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
@@ -207,11 +209,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtonState() {
-        hasRequiredPermissions = hasAudioPermissions()
-        val hasCallPermissions = hasServiceCallPermissions()
+        val controlsEnabled = hasInternetConnection && hasRequiredPermissions && meetsMinAndroid
 
-        if (!hasInternetConnection) {
-            toggleButton.text = "NO INTERNET"
+        if (!controlsEnabled) {
+            toggleButton.text = if (!hasInternetConnection) "NO INTERNET" else "PERMISSIONS REQUIRED"
             toggleButton.isEnabled = false
             toggleButton.alpha = 0.5f
             toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
@@ -225,27 +226,16 @@ class MainActivity : AppCompatActivity() {
             defaultDialerButton.alpha = 0.5f
             copyLogsButton.isEnabled = true
             copyLogsButton.alpha = 1f
-            statusTextView.text = "Status: No Internet"
+            statusTextView.text = when {
+                !meetsMinAndroid -> "Status: Android 10+ required"
+                !hasInternetConnection -> "Status: No Internet"
+                else -> "Status: Waiting for permissions"
+            }
             return
         }
 
         defaultDialerButton.isEnabled = true
         defaultDialerButton.alpha = 1f
-
-        if (!hasRequiredPermissions) {
-            toggleButton.text = "PERMISSIONS REQUIRED"
-            toggleButton.isEnabled = false
-            toggleButton.alpha = 0.5f
-            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-
-            testAudioButton.text = "TEST AUDIO"
-            testAudioButton.isEnabled = false
-            testAudioButton.alpha = 0.5f
-            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-
-            statusTextView.text = "Status: Waiting for audio permissions"
-            return
-        }
 
         // Explicit state machine for clarity:
         // 1) TEST active   -> only STOP TEST is allowed.
@@ -316,6 +306,8 @@ class MainActivity : AppCompatActivity() {
                 add(Manifest.permission.READ_PHONE_STATE)
             }
             add(Manifest.permission.RECORD_AUDIO)
+            add(Manifest.permission.READ_PHONE_STATE)
+            add(Manifest.permission.ANSWER_PHONE_CALLS)
             add(Manifest.permission.MODIFY_AUDIO_SETTINGS)
             add(Manifest.permission.INTERNET)
             add(Manifest.permission.ACCESS_NETWORK_STATE)
@@ -354,7 +346,7 @@ class MainActivity : AppCompatActivity() {
             addLog("Requesting ${missingPermissions.size} permissions...")
             ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), PERMISSION_REQUEST_CODE)
         } else {
-            hasRequiredPermissions = hasAudioPermissions()
+            hasRequiredPermissions = true
             startService(allowWithoutSim)
             if (pendingStartAudioTest && isServiceRunning) {
                 dispatchTestAudioRequest()
@@ -479,7 +471,7 @@ class MainActivity : AppCompatActivity() {
 
             if (allGranted) {
                 addLog("All permissions granted!")
-                hasRequiredPermissions = hasAudioPermissions()
+                hasRequiredPermissions = true
                 requestBatteryOptimizationExemption()
                 loadSimSelection()
                 startService(pendingAllowStartWithoutSim)
@@ -584,29 +576,20 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED
     }
 
-
-    private fun hasAudioPermissions(): Boolean {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.MODIFY_AUDIO_SETTINGS) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun hasServiceCallPermissions(): Boolean {
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED && hasPhoneStatePermission()
-    }
-
     private fun requestPermissionsOnLaunchIfNeeded() {
         val required = listOf(
             Manifest.permission.CALL_PHONE,
             Manifest.permission.READ_PHONE_NUMBERS,
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.ANSWER_PHONE_CALLS,
             Manifest.permission.MODIFY_AUDIO_SETTINGS
         )
         val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        hasRequiredPermissions = hasAudioPermissions()
+        hasRequiredPermissions = missing.isEmpty()
 
         if (missing.isNotEmpty()) {
-            addLog("Permissions requested on startup: ${missing.joinToString()}")
+            addLog("Permissions required before using controls: ${missing.joinToString()}")
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
         } else if (hasPhoneStatePermission()) {
             loadSimSelection()
