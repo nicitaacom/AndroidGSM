@@ -25,14 +25,9 @@ Uninstall the app
 adb uninstall com.nicitaacom.androidgsm
 ```
 
-Stop app
+Install and launch app
 ```bash
-adb shell am force-stop com.nicitaacom.androidgsm
-```
-
-Install app
-```bash
-adb install -r $(ls -t ~/Documents/GitHub/AndroidGSM/app/build/outputs/apk/debug/*.apk | head -n1) && adb shell monkey -p com.nicitaacom.androidgsm -c android.intent.category.LAUNCHER 1
+adb shell am force-stop com.nicitaacom.androidgsm && adb uninstall com.nicitaacom.androidgsm ; ./gradlew assembleDebug && adb install $(ls -t app/build/outputs/apk/debug/*.apk | head -n1) && adb shell am start -n com.nicitaacom.androidgsm/.MainActivity
 ```
 
 ---

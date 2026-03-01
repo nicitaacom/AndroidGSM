@@ -19,9 +19,12 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+
 
 class AudioWebSocketHandler(
     private val context: Context,
