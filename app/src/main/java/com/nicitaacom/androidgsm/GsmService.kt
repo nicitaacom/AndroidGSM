@@ -109,8 +109,9 @@ class GsmService : Service() {
         private const val CALL_CHANNEL_ID = "gsm_call_channel"
         const val ACTION_START_TEST_AUDIO = "com.nicitaacom.androidgsm.action.START_TEST_AUDIO"
         const val ACTION_STOP_TEST_AUDIO = "com.nicitaacom.androidgsm.action.STOP_TEST_AUDIO"
-        const val ACTION_START_SERVICE_AUDIO = "com.nicitaacom.androidgsm.action.START_SERVICE_AUDIO"
-        const val ACTION_STOP_SERVICE_AUDIO = "com.nicitaacom.androidgsm.action.STOP_SERVICE_AUDIO"
+        // SERVICE mode consumes server audio on the call-input path (earpiece/voice comm route).
+        const val ACTION_START_SERVICE_AUDIO_INPUT = "com.nicitaacom.androidgsm.action.START_SERVICE_AUDIO_INPUT"
+        const val ACTION_STOP_SERVICE_AUDIO_INPUT = "com.nicitaacom.androidgsm.action.STOP_SERVICE_AUDIO_INPUT"
         const val ACTION_CALL_CONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_CONNECTED"
         const val ACTION_CALL_DISCONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_DISCONNECTED"
     }
@@ -211,12 +212,12 @@ class GsmService : Service() {
                 return START_STICKY
             }
 
-            if (intent?.action == ACTION_START_SERVICE_AUDIO) {
+            if (intent?.action == ACTION_START_SERVICE_AUDIO_INPUT) {
                 startServiceAudioStreaming()
                 return START_STICKY
             }
 
-            if (intent?.action == ACTION_STOP_SERVICE_AUDIO) {
+            if (intent?.action == ACTION_STOP_SERVICE_AUDIO_INPUT) {
                 stopServiceAudioStreaming()
                 return START_STICKY
             }
