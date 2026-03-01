@@ -454,6 +454,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     // Incoming audio from Android device (fallback path via Pusher)
     const onAudioChunk = (eventData: GsmCallsEvent) => {
       if (!deviceToken || eventData?.deviceToken !== deviceToken || !eventData?.audio) return
+
+      // 1. Same auto-start for Pusher fallback path
+      if (!isConnected && !isTestAudioActiveRef.current && !mediaStreamRef.current) {
+        console.info("[gsm/pusher] first audio chunk - auto-starting mic (TEST mode fallback)")
+        isTestAudioActiveRef.current = true
+        startMicCapture().catch(error => setError(String(error)))
+      }
+
       enqueueBase64Audio(eventData.audio)
       ensurePlayoutLoop()
     }
@@ -563,9 +571,13 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
           if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
           if (!pkt.audio) return
 
-          // 1. Resume AudioContext on first packet - covers post-refresh case
-          if (audioContextRef.current?.state === "suspended") {
-            audioContextRef.current.resume().catch(() => {})
+          if (audioContextRef.current?.state === "suspended") audioContextRef.current.resume().catch(() => {})
+
+          // 1. First inbound audio packet = TEST mode active → auto-start mic (Pusher trigger is unreliable)
+          if (!isConnected && !isTestAudioActiveRef.current && !mediaStreamRef.current) {
+            console.info("[gsm/ws] first audio packet detected - auto-starting mic (TEST mode)")
+            isTestAudioActiveRef.current = true
+            startMicCapture().catch(error => setError(String(error)))
           }
 
           enqueueBase64Audio(pkt.audio)
