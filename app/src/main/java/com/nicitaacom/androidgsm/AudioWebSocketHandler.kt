@@ -29,9 +29,9 @@ class AudioWebSocketHandler(
     private val onAudioReceived: (ShortArray) -> Unit
 ) {
     private var audioRecord: AudioRecord? = null
-    private var audioTrack: AudioTrack? = null
+    @Volatile private var audioTrack: AudioTrack? = null
+    @Volatile private var isPlaying = false
     private var isRecording = false
-    private var isPlaying = false
     private var isCallActive = false
     // 1. Use SupervisorJob so child coroutine crashes don't cancel siblings
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -307,7 +307,12 @@ class AudioWebSocketHandler(
     }
 
     private fun playAudioChunk(base64Audio: String, seq: Long = -1) {
-        if (!isPlaying) startAudioPlayback()
+        if (!isPlaying) return@launch
+        val track = audioTrack ?: return@launch
+        if (track.state != AudioTrack.STATE_INITIALIZED) return@launch
+
+        // 1. Guard: don't launch if scope is cancelled (happens during stopTestAudio)
+        if (!scope.isActive) return
 
         scope.launch {
             try {
@@ -328,21 +333,22 @@ class AudioWebSocketHandler(
                 val shortBuffer = ShortArray(audioBytes.size / 2)
                 ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
 
-                // 11. Neutral gain - AEC handles echo, no amplification needed
-                val gain = 0.6f
+                val gain = 0.7f
                 for (index in shortBuffer.indices) {
                     val amplified = (shortBuffer[index] * gain).toInt()
                     shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                 }
 
-                val track = audioTrack
-                if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
+                // 2. Guard: check track is still valid after potential stop during coroutine suspension
+                val track = audioTrack ?: return@launch
+                if (track.state != AudioTrack.STATE_INITIALIZED) {
                     Log.w(TAG, "⚠️ AudioTrack unavailable, restarting")
                     startAudioPlayback()
                     return@launch
                 }
 
                 val written = track.write(shortBuffer, 0, shortBuffer.size)
+
                 when {
                     written == AudioTrack.ERROR_INVALID_OPERATION -> { Log.e(TAG, "❌ ERROR_INVALID_OPERATION"); isPlaying = false }
                     written == AudioTrack.ERROR_BAD_VALUE -> { Log.e(TAG, "❌ ERROR_BAD_VALUE"); isPlaying = false }
@@ -358,16 +364,22 @@ class AudioWebSocketHandler(
 
     fun stopAudioPlayback() {
         try {
+            // 1. Set flags first so in-flight coroutines bail before calling write()
             isPlaying = false
-            audioTrack?.stop()
-            audioTrack?.release()
+            val track = audioTrack
             audioTrack = null
+            // 2. Small delay to let any coroutine past the guard finish its current write()
+            Thread.sleep(60)
+            track?.stop()
+            track?.release()
+            scope.cancel()
+            scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
             MainActivity.log("🔊 Playback stopped")
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error stopping playback", exception)
         }
     }
-
+    
     fun cleanup() {
         stopAudioCapture()
         stopAudioPlayback()
