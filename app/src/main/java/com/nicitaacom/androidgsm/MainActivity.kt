@@ -451,10 +451,8 @@ class MainActivity : AppCompatActivity() {
         }
         startService(testIntent)
 
-        // TEST session owns the temporary service instance; stop it when TEST stops
-        // so the UI cannot incorrectly switch to STOP SERVICE without explicit SERVICE start.
-        val serviceIntent = Intent(this, GsmService::class.java)
-        stopService(serviceIntent)
+        // 1. Don't stopService() here - it kills WS and breaks future connections
+        // Service stays alive as persistent gateway, only audio streams are stopped
 
         isTestAudioActive = false
         isServiceRunning = false
@@ -462,7 +460,6 @@ class MainActivity : AppCompatActivity() {
         updateButtonState()
         addLog("🛑 Test audio stopped (duplex disconnected)")
     }
-
     fun addLog(message: String) {
         runOnUiThread {
             val timestamp = dateFormat.format(Date())
