@@ -261,12 +261,22 @@ class GsmService : Service() {
                     return@Thread
                 }
 
-                if (pusherClient == null) {
-                    pusherClient = PusherClient(this, config!!)
-                    pusherClient?.connect()
-                    MainActivity.log("GsmService: Pusher connecting...")
-                }
+               if (pusherClient == null) {
+                pusherClient = PusherClient(this, config!!)
+                pusherClient?.connect()
+                MainActivity.log("GsmService: Pusher connecting...")
 
+                // 1. Wait for connection then notify backend so connectedDevices is populated
+                Thread {
+                    try {
+                        Thread.sleep(1500) // allow WS handshake to complete
+                        pusherClient?.sendEvent("CONNECTED", emptyMap())
+                        MainActivity.log("GsmService: CONNECTED event sent to backend")
+                    } catch (error: Exception) {
+                        MainActivity.log("WARNING: Failed to send CONNECTED event: ${error.message}")
+                    }
+                }.start()
+            }
                 if (audioStreamHandler == null && pusherClient != null) {
                     audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
                 }
