@@ -141,7 +141,7 @@ class MainActivity : AppCompatActivity() {
         if (!meetsMinAndroid) addLog("❌ Android ${Build.VERSION.RELEASE} unsupported - SERVICE mode requires Android 10+ (API 29)")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         val isRooted = RootUtils.isRooted()
-        addLog(if (isRooted) "✅ Device is rooted - audio output capture available" else "❌ Device is NOT rooted - only mic input will stream")
+        addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
 
         checkServiceStatus()
 
@@ -282,10 +282,10 @@ class MainActivity : AppCompatActivity() {
 
             statusTextView.text = "Status: No SIM"
         } else {
-            // Idle + SIM available: both START actions visible.
-            toggleButton.text = "START SERVICE"
-            toggleButton.isEnabled = true
-            toggleButton.alpha = 1f
+            // Idle + SIM available: both START actions visible when call permissions are granted.
+            toggleButton.text = if (hasCallPermissions) "START SERVICE" else "CALL PERMISSIONS REQUIRED"
+            toggleButton.isEnabled = hasCallPermissions
+            toggleButton.alpha = if (hasCallPermissions) 1f else 0.5f
             toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
 
             testAudioButton.text = "TEST AUDIO"
@@ -293,15 +293,18 @@ class MainActivity : AppCompatActivity() {
             testAudioButton.alpha = 1f
             testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
 
-            statusTextView.text = "Status: Inactive"
+            statusTextView.text = if (hasCallPermissions) "Status: Inactive" else "Status: Missing call permissions"
         }
     }
 
     private fun requestPermissionsAndStart(allowWithoutSim: Boolean = false) {
         pendingAllowStartWithoutSim = allowWithoutSim
         val permissions = mutableListOf<String>().apply {
-            add(Manifest.permission.CALL_PHONE)
-            add(Manifest.permission.READ_PHONE_NUMBERS)
+            if (!allowWithoutSim) {
+                add(Manifest.permission.CALL_PHONE)
+                add(Manifest.permission.READ_PHONE_NUMBERS)
+                add(Manifest.permission.READ_PHONE_STATE)
+            }
             add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.READ_PHONE_STATE)
             add(Manifest.permission.ANSWER_PHONE_CALLS)

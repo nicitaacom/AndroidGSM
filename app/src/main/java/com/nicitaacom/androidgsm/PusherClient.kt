@@ -77,11 +77,12 @@ class PusherClient(
     }
 
     private fun startHeartbeat() {
+        MainActivity.log("ℹ️ Heartbeat started (CONNECTED keepalive)")
         stopHeartbeat()
         heartbeatJob = scope.launch {
             while (isActive) {
                 delay(15000)
-                sendEvent("HEARTBEAT")
+                sendEvent("CONNECTED", mapOf("heartbeat" to true))
             }
         }
     }
