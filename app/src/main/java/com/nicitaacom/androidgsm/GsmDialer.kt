@@ -17,7 +17,6 @@ import android.telephony.SubscriptionManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
-import android.view.KeyEvent
 import androidx.core.app.ActivityCompat
 import android.os.PowerManager
 
@@ -202,19 +201,7 @@ class GsmDialer(private val context: Context) {
                 }
             }
 
-            // Method 2: Headset hook (fallback for older Android or if TelecomManager fails)
-            try {
-                val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-                    putExtra(Intent.EXTRA_KEY_EVENT, KeyEvent(KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_HEADSETHOOK))
-                }
-                context.sendOrderedBroadcast(intent, null)
-                MainActivity.log("✅ Call end requested via headset hook")
-                return
-            } catch (e: Exception) {
-                MainActivity.log("⚠️ Headset hook failed: ${e.message}")
-            }
-
-            // Method 3: Try with MANAGE_OWN_CALLS permission (Android 10+)
+            // Method 2: Try with MANAGE_OWN_CALLS permission (Android 10+)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 try {
                     if (hasPermission("android.permission.MANAGE_OWN_CALLS")) {
