@@ -219,6 +219,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     console.info("[gsm/playback] loop started", { state: ctx.state })
 
     playoutTimerRef.current = setInterval(() => {
+      if (ctx.state !== "running") {
+        ctx.resume().catch(() => {
+          // Browser autoplay policy can reject resume until a user gesture exists.
+          // Keep queue intact and retry on next tick.
+        })
+        return
+      }
+
       const expectedSeq = nextRxSeqRef.current
       let seqToPlay = expectedSeq
       let chunk = rxQueueRef.current.get(seqToPlay)

@@ -82,7 +82,7 @@ class MainActivity : AppCompatActivity() {
             if (!hasSimAvailable) {
                 addLog("❌ SERVICE mode unavailable: no SIM card detected")
             } else if (isServiceRunning) {
-                stopService()
+                stopServiceAudioInput()
             } else {
                 requestPermissionsAndStart()
             }
@@ -353,6 +353,11 @@ class MainActivity : AppCompatActivity() {
             isServiceRunning = true
             updateButtonState()
             addLog("Service started successfully!")
+
+            // Explicit SERVICE mode start (duplex ws audio) when user clicked START SERVICE.
+            if (!pendingStartAudioTest) {
+                dispatchServiceAudioInputRequest()
+            }
         } catch (error: Exception) {
             addLog("ERROR starting service: ${error.message}")
         }
@@ -382,6 +387,14 @@ class MainActivity : AppCompatActivity() {
         } catch (error: Exception) {
             addLog("ERROR stopping service: ${error.message}")
         }
+    }
+
+    private fun stopServiceAudioInput() {
+        val stopServiceAudioIntent = Intent(this, GsmService::class.java).apply {
+            action = GsmService.ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
+        }
+        startService(stopServiceAudioIntent)
+        stopService()
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
@@ -415,7 +428,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun dispatchTestAudioRequest() {
         val testIntent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_START_TEST_AUDIO
+            action = GsmService.ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
         }
         startService(testIntent)
         isTestAudioActive = true
@@ -424,9 +437,17 @@ class MainActivity : AppCompatActivity() {
         pendingStartAudioTest = false
     }
 
+    private fun dispatchServiceAudioInputRequest() {
+        val serviceIntent = Intent(this, GsmService::class.java).apply {
+            action = GsmService.ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
+        }
+        startService(serviceIntent)
+        addLog("📞 SERVICE audio-input requested: starting duplex stream")
+    }
+
     private fun stopTestAudio() {
         val testIntent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_STOP_TEST_AUDIO
+            action = GsmService.ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
         }
         startService(testIntent)
 
