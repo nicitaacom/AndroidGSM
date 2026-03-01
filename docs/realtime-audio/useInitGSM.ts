@@ -415,15 +415,27 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       console.info("[gsm/pusher] test-audio-started")
       isTestAudioActiveRef.current = true
 
-      // 1. Resume AudioContext synchronously before async mic request
+      // 1. Unlock AudioContext immediately
       const ctx = audioContextRef.current
       if (ctx?.state === "suspended") ctx.resume().catch(err => console.error("[gsm/test] resume failed", err))
 
-      // 2. Start playout loop immediately - will play as soon as packets arrive
+      // 2. Start playout loop immediately
       ensurePlayoutLoop()
 
-      // 3. Start browser mic → server → Android pipeline
-      startMicCapture().catch(err => console.error("[gsm/test-mode] mic error", err))
+      // 3. Start mic with WS readiness check inline
+      const tryStartMic = (attemptsLeft: number) => {
+        if (attemptsLeft <= 0) {
+          console.error("[gsm/test] WS never opened - mic aborted")
+          return
+        }
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          startMicCapture().catch(err => console.error("[gsm/test-mode] mic error", err))
+          return
+        }
+        console.warn(`[gsm/test] WS not open, retrying... (${attemptsLeft} left)`)
+        setTimeout(() => tryStartMic(attemptsLeft - 1), 200)
+      }
+      tryStartMic(15) // 15 * 200ms = 3s max wait
     }
 
     const onTestAudioStopped = () => {
@@ -593,37 +605,16 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    * Captures mic input, converts to PCM16, sends via WebSocket (with Pusher fallback)
    */
   const startMicCapture = async () => {
-    // 1. Guard: AudioContext and deviceToken required
     if (!audioContextRef.current || !deviceToken || isCleaningUpRef.current) return
     if (mediaStreamRef.current && processorRef.current) return
-
-    // 2. Wait up to 3s for WS to be OPEN - Pusher event may fire before WS handshake completes
-    const wsReady = await new Promise<boolean>(resolve => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        resolve(true)
-        return
-      }
-      const deadline = Date.now() + 3000
-      const check = setInterval(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          clearInterval(check)
-          resolve(true)
-        } else if (Date.now() > deadline) {
-          clearInterval(check)
-          resolve(false)
-        }
-      }, 100)
-    })
-
-    if (!wsReady) {
-      console.error("[gsm/mic] WS not open after 3s - mic capture aborted")
+    if (wsRef.current?.readyState !== WebSocket.OPEN) {
+      console.warn("[gsm/mic] WS not open, skipping")
       return
     }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       mediaStreamRef.current = stream
-
       const source = audioContextRef.current.createMediaStreamSource(stream)
       const processor = audioContextRef.current.createScriptProcessor(1024, 1, 1)
       processorRef.current = processor
@@ -631,7 +622,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       processor.onaudioprocess = e => {
         if (isMuted || isCleaningUpRef.current) return
         if (wsRef.current?.readyState !== WebSocket.OPEN) return
-
         try {
           const inF32 = e.inputBuffer.getChannelData(0)
           const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
