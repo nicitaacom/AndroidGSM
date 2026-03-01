@@ -391,7 +391,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopServiceAudioInput() {
         val stopServiceAudioIntent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_STOP_SERVICE_AUDIO_INPUT
+            action = GsmService.ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
         }
         startService(stopServiceAudioIntent)
         stopService()
@@ -428,7 +428,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun dispatchTestAudioRequest() {
         val testIntent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_START_TEST_AUDIO
+            action = GsmService.ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
         }
         startService(testIntent)
         isTestAudioActive = true
@@ -439,7 +439,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun dispatchServiceAudioInputRequest() {
         val serviceIntent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_START_SERVICE_AUDIO_INPUT
+            action = GsmService.ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
         }
         startService(serviceIntent)
         addLog("📞 SERVICE audio-input requested: starting duplex stream")
@@ -447,7 +447,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopTestAudio() {
         val testIntent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_STOP_TEST_AUDIO
+            action = GsmService.ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
         }
         startService(testIntent)
 

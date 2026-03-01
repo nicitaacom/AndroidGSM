@@ -107,11 +107,17 @@ class GsmService : Service() {
         private const val CALL_NOTIFICATION_ID = 2
         private const val CHANNEL_ID = "gsm_gateway_channel"
         private const val CALL_CHANNEL_ID = "gsm_call_channel"
-        const val ACTION_START_TEST_AUDIO = "com.nicitaacom.androidgsm.action.START_TEST_AUDIO"
-        const val ACTION_STOP_TEST_AUDIO = "com.nicitaacom.androidgsm.action.STOP_TEST_AUDIO"
-        // SERVICE mode consumes server audio on the call-input path (earpiece/voice comm route).
-        const val ACTION_START_SERVICE_AUDIO_INPUT = "com.nicitaacom.androidgsm.action.START_SERVICE_AUDIO_INPUT"
-        const val ACTION_STOP_SERVICE_AUDIO_INPUT = "com.nicitaacom.androidgsm.action.STOP_SERVICE_AUDIO_INPUT"
+        // TEST mode: Android mic -> server, and server audio -> Android output route.
+        const val ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT =
+            "com.nicitaacom.androidgsm.action.START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT"
+        const val ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT =
+            "com.nicitaacom.androidgsm.action.STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT"
+
+        // SERVICE mode: Android audio output -> server, and server audio -> Android audio input path.
+        const val ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT =
+            "com.nicitaacom.androidgsm.action.START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT"
+        const val ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT =
+            "com.nicitaacom.androidgsm.action.STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT"
         const val ACTION_CALL_CONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_CONNECTED"
         const val ACTION_CALL_DISCONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_DISCONNECTED"
     }
@@ -202,23 +208,23 @@ class GsmService : Service() {
         try {
             MainActivity.log("GsmService: onStartCommand called")
 
-            if (intent?.action == ACTION_START_TEST_AUDIO) {
-                startTestAudioStreaming()
+            if (intent?.action == ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT) {
+                startTestDuplexMicToServerAndServerToOutput()
                 return START_STICKY
             }
 
-            if (intent?.action == ACTION_STOP_TEST_AUDIO) {
-                stopTestAudioStreaming()
+            if (intent?.action == ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT) {
+                stopTestDuplexMicToServerAndServerToOutput()
                 return START_STICKY
             }
 
-            if (intent?.action == ACTION_START_SERVICE_AUDIO_INPUT) {
-                startServiceAudioStreaming()
+            if (intent?.action == ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT) {
+                startServiceDuplexOutputToServerAndServerToInput()
                 return START_STICKY
             }
 
-            if (intent?.action == ACTION_STOP_SERVICE_AUDIO_INPUT) {
-                stopServiceAudioStreaming()
+            if (intent?.action == ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT) {
+                stopServiceDuplexOutputToServerAndServerToInput()
                 return START_STICKY
             }
 
@@ -317,7 +323,7 @@ class GsmService : Service() {
         return builder.build()
     }
 
-    private fun startTestAudioStreaming() {
+    private fun startTestDuplexMicToServerAndServerToOutput() {
         if (isTestAudioActive) { MainActivity.log("Test audio already running"); return }
         isTestAudioActive = true
 
@@ -379,7 +385,7 @@ class GsmService : Service() {
         }.start()
     }
 
-    private fun stopTestAudioStreaming() {
+    private fun stopTestDuplexMicToServerAndServerToOutput() {
         isTestAudioActive = false
         audioWsHandler?.stopAudioCapture()
         audioWsHandler?.stopAudioPlayback()
@@ -389,7 +395,7 @@ class GsmService : Service() {
         MainActivity.log("🛑 STOP TEST active: duplex stopped (no TEST audio capture/playback)")
     }
 
-    private fun startServiceAudioStreaming() {
+    private fun startServiceDuplexOutputToServerAndServerToInput() {
         if (isServiceAudioActive) {
             MainActivity.log("SERVICE audio already running")
             return
@@ -436,7 +442,7 @@ class GsmService : Service() {
         }.start()
     }
 
-    private fun stopServiceAudioStreaming() {
+    private fun stopServiceDuplexOutputToServerAndServerToInput() {
         isServiceAudioActive = false
         audioWsHandler?.stopAudioCapture()
         audioWsHandler?.stopAudioPlayback()
