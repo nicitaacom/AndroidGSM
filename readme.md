@@ -53,6 +53,20 @@ BEFORE coding make sure `androidgsm.config.json` actually exists - implement val
 └─────────────────┘          └──────────────┘          └──────────────────┘
 ```
 
+## Buttons logic
+if it shows "STOP TEST" then "START SERVICE" button is disabled
+if no SIM card then "START SERVICE" button is disabled
+
+if it shows "STOP TEST"
+then "START SERVICE" button is disabled (so should be only either TEST mode or SERVICE mode)
+
+If it shows "START TEST" then duplex works like android audio input sent to server.ts and also android receive audio from server.ts and plays it as "audio output"
+
+If it shows "STOP TEST" it stop duplex connection and no audio should be sent or received (unless it shows "STOP SERVICE")
+
+If it shows "START SERVICE" then duplex works like android audio input sent to server.ts and also android receive audio from server.ts and plays it as "audio input"
+
+If it shows "STOP SERVICE" it stop duplex connection and no audio should be sent or received (unless it shows "STOP TEST")
 
 ## 🧠 Architecture (Current)
 ```agsl
