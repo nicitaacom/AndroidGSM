@@ -178,13 +178,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateButtonState() {
         // Explicit state machine for clarity:
-        // 1) TEST active         -> only STOP TEST is allowed.
-        // 2) no SIM + not TEST   -> SERVICE button always disabled.
-        // 3) SERVICE active      -> only STOP SERVICE is allowed.
-        // 4) idle + SIM available-> both START actions are available.
+        // 1) TEST active   -> only STOP TEST is allowed.
+        // 2) SERVICE active-> only STOP SERVICE is allowed.
+        // 3) idle + no SIM -> TEST can start, SERVICE cannot start.
+        // 4) idle + SIM    -> both START actions are available.
 
         if (isTestAudioActive) {
-            // TEST running -> SERVICE must remain disabled.
             toggleButton.text = if (hasSimAvailable) "START SERVICE" else "NO SIM DETECTED"
             toggleButton.isEnabled = false
             toggleButton.alpha = 0.5f
@@ -196,34 +195,34 @@ class MainActivity : AppCompatActivity() {
             testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
 
             statusTextView.text = if (hasSimAvailable) "Status: Test Audio Active" else "Status: Test Audio Active (No SIM)"
-        } else if (!hasSimAvailable) {
-            // No SIM -> SERVICE cannot start/stop from UI or logic.
-            toggleButton.text = "NO SIM DETECTED"
-            toggleButton.isEnabled = false
-            toggleButton.alpha = 0.5f
-            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-
-            testAudioButton.text = "TEST AUDIO"
-            testAudioButton.isEnabled = true
-            testAudioButton.alpha = 1f
-            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-
-            statusTextView.text = "Status: No SIM"
         } else if (isServiceRunning) {
             toggleButton.text = "STOP SERVICE"
             toggleButton.isEnabled = true
             toggleButton.alpha = 1f
             toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
 
-            // SERVICE active -> TEST cannot be started.
+            // If SERVICE is active, TEST cannot be started.
             testAudioButton.text = "TEST AUDIO"
             testAudioButton.isEnabled = false
             testAudioButton.alpha = 0.5f
             testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
 
-            statusTextView.text = "Status: Active"
+            statusTextView.text = if (hasSimAvailable) "Status: Active" else "Status: Active (No SIM)"
+        } else if (!hasSimAvailable) {
+            toggleButton.text = "NO SIM DETECTED"
+            toggleButton.isEnabled = false
+            toggleButton.alpha = 0.5f
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            // No SIM: allow TEST start (server.ts -> Android audio output).
+            testAudioButton.text = "TEST AUDIO"
+            testAudioButton.isEnabled = true
+            testAudioButton.alpha = 1f
+            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            statusTextView.text = "Status: No SIM"
         } else {
-            // Idle + SIM available.
+            // Idle + SIM available: both START actions visible.
             toggleButton.text = "START SERVICE"
             toggleButton.isEnabled = true
             toggleButton.alpha = 1f

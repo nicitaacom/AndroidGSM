@@ -357,6 +357,7 @@ wss.on('connection', (ws, req) => {
       // Relay with sequence/timestamp untouched (receiver jitter buffer uses these)
       if (dir === 'toAndroid') {
         const peer = androidByDevice.get(deviceToken)
+          console.log('[ws/audio] toAndroid relay', { deviceToken, hasPeer: !!peer, peerState: peer?.readyState, androidKeys: [...androidByDevice.keys()] })
         if (peer?.readyState === WebSocket.OPEN) {
           try {
             peer.send(JSON.stringify(msg))
