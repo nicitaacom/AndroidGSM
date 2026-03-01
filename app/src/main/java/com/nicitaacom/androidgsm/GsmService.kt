@@ -327,14 +327,21 @@ class GsmService : Service() {
         Thread {
             try {
                 val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
-                // 1. TEST mode - isCallActive stays false → speaker output
+
+                // TEST AUDIO behavior requested:
+                // - START TEST => duplex WebSocket audio starts.
+                //   Android audio input -> server.ts
+                //   server.ts -> Android audio output
+                // - STOP TEST => duplex WebSocket audio stops.
                 ws.setCallActive(false)
                 ws.connect(wsUrl, bearerToken, deviceToken)
                 Thread.sleep(500) // wait for WS handshake
-                ws.startAudioCapture()
-                ws.startAudioPlayback() // 2. must start playback to receive audio from server
+
+                ws.startAudioCapture() // Android audio input -> server.ts
+                ws.startAudioPlayback() // server.ts -> Android audio output
+
                 pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
-                MainActivity.log("✅ Test audio streaming started - mic→server + server→speaker")
+                MainActivity.log("✅ START TEST active: duplex started (Android audio input -> server.ts, server.ts -> Android audio output)")
             } catch (error: Exception) {
                 MainActivity.log("ERROR starting test audio: ${error.message}")
                 isTestAudioActive = false
@@ -348,7 +355,7 @@ class GsmService : Service() {
         audioWsHandler?.disconnect()
         audioWsHandler = null // 1. force re-init on next test start to avoid stale WS state
         pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap())
-        MainActivity.log("Test audio streaming stopped")
+        MainActivity.log("🛑 STOP TEST active: duplex stopped (no TEST audio capture/playback)")
     }
 
     // central command dispatcher - single entrypoint
@@ -399,7 +406,7 @@ class GsmService : Service() {
                         audioWsHandler?.startAudioCapture()
                         audioWsHandler?.startAudioPlayback()
                         pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                        MainActivity.log("Call connected - WS audio active")
+                        MainActivity.log("SERVICE call connected: Android audio input -> server.ts, and server.ts -> Android audio input (call path)")
                     } catch (error: Exception) {
                         MainActivity.log("ERROR in CALL_CONNECTED callback: ${error.message}")
                     }
