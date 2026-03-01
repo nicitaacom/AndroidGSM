@@ -206,7 +206,15 @@ app.post('/api/events', async (req, res) => {
       console.log(`🔢 [api/events] DTMF sent: ${data?.digit}`)
       await sendCommand(deviceToken, 'SEND_DTMF', data)
       break
-    case 'AUDIO_CHUNK': {
+    case 'TEST_AUDIO_STARTED':
+      console.log(`🎧 [api/events] TEST_AUDIO_STARTED device=${deviceToken}`)
+      await pusher.trigger('gsm-calls', 'gsm:test-audio-started', { deviceToken, timestamp: new Date().toISOString() })
+      break
+    case 'TEST_AUDIO_STOPPED':
+      console.log(`🛑 [api/events] TEST_AUDIO_STOPPED device=${deviceToken}`)
+      await pusher.trigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken, timestamp: new Date().toISOString() })
+      break
+      case 'AUDIO_CHUNK': {
       // concise debug log for inbound audio from android
       console.log(`[ws/audio] RX AUDIO_CHUNK device=${deviceToken} seq=${data?.seq} size=${data?.audio ? data.audio.length : 0}`)
       // Route audio to browser WebSocket peer (primary path)
