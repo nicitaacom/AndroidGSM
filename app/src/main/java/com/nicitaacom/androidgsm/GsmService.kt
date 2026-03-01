@@ -208,69 +208,59 @@ class GsmService : Service() {
         try {
             MainActivity.log("GsmService: onStartCommand called")
 
-            if (intent?.action == ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT) {
-                startTestDuplexMicToServerAndServerToOutput()
-                return START_STICKY
+            // 1. ALWAYS start foreground first — required for background mic capture on Android 14
+            val notification = createNotification()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                startForeground(NOTIFICATION_ID, notification, serviceType)
+            } else startForeground(NOTIFICATION_ID, notification)
+            MainActivity.log("GsmService: Foreground started")
+
+            when (intent?.action) {
+                ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT -> {
+                    startTestDuplexMicToServerAndServerToOutput()
+                    return START_STICKY
+                }
+                ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT -> {
+                    stopTestDuplexMicToServerAndServerToOutput()
+                    return START_STICKY
+                }
+                ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT -> {
+                    startServiceDuplexOutputToServerAndServerToInput()
+                    return START_STICKY
+                }
+                ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT -> {
+                    stopServiceDuplexOutputToServerAndServerToInput()
+                    return START_STICKY
+                }
             }
 
-            if (intent?.action == ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT) {
-                stopTestDuplexMicToServerAndServerToOutput()
-                return START_STICKY
-            }
-
-            if (intent?.action == ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT) {
-                startServiceDuplexOutputToServerAndServerToInput()
-                return START_STICKY
-            }
-
-            if (intent?.action == ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT) {
-                stopServiceDuplexOutputToServerAndServerToInput()
-                return START_STICKY
-            }
-
-            // 1. Start foreground IMMEDIATELY - before any async work
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val notification = createNotification()
-                val serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(NOTIFICATION_ID, notification, serviceType)
-                else startForeground(NOTIFICATION_ID, notification)
-                MainActivity.log("GsmService: Foreground notification created")
-            }
-
-            // 2. Init pusher + audio in background thread with error handling
+            // 2. Default start — init Pusher + audio handlers
             Thread {
                 try {
                     val hasPusherCreds = !config?.PUSHER_KEY.isNullOrBlank() &&
-                            !config?.PUSHER_CLUSTER.isNullOrBlank() &&
-                            !config?.BACKEND_BEARER.isNullOrBlank() &&
-                            !config?.BACKEND_URL.isNullOrBlank()
+                        !config?.PUSHER_CLUSTER.isNullOrBlank() &&
+                        !config?.BACKEND_BEARER.isNullOrBlank() &&
+                        !config?.BACKEND_URL.isNullOrBlank()
 
-                    if (!hasPusherCreds) {
-                        MainActivity.log("WARNING: Missing Pusher/Backend config - realtime features disabled")
-                        return@Thread
-                    }
+                    if (!hasPusherCreds) { MainActivity.log("WARNING: Missing Pusher/Backend config"); return@Thread }
 
                     pusherClient = PusherClient(this, config!!)
                     pusherClient?.connect()
                     MainActivity.log("GsmService: Pusher connecting...")
 
                     audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
-                    MainActivity.log("GsmService: AudioStreamHandler initialized")
-
-                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray ->
-                        // Callback for audio received (placeholder for future use)
-                    }
-                    MainActivity.log("GsmService: AudioWebSocketHandler initialized")
+                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    MainActivity.log("GsmService: Audio handlers initialized")
                 } catch (error: Exception) {
-                    MainActivity.log("WARNING: Pusher/Audio failed: ${error.message}")
-                    error.printStackTrace()
+                    MainActivity.log("WARNING: Pusher/Audio init failed: ${error.message}")
                 }
             }.start()
 
         } catch (error: Exception) {
             MainActivity.log("ERROR in onStartCommand: ${error.message}")
-            error.printStackTrace()
         }
         return START_STICKY
     }

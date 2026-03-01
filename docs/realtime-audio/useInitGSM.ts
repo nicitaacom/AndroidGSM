@@ -21,7 +21,6 @@ type GsmCallsEvent = {
   audio?: string
 }
 
-
 /**
  * Utility: Downsample Float32Array audio buffer to 16kHz.
  */
@@ -193,7 +192,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
       // Debug logging
       if (seq % 100 === 0) {
-        console.log("[gsm/audio-queue] enqueued packet", seq, "queue size:", rxQueueRef.current.size, "samples:", float32Array.length)
+        console.log(
+          "[gsm/audio-queue] enqueued packet",
+          seq,
+          "queue size:",
+          rxQueueRef.current.size,
+          "samples:",
+          float32Array.length,
+        )
       }
     } catch (err) {
       console.error("[gsm/audio-decode] failed to decode audio chunk", err)
@@ -211,7 +217,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     if (!ctx || isPlayoutRunningRef.current) return
 
     if (ctx.state === "suspended") {
-      ctx.resume().catch((e) => console.error("[gsm/playback] resume error", e))
+      ctx.resume().catch(e => console.error("[gsm/playback] resume error", e))
     }
 
     isPlayoutRunningRef.current = true
@@ -385,7 +391,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       console.info("[gsm/pusher] call-ended (hangup/reject) - audio stopped", { deviceToken })
     }
 
-     // Test audio events from Android
+    // Test audio events from Android
     const onTestAudioStarted = () => {
       console.info("[gsm/pusher] test-audio-started")
       isTestAudioActiveRef.current = true
@@ -400,7 +406,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       // 3. Start browser mic → server → Android pipeline
       startMicCapture().catch(err => console.error("[gsm/test-mode] mic error", err))
     }
-    
+
     const onTestAudioStopped = () => {
       console.info("[gsm/pusher] test-audio-stopped")
       isTestAudioActiveRef.current = false
@@ -494,21 +500,21 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         }
 
         console.info("[gsm/ws] connected, registering browser peer", { deviceToken })
-        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toBrowser" }))  // 2. dir toBrowser = I want to receive
-        ensurePlayoutLoop()  // 3. start playout immediately so TEST audio plays without waiting for call
+        ws.send(JSON.stringify({ role: "browser", deviceToken, dir: "toBrowser" })) // 2. dir toBrowser = I want to receive
+        ensurePlayoutLoop() // 3. start playout immediately so TEST audio plays without waiting for call
 
         // If call/test mode was already requested before WS connected, start mic capture now.
         if (shouldStreamMic()) {
-          startMicCapture().catch((err) => console.error("[gsm/ws] mic start after connect failed", err))
+          startMicCapture().catch(err => console.error("[gsm/ws] mic start after connect failed", err))
         }
       }
 
-      ws.onerror = (event) => {
+      ws.onerror = event => {
         setError("WebSocket connection error")
         console.error("[gsm/ws] error", event)
       }
 
-      ws.onclose = (event) => {
+      ws.onclose = event => {
         setIsReady(false)
         console.warn("[gsm/ws] closed", { code: event.code, reason: event.reason })
 
@@ -517,7 +523,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         }
       }
 
-      ws.onmessage = (ev) => {
+      ws.onmessage = ev => {
         try {
           const pkt: AudioPacket = JSON.parse(ev.data)
           if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
@@ -569,8 +575,32 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    * Captures mic input, converts to PCM16, sends via WebSocket (with Pusher fallback)
    */
   const startMicCapture = async () => {
-    if (!audioContextRef.current || !wsRef.current || !deviceToken || isCleaningUpRef.current) return
+    // 1. Guard: AudioContext and deviceToken required
+    if (!audioContextRef.current || !deviceToken || isCleaningUpRef.current) return
     if (mediaStreamRef.current && processorRef.current) return
+
+    // 2. Wait up to 3s for WS to be OPEN - Pusher event may fire before WS handshake completes
+    const wsReady = await new Promise<boolean>(resolve => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        resolve(true)
+        return
+      }
+      const deadline = Date.now() + 3000
+      const check = setInterval(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          clearInterval(check)
+          resolve(true)
+        } else if (Date.now() > deadline) {
+          clearInterval(check)
+          resolve(false)
+        }
+      }, 100)
+    })
+
+    if (!wsReady) {
+      console.error("[gsm/mic] WS not open after 3s - mic capture aborted")
+      return
+    }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -580,15 +610,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       const processor = audioContextRef.current.createScriptProcessor(1024, 1, 1)
       processorRef.current = processor
 
-      processor.onaudioprocess = (e) => {
-        if (isMuted || wsRef.current?.readyState !== WebSocket.OPEN) return
-        if (isCleaningUpRef.current) return
+      processor.onaudioprocess = e => {
+        if (isMuted || isCleaningUpRef.current) return
+        if (wsRef.current?.readyState !== WebSocket.OPEN) return
 
         try {
           const inF32 = e.inputBuffer.getChannelData(0)
           const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
           const audio = cleanAndEncodePcm16(downsampled)
-
           const pkt: AudioPacket = {
             role: "browser",
             deviceToken,
@@ -599,22 +628,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
             sampleRate: 16000,
             audio,
           }
-
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify(pkt))
-            if (duplexValidationModeRef.current && pkt.seq % 100 === 0) {
-              console.log("[gsm/duplex-test] ws-tx toAndroid packet", pkt.seq)
-            }
-          } else {
-            // Fallback: Send via Next.js API route (handled by frontend server)
-            fetch("/api/gsm/send-audio-chunk", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ audio, deviceToken }),
-            }).catch(() => {
-              // Silent: avoid spamming UI errors during temporary reconnects
-            })
-          }
+          wsRef.current.send(JSON.stringify(pkt))
+          if (pkt.seq % 100 === 0) console.log("[gsm/mic] sent seq", pkt.seq)
         } catch (err) {
           console.error("[gsm/mic] capture error", err)
         }
@@ -624,13 +639,13 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       processor.connect(audioContextRef.current.destination)
       console.info("[gsm] microphone capture started")
     } catch (err) {
-      console.error("[gsm] microphone permission denied or error", err)
+      console.error("[gsm] mic error", err)
       setError(`Microphone error: ${err instanceof Error ? err.message : String(err)}`)
     }
   }
 
   const stopMicCapture = () => {
-    mediaStreamRef.current?.getTracks().forEach((t) => t.stop())
+    mediaStreamRef.current?.getTracks().forEach(t => t.stop())
     mediaStreamRef.current = null
     processorRef.current?.disconnect()
     processorRef.current = null
@@ -648,7 +663,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    */
   useEffect(() => {
     if (shouldStreamMic()) {
-      startMicCapture().catch((e) => setError(String(e)))
+      startMicCapture().catch(e => setError(String(e)))
     } else {
       stopMicCapture()
     }
