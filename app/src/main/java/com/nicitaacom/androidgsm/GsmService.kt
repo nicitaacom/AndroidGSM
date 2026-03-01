@@ -313,41 +313,53 @@ class GsmService : Service() {
             return
         }
 
-        if (audioWsHandler == null) {
-            audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
-            MainActivity.log("Test audio: WebSocket handler initialized on demand")
-        }
-
-        val ws = audioWsHandler ?: run {
-            MainActivity.log("⚠️ Test audio unavailable: WebSocket handler not ready")
-            isTestAudioActive = false
-            return
-        }
-
         Thread {
             try {
+                // 1. Wait up to 5s for pusherClient to be ready before sending event
+                val deadline = System.currentTimeMillis() + 5000
+                while (pusherClient == null && System.currentTimeMillis() < deadline) {
+                    MainActivity.log("⏳ Waiting for Pusher to connect...")
+                    Thread.sleep(300)
+                }
+
+                if (pusherClient == null) {
+                    MainActivity.log("❌ Pusher not available after 5s - TEST AUDIO aborted")
+                    isTestAudioActive = false
+                    return@Thread
+                }
+
+                // 2. Init WS handler if needed
+                if (audioWsHandler == null) {
+                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    MainActivity.log("Test audio: WebSocket handler initialized")
+                }
+
+                val ws = audioWsHandler ?: run {
+                    isTestAudioActive = false
+                    return@Thread
+                }
+
                 val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
 
-                // TEST AUDIO behavior requested:
-                // - START TEST => duplex WebSocket audio starts.
-                //   Android audio input -> server.ts
-                //   server.ts -> Android audio output
-                // - STOP TEST => duplex WebSocket audio stops.
+                // 3. Connect WS + start playback only (TEST = receive from server → speaker)
                 ws.setCallActive(false)
                 ws.connect(wsUrl, bearerToken, deviceToken)
                 Thread.sleep(500) // wait for WS handshake
 
-                ws.startAudioCapture() // Android audio input -> server.ts
-                ws.startAudioPlayback() // server.ts -> Android audio output
+                ws.startAudioPlayback() // 4. Android plays audio FROM server (speaker output)
+                // NOTE: no ws.startAudioCapture() here - Android mic NOT captured in TEST mode
+                // Browser mic → server → Android speaker is the TEST flow
 
+                // 5. Notify browser AFTER WS is ready so browser starts mic capture immediately
                 pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
-                MainActivity.log("✅ START TEST active: duplex started (Android audio input -> server.ts, server.ts -> Android audio output)")
+                MainActivity.log("✅ TEST mode active: server→Android speaker only (browser mic→server→Android)")
             } catch (error: Exception) {
                 MainActivity.log("ERROR starting test audio: ${error.message}")
                 isTestAudioActive = false
             }
         }.start()
     }
+
     private fun stopTestAudioStreaming() {
         isTestAudioActive = false
         audioWsHandler?.stopAudioCapture()

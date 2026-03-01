@@ -375,18 +375,22 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       console.info("[gsm/pusher] call-ended (hangup/reject) - audio stopped", { deviceToken })
     }
 
-    // Test audio events from Android
+     // Test audio events from Android
     const onTestAudioStarted = () => {
       console.info("[gsm/pusher] test-audio-started")
       isTestAudioActiveRef.current = true
-      // 1. Resume AudioContext immediately - it may be suspended until user gesture
-      audioContextRef.current?.resume().then(() => {
-        console.info("[gsm/test] AudioContext resumed, state:", audioContextRef.current?.state)
-        ensurePlayoutLoop()
-      }).catch((err:unknown) => console.error("[gsm/test] AudioContext resume failed", err))
-      // 2. Start sending browser mic to Android
-      startMicCapture().catch(error => console.error("[gsm/test-mode] mic error", error))
+
+      // 1. Resume AudioContext synchronously before async mic request
+      const ctx = audioContextRef.current
+      if (ctx?.state === "suspended") ctx.resume().catch(err => console.error("[gsm/test] resume failed", err))
+
+      // 2. Start playout loop immediately - will play as soon as packets arrive
+      ensurePlayoutLoop()
+
+      // 3. Start browser mic → server → Android pipeline
+      startMicCapture().catch(err => console.error("[gsm/test-mode] mic error", err))
     }
+    
     const onTestAudioStopped = () => {
       console.info("[gsm/pusher] test-audio-stopped")
       isTestAudioActiveRef.current = false
