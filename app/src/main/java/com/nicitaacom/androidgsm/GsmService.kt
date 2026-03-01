@@ -44,41 +44,23 @@ class GsmService : Service() {
 
                             Thread {
                                 try {
-                                    audioStreamHandler?.startAudioCapture()
-                                    MainActivity.log("callStateReceiver: audio capture started")
-                                } catch (e: Exception) {
-                                    MainActivity.log("callStateReceiver startAudioCapture error: ${e.message}")
-                                }
-                            }.start()
-
-                            Thread {
-                                try {
-                                    val baseUrl = config?.BACKEND_URL ?: ""
-                                    val wsUrl = baseUrl
-                                        .replace("http://", "ws://")
-                                        .replace("https://", "wss://")
-                                        .removeSuffix("") + "/ws/audio"
-                                    val bearerToken = config?.BACKEND_BEARER ?: ""
-
-                                    audioWsHandler?.connect(wsUrl, bearerToken, config?.DEVICE_TOKEN ?: "")
+                                    // 1. Upgrade existing WS handler to call mode — avoids crash on init
                                     audioWsHandler?.setCallActive(true)
                                     audioWsHandler?.startAudioCapture()
                                     audioWsHandler?.startAudioPlayback()
-                                    MainActivity.log("callStateReceiver: WebSocket audio connected (call mode)")
-                                } catch (e: Exception) {
-                                    MainActivity.log("callStateReceiver WS error: ${e.message}")
+                                    MainActivity.log("callStateReceiver: audio capture started (call mode)")
+                                } catch (error: Exception) {
+                                    MainActivity.log("callStateReceiver startAudioCapture error: ${error.message}")
                                 }
                             }.start()
 
                             Thread {
-                                try {
-                                    pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                                } catch (e: Exception) {
-                                    MainActivity.log("callStateReceiver pusher error: ${e.message}")
+                                try { pusherClient?.sendEvent("CALL_CONNECTED", emptyMap()) } catch (error: Exception) {
+                                    MainActivity.log("callStateReceiver pusher error: ${error.message}")
                                 }
                             }.start()
-                        } catch (e: Exception) {
-                            MainActivity.log("callStateReceiver error: ${e.message}")
+                        } catch (error: Exception) {
+                            MainActivity.log("callStateReceiver error: ${error.message}")
                         }
                     }
                     ACTION_CALL_DISCONNECTED_BROADCAST -> {
@@ -292,20 +274,33 @@ class GsmService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // 1. Force-stop all audio first — prevents zombie audio after crash/kill
         try {
-            // 1. Send DISCONNECTED before dying so server cleans up device state
-            Thread {
-                try { pusherClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
-                pusherClient?.disconnect()
-            }.apply { isDaemon = true; start() }.join(1000) // max 1s wait
+            audioWsHandler?.stopAudioCapture()
+            audioWsHandler?.stopAudioPlayback()
+            audioWsHandler?.disconnect()
+            audioWsHandler = null
         } catch (_: Exception) {}
+
+        try {
+            audioStreamHandler?.stopAudioCapture()
+            audioStreamHandler?.stopAudioPlayback()
+        } catch (_: Exception) {}
+
+        // 2. Notify backend device is gone
+        Thread {
+            try { pusherClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
+            try { pusherClient?.disconnect() } catch (_: Exception) {}
+        }.apply { isDaemon = true; start() }.join(1000)
+
         try { unregisterReceiver(callStateReceiver) } catch (_: Exception) {}
         unregisterPhoneStateListener()
         wakeLock?.let { if (it.isHeld) it.release() }
-        audioWsHandler?.disconnect()
         audioStreamHandler?.cleanup()
         gsmDialer?.cleanup()
         gsmDialer = null
+        isServiceAudioActive = false
+        isTestAudioActive = false
         MainActivity.log("GsmService: Destroyed")
     }
 
@@ -421,13 +416,14 @@ class GsmService : Service() {
 
         if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
             MainActivity.log("⚠️ SERVICE audio unavailable: missing backend configuration")
-            isServiceAudioActive = false
             return
         }
 
         isServiceAudioActive = true
+
         Thread {
             try {
+                // 1. Re-init handler fresh each start to avoid stale WS state (same as TEST mode)
                 if (audioWsHandler == null) {
                     audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
                     MainActivity.log("SERVICE audio: WebSocket handler initialized")
@@ -438,12 +434,23 @@ class GsmService : Service() {
                     return@Thread
                 }
 
-                val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
-                ws.setCallActive(true)
+                val wsUrl = baseUrl
+                    .replace("http://", "ws://")
+                    .replace("https://", "wss://")
+                    .removeSuffix("/") + "/ws/audio"
+
+                // 2. Use callActive=false during init — same path as TEST mode to avoid crash
+                // Call audio routing is handled separately by callStateReceiver broadcast
+                ws.setCallActive(false)
                 ws.connect(wsUrl, bearerToken, deviceToken)
                 Thread.sleep(500)
+
+                // 3. Start duplex — mic capture + inbound playback
                 ws.startAudioPlayback()
                 ws.startAudioCapture()
+
+                // 4. Notify server so connectedDevices stays alive
+                pusherClient?.sendEvent("CONNECTED", emptyMap())
                 MainActivity.log("✅ SERVICE mode active: duplex android<->server<->browser")
             } catch (error: Exception) {
                 MainActivity.log("ERROR starting SERVICE audio: ${error.message}")
@@ -454,11 +461,15 @@ class GsmService : Service() {
 
     private fun stopServiceDuplexOutputToServerAndServerToInput() {
         isServiceAudioActive = false
-        audioWsHandler?.stopAudioCapture()
-        audioWsHandler?.stopAudioPlayback()
-        audioWsHandler?.disconnect()
+        try {
+            audioWsHandler?.stopAudioCapture()
+            audioWsHandler?.stopAudioPlayback()
+            audioWsHandler?.disconnect()
+        } catch (error: Exception) {
+            MainActivity.log("WARNING: error stopping SERVICE ws: ${error.message}")
+        }
         audioWsHandler = null
-        MainActivity.log("🛑 STOP SERVICE active: duplex stopped")
+        MainActivity.log("🛑 STOP SERVICE: duplex stopped")
     }
 
     // central command dispatcher - single entrypoint
