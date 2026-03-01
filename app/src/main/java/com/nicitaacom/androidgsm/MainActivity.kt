@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.app.Activity
 import android.app.role.RoleManager
 import android.content.pm.PackageManager
@@ -39,8 +41,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var defaultDialerButton: Button
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
+    private lateinit var versionTextView: TextView
     private var isServiceRunning = false
     private var hasSimAvailable = true
+    private var hasInternetConnection = true
+    private var hasRequiredPermissions = false
     private var pendingAllowStartWithoutSim = false
     private var pendingStartAudioTest = false
     private var isTestAudioActive = false
@@ -86,9 +91,9 @@ class MainActivity : AppCompatActivity() {
         defaultDialerButton = findViewById(R.id.defaultDialerButton)
         copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
-
-        val versionTextView: TextView = findViewById(R.id.versionTextView)
+        versionTextView = findViewById(R.id.versionTextView)
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
+        evaluateVersionFreshness()
 
         toggleButton.setOnClickListener {
             // SERVICE mode requires SIM; block action fully when no SIM is available.
@@ -97,6 +102,7 @@ class MainActivity : AppCompatActivity() {
             } else if (isServiceRunning) {
                 stopServiceAudioInput()
             } else {
+                pendingStartAudioTest = false
                 requestPermissionsAndStart()
             }
         }
@@ -125,18 +131,19 @@ class MainActivity : AppCompatActivity() {
             copyLastLogsToClipboard()
         }
 
+        checkNetworkAvailability()
+        requestPermissionsOnLaunchIfNeeded()
         updateButtonState()
 
         addLog("App started")
         addLog("Android version: ${Build.VERSION.RELEASE}")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         val isRooted = RootUtils.isRooted()
-        addLog(if (isRooted) "✅ Device is rooted - audio output capture available" else "❌ Device is NOT rooted - only mic input will stream")
+        addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
 
         checkServiceStatus()
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED) {
+        if (hasPhoneStatePermission()) {
             try {
                 loadSimSelection()
             } catch (se: SecurityException) {
@@ -151,6 +158,8 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        checkNetworkAvailability()
+        updateButtonState()
         // 1. Re-check actual running state - handles crash/restart scenario
         checkActualServiceState()
         if (isServiceRunning) {
@@ -198,6 +207,46 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtonState() {
+        hasRequiredPermissions = hasAudioPermissions()
+        val hasCallPermissions = hasServiceCallPermissions()
+
+        if (!hasInternetConnection) {
+            toggleButton.text = "NO INTERNET"
+            toggleButton.isEnabled = false
+            toggleButton.alpha = 0.5f
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            testAudioButton.text = "TEST AUDIO"
+            testAudioButton.isEnabled = false
+            testAudioButton.alpha = 0.5f
+            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            defaultDialerButton.isEnabled = false
+            defaultDialerButton.alpha = 0.5f
+            copyLogsButton.isEnabled = true
+            copyLogsButton.alpha = 1f
+            statusTextView.text = "Status: No Internet"
+            return
+        }
+
+        defaultDialerButton.isEnabled = true
+        defaultDialerButton.alpha = 1f
+
+        if (!hasRequiredPermissions) {
+            toggleButton.text = "PERMISSIONS REQUIRED"
+            toggleButton.isEnabled = false
+            toggleButton.alpha = 0.5f
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            testAudioButton.text = "TEST AUDIO"
+            testAudioButton.isEnabled = false
+            testAudioButton.alpha = 0.5f
+            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            statusTextView.text = "Status: Waiting for audio permissions"
+            return
+        }
+
         // Explicit state machine for clarity:
         // 1) TEST active   -> only STOP TEST is allowed.
         // 2) SERVICE active-> only STOP SERVICE is allowed.
@@ -243,10 +292,10 @@ class MainActivity : AppCompatActivity() {
 
             statusTextView.text = "Status: No SIM"
         } else {
-            // Idle + SIM available: both START actions visible.
-            toggleButton.text = "START SERVICE"
-            toggleButton.isEnabled = true
-            toggleButton.alpha = 1f
+            // Idle + SIM available: both START actions visible when call permissions are granted.
+            toggleButton.text = if (hasCallPermissions) "START SERVICE" else "CALL PERMISSIONS REQUIRED"
+            toggleButton.isEnabled = hasCallPermissions
+            toggleButton.alpha = if (hasCallPermissions) 1f else 0.5f
             toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
 
             testAudioButton.text = "TEST AUDIO"
@@ -254,17 +303,19 @@ class MainActivity : AppCompatActivity() {
             testAudioButton.alpha = 1f
             testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
 
-            statusTextView.text = "Status: Inactive"
+            statusTextView.text = if (hasCallPermissions) "Status: Inactive" else "Status: Missing call permissions"
         }
     }
 
     private fun requestPermissionsAndStart(allowWithoutSim: Boolean = false) {
         pendingAllowStartWithoutSim = allowWithoutSim
         val permissions = mutableListOf<String>().apply {
-            add(Manifest.permission.CALL_PHONE)
-            add(Manifest.permission.READ_PHONE_NUMBERS)
+            if (!allowWithoutSim) {
+                add(Manifest.permission.CALL_PHONE)
+                add(Manifest.permission.READ_PHONE_NUMBERS)
+                add(Manifest.permission.READ_PHONE_STATE)
+            }
             add(Manifest.permission.RECORD_AUDIO)
-            add(Manifest.permission.READ_PHONE_STATE)
             add(Manifest.permission.MODIFY_AUDIO_SETTINGS)
             add(Manifest.permission.INTERNET)
             add(Manifest.permission.ACCESS_NETWORK_STATE)
@@ -299,9 +350,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (missingPermissions.isNotEmpty()) {
+            hasRequiredPermissions = false
             addLog("Requesting ${missingPermissions.size} permissions...")
             ActivityCompat.requestPermissions(this, missingPermissions.toTypedArray(), PERMISSION_REQUEST_CODE)
         } else {
+            hasRequiredPermissions = hasAudioPermissions()
             startService(allowWithoutSim)
             if (pendingStartAudioTest && isServiceRunning) {
                 dispatchTestAudioRequest()
@@ -426,6 +479,7 @@ class MainActivity : AppCompatActivity() {
 
             if (allGranted) {
                 addLog("All permissions granted!")
+                hasRequiredPermissions = hasAudioPermissions()
                 requestBatteryOptimizationExemption()
                 loadSimSelection()
                 startService(pendingAllowStartWithoutSim)
@@ -436,6 +490,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 pendingAllowStartWithoutSim = false
             } else {
+                hasRequiredPermissions = false
                 pendingAllowStartWithoutSim = false
                 pendingStartAudioTest = false
                 addLog("ERROR: Some permissions were denied")
@@ -444,6 +499,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 addLog("Denied: ${deniedPermissions.joinToString()}")
             }
+            updateButtonState()
         }
     }
 
@@ -483,8 +539,9 @@ class MainActivity : AppCompatActivity() {
     }
     fun addLog(message: String) {
         runOnUiThread {
+            val compactMessage = sanitizeLogMessage(message)
             val timestamp = dateFormat.format(Date())
-            val logEntry = "[$timestamp] $message\n"
+            val logEntry = "[$timestamp] $compactMessage\n"
             logBuffer.append(logEntry)
 
             val lines = logBuffer.lines()
@@ -514,6 +571,77 @@ class MainActivity : AppCompatActivity() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", last30))
         addLog("📋 Copied ${importantLogs.takeLast(30).size} important logs to clipboard")
+    }
+
+    private fun sanitizeLogMessage(message: String): String {
+        val trimmed = if (message.length > 350) "${message.take(350)}… [trimmed]" else message
+        val base64Regex = Regex("[A-Za-z0-9+/]{120,}={0,2}")
+        return trimmed.replace(base64Regex, "[base64-audio-trimmed]")
+    }
+
+    private fun hasPhoneStatePermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED
+    }
+
+
+    private fun hasAudioPermissions(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.MODIFY_AUDIO_SETTINGS) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun hasServiceCallPermissions(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED && hasPhoneStatePermission()
+    }
+
+    private fun requestPermissionsOnLaunchIfNeeded() {
+        val required = listOf(
+            Manifest.permission.CALL_PHONE,
+            Manifest.permission.READ_PHONE_NUMBERS,
+            Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.READ_PHONE_STATE,
+            Manifest.permission.MODIFY_AUDIO_SETTINGS
+        )
+        val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
+        hasRequiredPermissions = hasAudioPermissions()
+
+        if (missing.isNotEmpty()) {
+            addLog("Permissions requested on startup: ${missing.joinToString()}")
+            ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
+        } else if (hasPhoneStatePermission()) {
+            loadSimSelection()
+        }
+    }
+
+    private fun checkNetworkAvailability() {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = connectivityManager.activeNetwork
+        val caps = connectivityManager.getNetworkCapabilities(network)
+        val wasConnected = hasInternetConnection
+        hasInternetConnection = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+
+        if (!hasInternetConnection && wasConnected) {
+            addLog("❌ No internet connection. Controls are disabled until internet is available.")
+        } else if (hasInternetConnection && !wasConnected) {
+            addLog("✅ Internet connection restored")
+        }
+    }
+
+    private fun evaluateVersionFreshness() {
+        val dateToken = Regex("^(\\d{2}-\\d{2}-\\d{2})").find(BuildConfig.VERSION_NAME)?.groupValues?.get(1) ?: return
+        try {
+            val parser = SimpleDateFormat("yy-MM-dd", Locale.US)
+            val buildDate = parser.parse(dateToken) ?: return
+            val nowToken = parser.format(Date())
+            val today = parser.parse(nowToken) ?: return
+            if (buildDate.before(today)) {
+                versionTextView.setTextColor(ContextCompat.getColor(this, R.color.error_red))
+                versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME} | OUTDATED"
+                addLog("⚠️ App build appears outdated (build date: $dateToken)")
+            }
+        } catch (_: Exception) {
+            // Ignore unknown version format.
+        }
     }
 
     override fun onDestroy() {
