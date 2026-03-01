@@ -64,6 +64,19 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // 1. Global crash handler - copies last 50 logs to clipboard before dying
+        val defaultHandler = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            try {
+                val crashInfo = "CRASH: ${throwable.message}\n${throwable.stackTraceToString().take(500)}"
+                logBuffer.append("\n[CRASH] $crashInfo\n")
+                val last50 = logBuffer.lines().filter { it.isNotBlank() }.takeLast(50).joinToString("\n")
+                val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                clipboard.setPrimaryClip(ClipData.newPlainText("GSM Crash Logs", last50))
+            } catch (_: Exception) {}
+            defaultHandler?.uncaughtException(thread, throwable)
+        }
+
         instance = WeakReference(this)
 
         logTextView = findViewById(R.id.logTextView)
@@ -138,24 +151,32 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 1. Re-check actual running state - handles crash/restart scenario
+        checkActualServiceState()
         if (isServiceRunning) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
             val params = window.attributes
             originalBrightness = if (params.screenBrightness < 0f) 0.5f else params.screenBrightness
             params.screenBrightness = 0.01f
             window.attributes = params
-            addLog("Screen kept on and dimmed for continuous operation")
-
-            if (originalScreenTimeout == -1L && Settings.System.canWrite(this)) {
-                try {
-                    originalScreenTimeout = Settings.System.getLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT)
-                    Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, Int.MAX_VALUE.toLong())
-                    addLog("Set screen timeout to maximum to prevent disable")
-                } catch (e: Exception) {
-                    addLog("Error setting screen timeout: ${e.message}")
-                }
-            }
         }
+    }
+
+    private fun checkActualServiceState() {
+        // 2. Check if service is actually running via ActivityManager
+        val manager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+        @Suppress("DEPRECATION")
+        val isActuallyRunning = manager.getRunningServices(Int.MAX_VALUE)
+            .any { it.service.className == GsmService::class.java.name }
+
+        if (!isActuallyRunning && (isServiceRunning || isTestAudioActive)) {
+            // 3. Service died (crash/ROM kill) - reset UI to match reality
+            addLog("⚠️ Service not running - resetting state")
+            isServiceRunning = false
+            isTestAudioActive = false
+            pendingStartAudioTest = false
+        }
+        updateButtonState()
     }
 
     override fun onPause() {

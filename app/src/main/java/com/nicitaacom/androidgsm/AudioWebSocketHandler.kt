@@ -139,7 +139,7 @@ class AudioWebSocketHandler(
             }
 
             // 3. Recreate scope if previous was cancelled (happens after stopTestAudio nulls the handler)
-            if (!scope.isActive) scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
             isRecording = true
             audioRecord?.startRecording()

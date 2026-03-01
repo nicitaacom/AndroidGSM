@@ -268,29 +268,20 @@ class GsmService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         try {
-            try {
-                unregisterReceiver(callStateReceiver)
-                MainActivity.log("GsmService: callStateReceiver unregistered")
-            } catch (e: Exception) {
-                MainActivity.log("Error unregistering callStateReceiver: ${e.message}")
-            }
-            unregisterPhoneStateListener()
-            wakeLock?.let { lock ->
-                if (lock.isHeld) {
-                    lock.release()
-                    MainActivity.log("Wake lock released")
-                }
-            }
-            audioWsHandler?.disconnect()
-            pusherClient?.disconnect()
-            audioStreamHandler?.cleanup()
-            gsmDialer?.cleanup()
-            gsmDialer = null
-            MainActivity.log("GsmService: Destroyed")
-        } catch (error: Exception) {
-            MainActivity.log("ERROR in onDestroy: ${error.message}")
-            error.printStackTrace()
-        }
+            // 1. Send DISCONNECTED before dying so server cleans up device state
+            Thread {
+                try { pusherClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
+                pusherClient?.disconnect()
+            }.apply { isDaemon = true; start() }.join(1000) // max 1s wait
+        } catch (_: Exception) {}
+        try { unregisterReceiver(callStateReceiver) } catch (_: Exception) {}
+        unregisterPhoneStateListener()
+        wakeLock?.let { if (it.isHeld) it.release() }
+        audioWsHandler?.disconnect()
+        audioStreamHandler?.cleanup()
+        gsmDialer?.cleanup()
+        gsmDialer = null
+        MainActivity.log("GsmService: Destroyed")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
