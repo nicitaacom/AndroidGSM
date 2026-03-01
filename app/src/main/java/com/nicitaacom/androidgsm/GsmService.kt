@@ -341,18 +341,19 @@ class GsmService : Service() {
 
                 val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
 
-                // 3. Connect WS + start playback only (TEST = receive from server → speaker)
+                // 3. Connect WS for TEST mode duplex
                 ws.setCallActive(false)
                 ws.connect(wsUrl, bearerToken, deviceToken)
                 Thread.sleep(500) // wait for WS handshake
 
-                ws.startAudioPlayback() // 4. Android plays audio FROM server (speaker output)
-                // NOTE: no ws.startAudioCapture() here - Android mic NOT captured in TEST mode
-                // Browser mic → server → Android speaker is the TEST flow
+                // 4. TEST mode is duplex:
+                // Android mic -> server -> browser AND browser mic -> server -> Android speaker
+                ws.startAudioPlayback()
+                ws.startAudioCapture()
 
                 // 5. Notify browser AFTER WS is ready so browser starts mic capture immediately
                 pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
-                MainActivity.log("✅ TEST mode active: server→Android speaker only (browser mic→server→Android)")
+                MainActivity.log("✅ TEST mode active: duplex browser<->android over websocket")
             } catch (error: Exception) {
                 MainActivity.log("ERROR starting test audio: ${error.message}")
                 isTestAudioActive = false
