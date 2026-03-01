@@ -55,6 +55,7 @@ class MainActivity : AppCompatActivity() {
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private var originalBrightness = -1f
     private var originalScreenTimeout: Long = -1
+    private var hasCallPermissions = false
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
@@ -472,6 +473,7 @@ class MainActivity : AppCompatActivity() {
             if (allGranted) {
                 addLog("All permissions granted!")
                 hasRequiredPermissions = true
+                hasCallPermissions = true
                 requestBatteryOptimizationExemption()
                 loadSimSelection()
                 startService(pendingAllowStartWithoutSim)
@@ -586,8 +588,8 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.MODIFY_AUDIO_SETTINGS
         )
         val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        hasRequiredPermissions = missing.isEmpty()
-
+            hasRequiredPermissions = missing.isEmpty()
+            hasCallPermissions = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         if (missing.isNotEmpty()) {
             addLog("Permissions required before using controls: ${missing.joinToString()}")
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
