@@ -327,11 +327,12 @@ class AudioWebSocketHandler(
                 }
 
                 // 11. Apply gentle gain to improve pick-up by call microphone
-                val gain = 1.6f
-                for (index in shortBuffer.indices) {
-                    val amplified = (shortBuffer[index] * gain).toInt()
-                    shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                }
+                // Remove gain - it causes exponential feedback in TEST mode
+                // val gain = 1.6f
+                // for (index in shortBuffer.indices) {
+                //    val amplified = (shortBuffer[index] * gain).toInt()
+                //    shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                // }
 
                 val track = audioTrack
                 if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
