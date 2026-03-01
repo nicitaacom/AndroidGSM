@@ -238,32 +238,21 @@ class AudioWebSocketHandler(
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
-            // 1. Route based on call state:
-            // - TEST mode: default media output (speaker/headphones/bluetooth decided by system)
-            // - SERVICE/CALL mode: voice call path (earpiece by default)
             if (isCallActive) {
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 audioManager.isSpeakerphoneOn = false
             } else {
-                audioManager.mode = AudioManager.MODE_NORMAL
-                // Do not force speaker in TEST mode. Let Android route to the current default
-                // output device (wired headset / bluetooth / speaker).
-                audioManager.isSpeakerphoneOn = false
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                    try {
-                        // Ensure we're not pinned to a communication device from call mode.
-                        audioManager.clearCommunicationDevice()
-                    } catch (_: Exception) {
-                        // best-effort only
-                    }
-                }
+                // TEST mode: MODE_IN_COMMUNICATION enables hardware AEC so mic won't pick up speaker output
+                // isSpeakerphoneOn=true keeps audio audible through speaker
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.isSpeakerphoneOn = true
             }
 
             val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
 
-            // 2. Use USAGE_MEDIA for TEST (speaker), USAGE_VOICE_COMMUNICATION for CALL (earpiece)
-            val audioUsage = if (isCallActive) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA
+            // 1. Both modes use VOICE_COMMUNICATION so hardware AEC activates
+            val audioUsage = AudioAttributes.USAGE_VOICE_COMMUNICATION
 
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
@@ -283,7 +272,7 @@ class AudioWebSocketHandler(
 
             isPlaying = true
             audioTrack?.play()
-            MainActivity.log("✅ Playback started - mode: ${if (isCallActive) "SERVICE/call-input-path" else "TEST/default-output-route"}")
+            MainActivity.log("✅ Playback started - mode: ${if (isCallActive) "CALL/earpiece" else "TEST/speaker+AEC"}")
         } catch (exception: Exception) {
             MainActivity.log("❌ ERROR starting playback: ${exception.message}")
         }
@@ -328,11 +317,11 @@ class AudioWebSocketHandler(
 
                 // 11. Apply gentle gain to improve pick-up by call microphone
                 // Remove gain - it causes exponential feedback in TEST mode
-                // val gain = 1.6f
-                // for (index in shortBuffer.indices) {
-                //    val amplified = (shortBuffer[index] * gain).toInt()
-                //    shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                // }
+                val gain = 1.0f
+                for (index in shortBuffer.indices) {
+                    val amplified = (shortBuffer[index] * gain).toInt()
+                    shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                }
 
                 val track = audioTrack
                 if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
