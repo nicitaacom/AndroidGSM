@@ -218,6 +218,11 @@ class GsmService : Service() {
             } else startForeground(NOTIFICATION_ID, notification)
             MainActivity.log("GsmService: Foreground started")
 
+            // Ensure realtime clients are initialized for BOTH default starts and explicit action starts.
+            // Android may deliver only the latest intent when multiple startService calls happen quickly,
+            // so action-only starts must not skip Pusher/WS initialization.
+            ensureRealtimeClientsInitialized()
+
             when (intent?.action) {
                 ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT -> {
                     startTestDuplexMicToServerAndServerToOutput()
@@ -237,38 +242,42 @@ class GsmService : Service() {
                 }
             }
 
-            // 2. Default start — init Pusher + audio handlers
-            Thread {
-                try {
-                    val hasPusherCreds = !config?.PUSHER_KEY.isNullOrBlank() &&
-                        !config?.PUSHER_CLUSTER.isNullOrBlank() &&
-                        !config?.BACKEND_BEARER.isNullOrBlank() &&
-                        !config?.BACKEND_URL.isNullOrBlank()
-
-                    if (!hasPusherCreds) { MainActivity.log("WARNING: Missing Pusher/Backend config"); return@Thread }
-
-                    if (pusherClient == null) {
-                        pusherClient = PusherClient(this, config!!)
-                        pusherClient?.connect()
-                        MainActivity.log("GsmService: Pusher connecting...")
-                    }
-
-                    if (audioStreamHandler == null && pusherClient != null) {
-                        audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
-                    }
-                    if (audioWsHandler == null) {
-                        audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
-                    }
-                    MainActivity.log("GsmService: Audio handlers initialized")
-                } catch (error: Exception) {
-                    MainActivity.log("WARNING: Pusher/Audio init failed: ${error.message}")
-                }
-            }.start()
-
         } catch (error: Exception) {
             MainActivity.log("ERROR in onStartCommand: ${error.message}")
         }
         return START_STICKY
+    }
+
+    private fun ensureRealtimeClientsInitialized() {
+        Thread {
+            try {
+                val hasPusherCreds = !config?.PUSHER_KEY.isNullOrBlank() &&
+                    !config?.PUSHER_CLUSTER.isNullOrBlank() &&
+                    !config?.BACKEND_BEARER.isNullOrBlank() &&
+                    !config?.BACKEND_URL.isNullOrBlank()
+
+                if (!hasPusherCreds) {
+                    MainActivity.log("WARNING: Missing Pusher/Backend config")
+                    return@Thread
+                }
+
+                if (pusherClient == null) {
+                    pusherClient = PusherClient(this, config!!)
+                    pusherClient?.connect()
+                    MainActivity.log("GsmService: Pusher connecting...")
+                }
+
+                if (audioStreamHandler == null && pusherClient != null) {
+                    audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
+                }
+                if (audioWsHandler == null) {
+                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                }
+                MainActivity.log("GsmService: Audio handlers initialized")
+            } catch (error: Exception) {
+                MainActivity.log("WARNING: Pusher/Audio init failed: ${error.message}")
+            }
+        }.start()
     }
 
     override fun onDestroy() {

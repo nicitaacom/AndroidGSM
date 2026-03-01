@@ -8,8 +8,14 @@ export const revalidate = 0
 
 export async function GET(request: NextRequest) {
   try {
+    const authToken = process.env.NEXT_PUBLIC_BACKEND_BEARER
+    if (!authToken) {
+      return NextResponse.json({ isAuthorized: false, error: "Missing NEXT_PUBLIC_BACKEND_BEARER" }, { status: 200 })
+    }
+
     const devicesRes = await fetch(`${BACKEND_URL}/api/devices`, {
-      headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_BACKEND_BEARER}` },
+      headers: { Authorization: `Bearer ${authToken}` },
+      cache: "no-store",
     })
     if (!devicesRes.ok) {
       const text = await devicesRes.text()
@@ -17,13 +23,17 @@ export async function GET(request: NextRequest) {
     }
 
     const { devices } = await devicesRes.json()
-    if (!devices?.length) return NextResponse.json({ error: "No devices connected" }, { status: 503 })
+    if (!devices?.length) {
+      // Keep response shape stable for frontend polling logic: "not ready" is not a hard error.
+      return NextResponse.json({ isAuthorized: false, lastSeen: null, deviceToken: null, error: "No devices connected" }, { status: 200 })
+    }
 
     const deviceToken = devices[0].deviceToken
 
     // 1. check if device sent CONNECTED event recently (last 30s)
     const response = await fetch(`${BACKEND_URL}/api/device-status/${deviceToken}`, {
-      headers: { Authorization: `Bearer ${process.env.NEXT_PUBLIC_BACKEND_BEARER}` },
+      headers: { Authorization: `Bearer ${authToken}` },
+      cache: "no-store",
     })
 
     if (!response.ok)

@@ -22,6 +22,7 @@ class PusherClient(
     private var pusher: Pusher? = null
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var heartbeatJob: Job? = null
+    private var backendHeartbeatJob: Job? = null
     private var isSubscribed = false  // Track subscription state
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -31,6 +32,12 @@ class PusherClient(
 
     fun connect() {
         try {
+            // Send immediate backend presence signal even before Pusher websocket is ready.
+            // This keeps /api/devices populated so frontend "Ready" state is not blocked by
+            // transient Pusher connection issues.
+            sendEvent("CONNECTED", mapOf("source" to "service_start"))
+            startBackendHeartbeat()
+
             val options = PusherOptions().apply {
                 setCluster(config.PUSHER_CLUSTER)
                 authorizer = com.pusher.client.util.HttpAuthorizer("${config.BACKEND_URL}/pusher/auth").apply {
@@ -92,8 +99,24 @@ class PusherClient(
         heartbeatJob = null
     }
 
+    private fun startBackendHeartbeat() {
+        stopBackendHeartbeat()
+        backendHeartbeatJob = scope.launch {
+            while (isActive) {
+                delay(15000)
+                sendEvent("CONNECTED", mapOf("heartbeat" to true, "source" to "backend_fallback"))
+            }
+        }
+    }
+
+    private fun stopBackendHeartbeat() {
+        backendHeartbeatJob?.cancel()
+        backendHeartbeatJob = null
+    }
+
     fun disconnect() {
         stopHeartbeat()
+        stopBackendHeartbeat()
         val channelName = "private-device-${config.DEVICE_TOKEN}"
         pusher?.unsubscribe(channelName)
         MainActivity.log("ℹ️ Unsubscribed from $channelName on manual disconnect")
@@ -192,7 +215,8 @@ class PusherClient(
 
                 val response = httpClient.newCall(request).execute()
                 if (!response.isSuccessful) {
-                    MainActivity.log("❌ Event send failed: ${response.code}")
+                    val bodyText = try { response.body?.string() } catch (_: Exception) { null }
+                    MainActivity.log("❌ Event send failed: ${response.code} ${bodyText ?: ""}".trim())
                 }
             } catch (error: Exception) {
                 MainActivity.log("❌ Send event error: ${error.message}")
