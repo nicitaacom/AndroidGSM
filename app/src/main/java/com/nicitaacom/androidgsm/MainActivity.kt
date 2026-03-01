@@ -78,20 +78,29 @@ class MainActivity : AppCompatActivity() {
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
 
         toggleButton.setOnClickListener {
-            if (isServiceRunning) stopService() else requestPermissionsAndStart()
+            // SERVICE mode requires SIM; block action fully when no SIM is available.
+            if (!hasSimAvailable) {
+                addLog("❌ SERVICE mode unavailable: no SIM card detected")
+            } else if (isServiceRunning) {
+                stopService()
+            } else {
+                requestPermissionsAndStart()
+            }
         }
 
         testAudioButton.setOnClickListener {
+            // TEST and SERVICE are mutually exclusive by design.
             if (isTestAudioActive) {
+                // Current button text = STOP TEST -> stop TEST mode.
                 stopTestAudio()
+            } else if (isServiceRunning) {
+                // Current button text = STOP SERVICE -> TEST start is blocked.
+                addLog("⚠️ Cannot start TEST AUDIO while SERVICE is running. Stop SERVICE first.")
             } else {
+                // TEST requested while service is not running (allowed, even without SIM).
                 pendingStartAudioTest = true
-                if (!isServiceRunning) {
-                    addLog("🎧 Test audio requested - starting service in audio-test mode")
-                    requestPermissionsAndStart(allowWithoutSim = true)
-                } else {
-                    dispatchTestAudioRequest()
-                }
+                addLog("🎧 Test audio requested - starting service in TEST AUDIO mode")
+                requestPermissionsAndStart(allowWithoutSim = true)
             }
         }
 
@@ -168,26 +177,65 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateButtonState() {
-        if (!hasSimAvailable) {
+        // Explicit state machine for clarity:
+        // 1) TEST active         -> only STOP TEST is allowed.
+        // 2) no SIM + not TEST   -> SERVICE button always disabled.
+        // 3) SERVICE active      -> only STOP SERVICE is allowed.
+        // 4) idle + SIM available-> both START actions are available.
+
+        if (isTestAudioActive) {
+            // TEST running -> SERVICE must remain disabled.
+            toggleButton.text = if (hasSimAvailable) "START SERVICE" else "NO SIM DETECTED"
+            toggleButton.isEnabled = false
+            toggleButton.alpha = 0.5f
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            testAudioButton.text = "STOP TEST"
+            testAudioButton.isEnabled = true
+            testAudioButton.alpha = 1f
+            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
+
+            statusTextView.text = if (hasSimAvailable) "Status: Test Audio Active" else "Status: Test Audio Active (No SIM)"
+        } else if (!hasSimAvailable) {
+            // No SIM -> SERVICE cannot start/stop from UI or logic.
             toggleButton.text = "NO SIM DETECTED"
             toggleButton.isEnabled = false
             toggleButton.alpha = 0.5f
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            testAudioButton.text = "TEST AUDIO"
             testAudioButton.isEnabled = true
             testAudioButton.alpha = 1f
-            testAudioButton.text = if (isTestAudioActive) "STOP TEST" else "TEST AUDIO"
-            statusTextView.text = if (isServiceRunning) "Status: Active (No SIM)" else "Status: No SIM"
-            return
-        }
+            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
 
-        toggleButton.isEnabled = true
-        toggleButton.alpha = 1f
-        testAudioButton.isEnabled = true
-        testAudioButton.alpha = 1f
-        toggleButton.text = if (isServiceRunning) "STOP SERVICE" else "START SERVICE"
-        toggleButton.setBackgroundColor(ContextCompat.getColor(this, if (isServiceRunning) R.color.error_red else R.color.brand_green))
-        testAudioButton.text = if (isTestAudioActive) "STOP TEST" else "TEST AUDIO"
-        testAudioButton.setBackgroundColor(ContextCompat.getColor(this, if (isTestAudioActive) R.color.error_red else R.color.brand_green))
-        statusTextView.text = if (isServiceRunning) "Status: Active" else "Status: Inactive"
+            statusTextView.text = "Status: No SIM"
+        } else if (isServiceRunning) {
+            toggleButton.text = "STOP SERVICE"
+            toggleButton.isEnabled = true
+            toggleButton.alpha = 1f
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
+
+            // SERVICE active -> TEST cannot be started.
+            testAudioButton.text = "TEST AUDIO"
+            testAudioButton.isEnabled = false
+            testAudioButton.alpha = 0.5f
+            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            statusTextView.text = "Status: Active"
+        } else {
+            // Idle + SIM available.
+            toggleButton.text = "START SERVICE"
+            toggleButton.isEnabled = true
+            toggleButton.alpha = 1f
+            toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            testAudioButton.text = "TEST AUDIO"
+            testAudioButton.isEnabled = true
+            testAudioButton.alpha = 1f
+            testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
+
+            statusTextView.text = "Status: Inactive"
+        }
     }
 
     private fun requestPermissionsAndStart(allowWithoutSim: Boolean = false) {
@@ -318,6 +366,8 @@ class MainActivity : AppCompatActivity() {
             stopService(intent)
 
             isServiceRunning = false
+            isTestAudioActive = false
+            pendingStartAudioTest = false
             updateButtonState()
             addLog("Service stopped successfully!")
 
@@ -380,9 +430,17 @@ class MainActivity : AppCompatActivity() {
             action = GsmService.ACTION_STOP_TEST_AUDIO
         }
         startService(testIntent)
+
+        // TEST session owns the temporary service instance; stop it when TEST stops
+        // so the UI cannot incorrectly switch to STOP SERVICE without explicit SERVICE start.
+        val serviceIntent = Intent(this, GsmService::class.java)
+        stopService(serviceIntent)
+
         isTestAudioActive = false
+        isServiceRunning = false
+        pendingStartAudioTest = false
         updateButtonState()
-        addLog("🛑 Test audio stopped")
+        addLog("🛑 Test audio stopped (duplex disconnected)")
     }
 
     fun addLog(message: String) {
