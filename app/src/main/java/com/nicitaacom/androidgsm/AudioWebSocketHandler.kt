@@ -33,14 +33,15 @@ class AudioWebSocketHandler(
     private var isRecording = false
     private var isPlaying = false
     private var isCallActive = false
-    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    // 1. Use SupervisorJob so child coroutine crashes don't cancel siblings
+    private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val appOpsManager = context.getSystemService(Context.APP_OPS_SERVICE) as android.app.AppOpsManager
 
     private var wsConnection: WebSocketAudioClient? = null
     private var seqTx = 0L
     private var seqRx = -1L
 
-    // 1. Evaluate root once lazily - no side-effect logs here (MainActivity.onCreate owns the log)
     private val isRooted: Boolean by lazy { RootUtils.isRooted() }
 
     companion object {
@@ -50,8 +51,6 @@ class AudioWebSocketHandler(
         private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
         private const val BUFFER_SIZE_FACTOR = 4
-
-        // 2. Fallback sources used when NOT rooted (mic-based)
         private val MIC_CAPTURE_SOURCES = intArrayOf(
             MediaRecorder.AudioSource.VOICE_COMMUNICATION,
             MediaRecorder.AudioSource.MIC,
@@ -71,7 +70,7 @@ class AudioWebSocketHandler(
         stopAudioPlayback()
     }
 
-    private fun handleAudioPacket(packet: JSONObject) {
+    private fun handleAudioPacket(packet: org.json.JSONObject) {
         try {
             val dir = packet.optString("dir", "")
             val role = packet.optString("role", "")
@@ -83,7 +82,6 @@ class AudioWebSocketHandler(
                 return
             }
 
-            // 3. Validate sequence order
             if (seq != -1L) {
                 if (seq < seqRx) { Log.w(TAG, "⚠️ Out of order: got seq=$seq, expected > $seqRx"); return }
                 seqRx = seq
@@ -102,12 +100,32 @@ class AudioWebSocketHandler(
             MainActivity.log("❌ ERROR: RECORD_AUDIO permission not granted")
             return
         }
+
+        // 2. Explicitly start RECORD_AUDIO app op before capturing — required on Android 12+ or system kills the process
+        try {
+            val packageName = context.packageName
+            val uid = context.applicationInfo.uid
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val result = appOpsManager.unsafeCheckOpNoThrow(
+                    android.app.AppOpsManager.OPSTR_RECORD_AUDIO, uid, packageName
+                )
+                if (result != android.app.AppOpsManager.MODE_ALLOWED) {
+                    MainActivity.log("❌ RECORD_AUDIO app op not allowed (result=$result) - mic blocked by system")
+                    return
+                }
+            }
+            appOpsManager.startOp(android.app.AppOpsManager.OPSTR_RECORD_AUDIO, uid, packageName)
+            MainActivity.log("✅ RECORD_AUDIO app op started")
+        } catch (exception: Exception) {
+            // startOp throws if op is not in started state - log but continue, AudioRecord itself will fail if truly blocked
+            MainActivity.log("⚠️ AppOps startOp warning: ${exception.message}")
+        }
+
         try {
             MainActivity.log("🎤 WebSocket: Starting capture...")
-            // 1. Only set communication mode if call is active - TEST mode uses normal mic
             if (isCallActive) {
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = false
+                audioManager.isSpeakerphoneOn = false // earpiece only - eliminates feedback physically
             }
 
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
@@ -120,6 +138,9 @@ class AudioWebSocketHandler(
                 return
             }
 
+            // 3. Recreate scope if previous was cancelled (happens after stopTestAudio nulls the handler)
+            if (!scope.isActive) scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
             isRecording = true
             audioRecord?.startRecording()
             scope.launch { captureAndStreamAudio(bufferSize) }
@@ -131,12 +152,37 @@ class AudioWebSocketHandler(
         }
     }
 
+    fun stopAudioCapture() {
+        try {
+            isRecording = false
+            audioRecord?.stop()
+            audioRecord?.release()
+            audioRecord = null
+            audioManager.mode = AudioManager.MODE_NORMAL
+            audioManager.isSpeakerphoneOn = false
+
+            // 4. Stop the app op when capture ends
+            try {
+                appOpsManager.finishOp(
+                    android.app.AppOpsManager.OPSTR_RECORD_AUDIO,
+                    context.applicationInfo.uid,
+                    context.packageName
+                )
+                MainActivity.log("✅ RECORD_AUDIO app op finished")
+            } catch (exception: Exception) {
+                MainActivity.log("⚠️ AppOps finishOp warning: ${exception.message}")
+            }
+
+            MainActivity.log("🎤 Capture stopped")
+        } catch (exception: Exception) {
+            Log.e(TAG, "❌ Error stopping capture", exception)
+        }
+    }
+
     // 6. Build AudioRecord using REMOTE_SUBMIX (requires root + CAPTURE_AUDIO_OUTPUT permission)
     private fun buildRootedAudioRecord(bufferSize: Int): AudioRecord? {
-        // 6a. Check if CAPTURE_AUDIO_OUTPUT is already granted (system permission, not user-grantable normally)
         val hasCapture = ContextCompat.checkSelfPermission(context, "android.permission.CAPTURE_AUDIO_OUTPUT") == PackageManager.PERMISSION_GRANTED
         if (!hasCapture) {
-            // 6b. Not granted yet - attempt to grant via root shell
             val granted = RootUtils.grantAudioOutputCapture(context)
             if (!granted) {
                 MainActivity.log("❌ Failed to grant CAPTURE_AUDIO_OUTPUT via root - falling back to mic")
@@ -145,10 +191,7 @@ class AudioWebSocketHandler(
         }
 
         return try {
-            val record = AudioRecord(
-                MediaRecorder.AudioSource.REMOTE_SUBMIX,
-                SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize
-            )
+            val record = AudioRecord(MediaRecorder.AudioSource.REMOTE_SUBMIX, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
             if (record.state == AudioRecord.STATE_INITIALIZED) {
                 MainActivity.log("✅ REMOTE_SUBMIX initialized - capturing device audio output")
                 record
@@ -158,11 +201,9 @@ class AudioWebSocketHandler(
                 buildMicAudioRecord(bufferSize)
             }
         } catch (exception: SecurityException) {
-            Log.e(TAG, "❌ REMOTE_SUBMIX SecurityException: ${exception.message}")
-            MainActivity.log("❌ REMOTE_SUBMIX permission denied by system: ${exception.message} - falling back to mic")
+            MainActivity.log("❌ REMOTE_SUBMIX permission denied: ${exception.message} - falling back to mic")
             buildMicAudioRecord(bufferSize)
         } catch (exception: Exception) {
-            Log.e(TAG, "❌ REMOTE_SUBMIX error: ${exception.message}")
             MainActivity.log("❌ REMOTE_SUBMIX exception: ${exception.message} - falling back to mic")
             buildMicAudioRecord(bufferSize)
         }
@@ -180,12 +221,11 @@ class AudioWebSocketHandler(
                 record.release()
             } catch (exception: SecurityException) {
                 MainActivity.log("❌ Source $source permission denied: ${exception.message}")
-                Log.w(TAG, "SecurityException for source $source: ${exception.message}")
             } catch (exception: Exception) {
                 Log.w(TAG, "Failed source $source: ${exception.message}")
             }
         }
-        MainActivity.log("❌ All mic capture sources failed - no AudioRecord available")
+        MainActivity.log("❌ All mic capture sources failed")
         return null
     }
 
@@ -200,11 +240,9 @@ class AudioWebSocketHandler(
                 if (read > 0) {
                     val byteBuffer = ByteArray(read * 2)
                     ByteBuffer.wrap(byteBuffer).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(buffer, 0, read)
-
                     val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
                     val seq = seqTx++
                     wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-
                     if (seq % 10L == 0L) Log.d(TAG, "WS-SEND seq=$seq size=${base64Audio.length}")
                     chunkCount++
                 } else if (read < 0) {
@@ -219,20 +257,6 @@ class AudioWebSocketHandler(
         Log.d(TAG, "Capture ended: $chunkCount chunks")
     }
 
-    fun stopAudioCapture() {
-        try {
-            isRecording = false
-            audioRecord?.stop()
-            audioRecord?.release()
-            audioRecord = null
-            audioManager.mode = AudioManager.MODE_NORMAL
-            audioManager.isSpeakerphoneOn = false
-            MainActivity.log("🎤 Capture stopped")
-        } catch (exception: Exception) {
-            Log.e(TAG, "❌ Error stopping capture", exception)
-        }
-    }
-
     fun startAudioPlayback() {
         if (isPlaying) return
         try {
@@ -243,7 +267,6 @@ class AudioWebSocketHandler(
                 audioManager.isSpeakerphoneOn = false
             } else {
                 // TEST mode: MODE_IN_COMMUNICATION enables hardware AEC so mic won't pick up speaker output
-                // isSpeakerphoneOn=true keeps audio audible through speaker
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 audioManager.isSpeakerphoneOn = true
             }
@@ -290,34 +313,23 @@ class AudioWebSocketHandler(
             try {
                 if (base64Audio.isBlank()) { Log.w(TAG, "⚠️ Empty audio chunk"); return@launch }
 
-                // 9. Decode base64 with explicit error handling
                 val audioBytes = try {
                     Base64.decode(base64Audio, Base64.NO_WRAP)
                 } catch (exception: IllegalArgumentException) {
                     Log.e(TAG, "❌ Base64 decode failed: ${exception.message}")
-                    MainActivity.log("❌ ERROR: Invalid base64 audio")
                     return@launch
                 }
-
-                Log.d(TAG, "WS-DECODE seq=$seq bytes=${audioBytes.size}")
 
                 if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) {
                     Log.e(TAG, "❌ Invalid audio size: ${audioBytes.size}")
                     return@launch
                 }
 
-                // 10. Convert bytes to shorts with explicit byte order
                 val shortBuffer = ShortArray(audioBytes.size / 2)
-                try {
-                    ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
-                } catch (exception: Exception) {
-                    Log.e(TAG, "❌ Buffer conversion error: ${exception.message}")
-                    return@launch
-                }
+                ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
 
-                // 11. Apply gentle gain to improve pick-up by call microphone
-                // Remove gain - it causes exponential feedback in TEST mode
-                val gain = 1.0f
+                // 11. Neutral gain - AEC handles echo, no amplification needed
+                val gain = 0.6f
                 for (index in shortBuffer.indices) {
                     val amplified = (shortBuffer[index] * gain).toInt()
                     shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
@@ -325,28 +337,21 @@ class AudioWebSocketHandler(
 
                 val track = audioTrack
                 if (track == null || track.state != AudioTrack.STATE_INITIALIZED) {
-                    Log.w(TAG, "⚠️ AudioTrack unavailable (state=${track?.state}), restarting")
+                    Log.w(TAG, "⚠️ AudioTrack unavailable, restarting")
                     startAudioPlayback()
                     return@launch
                 }
 
-                // 12. Write audio with result validation
-                try {
-                    val written = track.write(shortBuffer, 0, shortBuffer.size)
-                    when {
-                        written == AudioTrack.ERROR_INVALID_OPERATION -> { Log.e(TAG, "❌ AudioTrack ERROR_INVALID_OPERATION"); isPlaying = false }
-                        written == AudioTrack.ERROR_BAD_VALUE -> { Log.e(TAG, "❌ AudioTrack ERROR_BAD_VALUE"); isPlaying = false }
-                        written < 0 -> Log.e(TAG, "❌ AudioTrack write error: $written")
-                        written != shortBuffer.size -> Log.w(TAG, "⚠️ Partial write: $written/${shortBuffer.size}")
-                        else -> Log.d(TAG, "✅ Wrote ${shortBuffer.size} samples")
-                    }
-                } catch (exception: IllegalStateException) {
-                    Log.e(TAG, "❌ AudioTrack released: ${exception.message}")
-                    isPlaying = false
+                val written = track.write(shortBuffer, 0, shortBuffer.size)
+                when {
+                    written == AudioTrack.ERROR_INVALID_OPERATION -> { Log.e(TAG, "❌ ERROR_INVALID_OPERATION"); isPlaying = false }
+                    written == AudioTrack.ERROR_BAD_VALUE -> { Log.e(TAG, "❌ ERROR_BAD_VALUE"); isPlaying = false }
+                    written < 0 -> Log.e(TAG, "❌ AudioTrack write error: $written")
+                    written != shortBuffer.size -> Log.w(TAG, "⚠️ Partial write: $written/${shortBuffer.size}")
+                    else -> Log.d(TAG, "✅ Wrote ${shortBuffer.size} samples")
                 }
             } catch (exception: Exception) {
                 Log.e(TAG, "❌ Error playing chunk: ${exception.message}")
-                exception.printStackTrace()
             }
         }
     }
