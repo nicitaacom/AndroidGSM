@@ -132,7 +132,9 @@ class AudioWebSocketHandler(
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid buffer size"); return }
 
-            audioRecord = if (isRooted) buildRootedAudioRecord(bufferSize) else buildMicAudioRecord(bufferSize)
+            // Always attempt REMOTE_SUBMIX path first.
+            // Root detection can be false-negative on some devices/ROMs.
+            audioRecord = buildRootedAudioRecord(bufferSize)
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 MainActivity.log("❌ ERROR: AudioRecord not initialized")
@@ -145,7 +147,7 @@ class AudioWebSocketHandler(
             isRecording = true
             audioRecord?.startRecording()
             scope.launch { captureAndStreamAudio(bufferSize) }
-            MainActivity.log("✅ Capture started (WS) - source: ${if (isRooted) "REMOTE_SUBMIX" else "MIC/VOICE_COMMUNICATION"}")
+            MainActivity.log("✅ Capture started (WS) - source: ${resolveCaptureSourceLabel()}")
         } catch (exception: SecurityException) {
             MainActivity.log("❌ ERROR: Permission rejected: ${exception.message}")
         } catch (exception: Exception) {
@@ -170,6 +172,10 @@ class AudioWebSocketHandler(
 
     // 6. Build AudioRecord using REMOTE_SUBMIX (requires root + CAPTURE_AUDIO_OUTPUT permission)
     private fun buildRootedAudioRecord(bufferSize: Int): AudioRecord? {
+        if (!isRooted) {
+            MainActivity.log("⚠️ Root not detected by app checks; still attempting REMOTE_SUBMIX capture")
+        }
+
         val hasCapture = ContextCompat.checkSelfPermission(context, "android.permission.CAPTURE_AUDIO_OUTPUT") == PackageManager.PERMISSION_GRANTED
         if (!hasCapture) {
             val granted = RootUtils.grantAudioOutputCapture(context)
@@ -196,6 +202,11 @@ class AudioWebSocketHandler(
             MainActivity.log("❌ REMOTE_SUBMIX exception: ${exception.message} - falling back to mic")
             buildMicAudioRecord(bufferSize)
         }
+    }
+
+    private fun resolveCaptureSourceLabel(): String {
+        val source = try { audioRecord?.audioSource } catch (_: Exception) { null }
+        return if (source == MediaRecorder.AudioSource.REMOTE_SUBMIX) "REMOTE_SUBMIX" else "MIC/VOICE_COMMUNICATION"
     }
 
     // 7. Build AudioRecord using MIC sources as fallback
