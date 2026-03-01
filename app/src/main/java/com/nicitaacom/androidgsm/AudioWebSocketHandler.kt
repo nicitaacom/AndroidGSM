@@ -307,12 +307,8 @@ class AudioWebSocketHandler(
     }
 
     private fun playAudioChunk(base64Audio: String, seq: Long = -1) {
-        if (!isPlaying) return@launch
-        val track = audioTrack ?: return@launch
-        if (track.state != AudioTrack.STATE_INITIALIZED) return@launch
-
-        // 1. Guard: don't launch if scope is cancelled (happens during stopTestAudio)
-        if (!scope.isActive) return
+        if (!isPlaying) return
+        if (!scope.coroutineContext[Job]!!.isActive) return
 
         scope.launch {
             try {
@@ -325,10 +321,7 @@ class AudioWebSocketHandler(
                     return@launch
                 }
 
-                if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) {
-                    Log.e(TAG, "❌ Invalid audio size: ${audioBytes.size}")
-                    return@launch
-                }
+                if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) { Log.e(TAG, "❌ Invalid audio size"); return@launch }
 
                 val shortBuffer = ShortArray(audioBytes.size / 2)
                 ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
@@ -339,16 +332,12 @@ class AudioWebSocketHandler(
                     shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
                 }
 
-                // 2. Guard: check track is still valid after potential stop during coroutine suspension
+                // 2. Check isPlaying immediately before write - stopAudioPlayback() sets false before release
+                if (!isPlaying) return@launch
                 val track = audioTrack ?: return@launch
-                if (track.state != AudioTrack.STATE_INITIALIZED) {
-                    Log.w(TAG, "⚠️ AudioTrack unavailable, restarting")
-                    startAudioPlayback()
-                    return@launch
-                }
+                if (track.state != AudioTrack.STATE_INITIALIZED) return@launch
 
                 val written = track.write(shortBuffer, 0, shortBuffer.size)
-
                 when {
                     written == AudioTrack.ERROR_INVALID_OPERATION -> { Log.e(TAG, "❌ ERROR_INVALID_OPERATION"); isPlaying = false }
                     written == AudioTrack.ERROR_BAD_VALUE -> { Log.e(TAG, "❌ ERROR_BAD_VALUE"); isPlaying = false }
