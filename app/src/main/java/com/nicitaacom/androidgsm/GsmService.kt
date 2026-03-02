@@ -44,23 +44,30 @@ class GsmService : Service() {
 
                             Thread {
                                 try {
-                                    // 1. Upgrade existing WS handler to call mode — avoids crash on init
+                                    // 1. Re-init WS handler if null — call can arrive without SERVICE mode active
+                                    if (audioWsHandler == null) {
+                                        audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                                        val wsUrl = config?.BACKEND_URL
+                                            ?.replace("http://", "ws://")
+                                            ?.replace("https://", "wss://")
+                                            ?.removeSuffix("/") + "/ws/audio"
+                                        audioWsHandler?.connect(wsUrl, config?.BACKEND_BEARER ?: "", config?.DEVICE_TOKEN ?: "")
+                                        Thread.sleep(500)
+                                    }
+                                    audioWsHandler?.stopAudioCapture()
+                                    audioWsHandler?.stopAudioPlayback()
+                                    Thread.sleep(200)
                                     audioWsHandler?.setCallActive(true)
                                     audioWsHandler?.startAudioCapture()
                                     audioWsHandler?.startAudioPlayback()
-                                    MainActivity.log("callStateReceiver: audio capture started (call mode)")
+                                    pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
+                                    MainActivity.log("callStateReceiver: WS audio started (call mode)")
                                 } catch (error: Exception) {
-                                    MainActivity.log("callStateReceiver startAudioCapture error: ${error.message}")
-                                }
-                            }.start()
-
-                            Thread {
-                                try { pusherClient?.sendEvent("CALL_CONNECTED", emptyMap()) } catch (error: Exception) {
-                                    MainActivity.log("callStateReceiver pusher error: ${error.message}")
+                                    MainActivity.log("callStateReceiver error: ${error.message}")
                                 }
                             }.start()
                         } catch (error: Exception) {
-                            MainActivity.log("callStateReceiver error: ${error.message}")
+                            MainActivity.log("callStateReceiver outer error: ${error.message}")
                         }
                     }
                     ACTION_CALL_DISCONNECTED_BROADCAST -> {
@@ -450,6 +457,7 @@ class GsmService : Service() {
                 ws.startAudioCapture()
 
                 // 4. Notify server so connectedDevices stays alive
+                pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap()) // reuse existing frontend handler
                 pusherClient?.sendEvent("CONNECTED", emptyMap())
                 MainActivity.log("✅ SERVICE mode active: duplex android<->server<->browser")
             } catch (error: Exception) {
@@ -573,14 +581,21 @@ class GsmService : Service() {
         try {
             MainActivity.log("Ending call")
             isServiceAudioActive = false
-            gsmDialer?.endCall()
-            audioStreamHandler?.stopAudioCapture()
-            audioStreamHandler?.stopAudioPlayback()
-            audioWsHandler?.disconnect()
-            pusherClient?.sendEvent("CALL_ENDED", emptyMap())
-        } catch (e: Exception) {
-            MainActivity.log("ERROR in handleCallEnded: ${e.message}")
-            e.printStackTrace()
+            Thread {
+                try {
+                    gsmDialer?.endCall()
+                    Thread.sleep(300)
+                    audioWsHandler?.stopAudioCapture()
+                    audioWsHandler?.stopAudioPlayback()
+                    audioStreamHandler?.stopAudioCapture()
+                    audioStreamHandler?.stopAudioPlayback()
+                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                } catch (error: Exception) {
+                    MainActivity.log("ERROR in handleCallEnded thread: ${error.message}")
+                }
+            }.start()
+        } catch (error: Exception) {
+            MainActivity.log("ERROR in handleCallEnded: ${error.message}")
         }
     }
 

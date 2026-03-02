@@ -41,6 +41,9 @@ class AudioStreamHandler(
         private const val AUDIO_CHUNK_SIZE_MS = 20  // 20ms chunks at 16kHz = 320 samples
         private const val EXPECTED_CHUNK_SIZE = SAMPLE_RATE * AUDIO_CHUNK_SIZE_MS / 1000 * 2  // in bytes
         private val CAPTURE_SOURCES = intArrayOf(
+        // 1. REMOTE_SUBMIX captures both sides of call — requires root or CAPTURE_AUDIO_OUTPUT
+        MediaRecorder.AudioSource.REMOTE_SUBMIX,
+        MediaRecorder.AudioSource.VOICE_CALL,
         MediaRecorder.AudioSource.VOICE_COMMUNICATION,
         MediaRecorder.AudioSource.MIC,
     )
@@ -86,24 +89,24 @@ class AudioStreamHandler(
             var selectedRecord: AudioRecord? = null
             for (source in CAPTURE_SOURCES) {
                 try {
-                    val record = AudioRecord(
-                        source,
-                        SAMPLE_RATE,
-                        CHANNEL_IN,
-                        AUDIO_FORMAT,
-                        bufferSize
-                    )
+                    val record = AudioRecord(source, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
                     if (record.state == AudioRecord.STATE_INITIALIZED) {
-                        MainActivity.log("✅ Audio capture source selected: $source (bufferSize: $bufferSize)")
+                        MainActivity.log("✅ Audio source selected: $source")
                         selectedRecord = record
                         break
                     }
                     record.release()
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed to initialize AudioRecord with source $source: ${e.message}")
+                } catch (error: Exception) {
+                    // 1. Don't crash — just try next source
+                    MainActivity.log("⚠️ Source $source failed: ${error.message}, trying next")
                 }
             }
-            
+
+            if (selectedRecord == null) {
+                MainActivity.log("❌ No audio source available — capture aborted")
+                isRecording = false
+                return
+            }
             audioRecord = selectedRecord
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
@@ -187,21 +190,17 @@ class AudioStreamHandler(
     fun stopAudioCapture() {
         try {
             isRecording = false
-            audioRecord?.stop()
-            audioRecord?.release()
-            audioRecord = null
-
-            // Reset audio manager
+            val record = audioRecord
+            audioRecord = null // 1. Null first — prevents read() after release() race
+            record?.stop()
+            record?.release()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                audioManager.clearCommunicationDevice()
+                try { audioManager.clearCommunicationDevice() } catch (_: Exception) {}
             }
-            audioManager.isSpeakerphoneOn = false
             audioManager.mode = AudioManager.MODE_NORMAL
-
             MainActivity.log("🎤 Audio capture stopped")
-            Log.d(TAG, "Audio capture stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping audio capture", e)
+        } catch (error: Exception) {
+            MainActivity.log("ERROR stopping capture: ${error.message}")
         }
     }
 
@@ -266,89 +265,55 @@ class AudioStreamHandler(
     }
 
     fun playAudioChunk(base64Audio: String) {
-        if (!isPlaying) {
-            startAudioPlayback()
-        }
-
+        if (!isPlaying) startAudioPlayback()
+        
         scope.launch {
-            try {
-                // 1. Validate base64 string
-                if (base64Audio.isBlank()) {
-                    Log.w(TAG, "⚠️ DEBUG: Received empty base64 audio chunk")
-                    MainActivity.log("⚠️ Empty audio chunk (Pusher fallback)")
-                    return@launch
-                }
+            // 1. Wrap entire coroutine — any exception here must never crash the process
+            runCatching {
+                if (base64Audio.isBlank()) return@launch
 
-                // 2. Decode base64 with error handling
                 val audioBytes = try {
                     Base64.decode(base64Audio, Base64.NO_WRAP)
-                } catch (e: IllegalArgumentException) {
-                    Log.e(TAG, "❌ Failed to decode incoming audio chunk: ${e.message}")
-                    MainActivity.log("ERROR: Invalid audio chunk received (decode failed)")
+                } catch (error: Exception) {
+                    MainActivity.log("❌ Audio decode failed: ${error.message}")
                     return@launch
                 }
 
-                Log.d(TAG, "✅ DEBUG: Decoded base64 → ${audioBytes.size} bytes")
+                if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) return@launch
 
-                // 3. Validate decoded bytes
-                if (audioBytes.isEmpty()) {
-                    Log.w(TAG, "⚠️ DEBUG: Decoded audio bytes are empty")
-                    return@launch
-                }
-
-                // 4. Check if size is valid (must be even number of bytes for 16-bit samples)
-                if (audioBytes.size % 2 != 0) {
-                    Log.e(TAG, "❌ DEBUG: Odd bytes (${audioBytes.size}) - expected multiple of 2")
-                    Log.e(TAG, "  This means corrupted PCM data")
-                    MainActivity.log("ERROR: Audio chunk odd size - corrupted")
-                    return@launch
-                }
-
-                // 5. Convert bytes to shorts (16-bit PCM samples)
-                // Use proper byte order handling
                 val shortBuffer = ShortArray(audioBytes.size / 2)
-                val byteBuffer = ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN)
-                byteBuffer.asShortBuffer().get(shortBuffer)
+                ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
 
-                Log.d(TAG, "✅ DEBUG: Converted to ${shortBuffer.size} samples")
-
-                // 6. Verify AudioTrack is initialized before writing
-                if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
-                    Log.w(TAG, "⚠️ DEBUG: AudioTrack state=${audioTrack?.state}, restarting")
-                    startAudioPlayback()
+                // 2. Check state before every write — audioTrack can be released mid-flight
+                val track = audioTrack ?: run {
+                    MainActivity.log("⚠️ AudioTrack null — skipping chunk")
+                    return@launch
+                }
+                if (track.state != AudioTrack.STATE_INITIALIZED) {
+                    isPlaying = false
+                    return@launch
+                }
+                if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                    try { track.play() } catch (_: Exception) { return@launch }
                 }
 
-                // 7. Write audio with error handling
-                val written = audioTrack?.write(shortBuffer, 0, shortBuffer.size) ?: -1
-                
-                Log.d(TAG, "DEBUG: AudioTrack.write() returned: $written")
-                
-                if (written == AudioTrack.ERROR_INVALID_OPERATION) {
-                    Log.e(TAG, "❌ DEBUG: AudioTrack.ERROR_INVALID_OPERATION")
-                    Log.e(TAG, "  AudioTrack state: ${audioTrack?.state}")
-                    Log.e(TAG, "  isPlaying: $isPlaying")
+                // 3. Write with result check — never throw
+                val written = try {
+                    track.write(shortBuffer, 0, shortBuffer.size)
+                } catch (error: Exception) {
+                    MainActivity.log("❌ AudioTrack.write exception: ${error.message}")
                     isPlaying = false
-                    MainActivity.log("ERROR: AudioTrack invalid operation")
-                } else if (written == AudioTrack.ERROR_BAD_VALUE) {
-                    Log.e(TAG, "❌ DEBUG: AudioTrack.ERROR_BAD_VALUE")
-                    Log.e(TAG, "  Tried to write ${shortBuffer.size} samples")
-                    isPlaying = false
-                    MainActivity.log("ERROR: AudioTrack bad value")
-                } else if (written < 0) {
-                    Log.e(TAG, "❌ DEBUG: AudioTrack unknown error: $written")
-                    isPlaying = false
-                } else if (written != shortBuffer.size) {
-                    Log.w(TAG, "⚠️ DEBUG: Partial write: $written / ${shortBuffer.size} samples")
-                } else {
-                    Log.d(TAG, "✅ DEBUG: Successfully wrote ${shortBuffer.size} samples")
+                    return@launch
                 }
 
-            } catch (e: Exception) {
-                Log.e(TAG, "❌ DEBUG: Exception in playAudioChunk")
-                Log.e(TAG, "  Message: ${e.message}")
-                Log.e(TAG, "  Class: ${e::class.simpleName}")
-                e.printStackTrace()
-                MainActivity.log("ERROR: Play failed - check logcat")
+                if (written < 0) {
+                    MainActivity.log("❌ AudioTrack.write error code: $written")
+                    isPlaying = false
+                }
+            }.onFailure { error ->
+                // 4. Last resort — log and survive
+                MainActivity.log("❌ playAudioChunk unhandled: ${error.message}")
+                isPlaying = false
             }
         }
     }
@@ -356,13 +321,13 @@ class AudioStreamHandler(
     fun stopAudioPlayback() {
         try {
             isPlaying = false
-            audioTrack?.stop()
-            audioTrack?.release()
-            audioTrack = null
+            val track = audioTrack
+            audioTrack = null // 1. Null first — prevents write() after release() race
+            track?.stop()
+            track?.release()
             MainActivity.log("🔊 Audio playback stopped")
-            Log.d(TAG, "Audio playback stopped")
-        } catch (e: Exception) {
-            Log.e(TAG, "Error stopping audio playback", e)
+        } catch (error: Exception) {
+            MainActivity.log("ERROR stopping playback: ${error.message}")
         }
     }
 
