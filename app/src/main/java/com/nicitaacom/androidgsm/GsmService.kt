@@ -46,7 +46,9 @@ class GsmService : Service() {
                                 try {
                                     // 1. Re-init WS handler if null — call can arrive without SERVICE mode active
                                     if (audioWsHandler == null) {
-                                        audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                                        config?.let { safeConfig ->
+                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
+                                    }
                                         val wsUrl = config?.BACKEND_URL
                                             ?.replace("http://", "ws://")
                                             ?.replace("https://", "wss://")
@@ -193,18 +195,43 @@ class GsmService : Service() {
         }
     }
 
+    private fun buildForegroundServiceTypeMask(): Int {
+        var serviceType = 0
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            serviceType = serviceType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+        }
+        return serviceType
+    }
+
+    private fun startForegroundSafely(notification: Notification) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            startForeground(NOTIFICATION_ID, notification)
+            return
+        }
+
+        val serviceType = buildForegroundServiceTypeMask()
+        if (serviceType == 0) {
+            startForeground(NOTIFICATION_ID, notification)
+            return
+        }
+
+        try {
+            startForeground(NOTIFICATION_ID, notification, serviceType)
+        } catch (error: SecurityException) {
+            MainActivity.log("WARNING: Foreground type denied (${error.message}); retrying without explicit type")
+            startForeground(NOTIFICATION_ID, notification)
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
             MainActivity.log("GsmService: onStartCommand called")
 
-            // 1. ALWAYS start foreground first — required for background mic capture on Android 14
+            // 1. ALWAYS start foreground first — required for background mic capture on Android 10+
             val notification = createNotification()
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val serviceType = ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-                startForeground(NOTIFICATION_ID, notification, serviceType)
-            } else startForeground(NOTIFICATION_ID, notification)
+            startForegroundSafely(notification)
             MainActivity.log("GsmService: Foreground started")
 
             // Ensure realtime clients are initialized for BOTH default starts and explicit action starts.
@@ -251,7 +278,12 @@ class GsmService : Service() {
                 }
 
                if (pusherClient == null) {
-                pusherClient = PusherClient(this, config!!)
+                val safeConfig = config ?: run {
+                    MainActivity.log("WARNING: Config unavailable, skipping realtime init")
+                    return@Thread
+                }
+
+                pusherClient = PusherClient(this, safeConfig)
                 pusherClient?.connect()
                 MainActivity.log("GsmService: Pusher connecting...")
 
@@ -270,7 +302,9 @@ class GsmService : Service() {
                     audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
                 }
                 if (audioWsHandler == null) {
-                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    config?.let { safeConfig ->
+                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
+                                    }
                 }
                 MainActivity.log("GsmService: Audio handlers initialized")
             } catch (error: Exception) {
@@ -366,7 +400,9 @@ class GsmService : Service() {
 
                 // 2. Init WS handler if needed
                 if (audioWsHandler == null) {
-                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    config?.let { safeConfig ->
+                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
+                                    }
                     MainActivity.log("Test audio: WebSocket handler initialized")
                 }
 
@@ -432,7 +468,9 @@ class GsmService : Service() {
             try {
                 // 1. Re-init handler fresh each start to avoid stale WS state (same as TEST mode)
                 if (audioWsHandler == null) {
-                    audioWsHandler = AudioWebSocketHandler(this, config!!) { _: ShortArray -> }
+                    config?.let { safeConfig ->
+                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
+                                    }
                     MainActivity.log("SERVICE audio: WebSocket handler initialized")
                 }
 
