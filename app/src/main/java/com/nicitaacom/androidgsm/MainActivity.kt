@@ -274,14 +274,8 @@ class MainActivity : AppCompatActivity() {
             add(Manifest.permission.RECORD_AUDIO)
             add(Manifest.permission.READ_PHONE_STATE)
             add(Manifest.permission.ANSWER_PHONE_CALLS)
-            add(Manifest.permission.MODIFY_AUDIO_SETTINGS)
-            add(Manifest.permission.INTERNET)
-            add(Manifest.permission.ACCESS_NETWORK_STATE)
-            add(Manifest.permission.WAKE_LOCK)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) add(Manifest.permission.FOREGROUND_SERVICE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                add(Manifest.permission.USE_FULL_SCREEN_INTENT)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
@@ -353,8 +347,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
             val intent = Intent(this, GsmService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
-            else startService(intent)
+            startGsmServiceSafely(intent)
             addLog("Service process started")
             // 1. Dispatch is handled by caller — never auto-dispatch here
         } catch (error: Exception) {
@@ -391,7 +384,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, GsmService::class.java).apply {
             action = GsmService.ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
         }
-        startService(intent)
+        startGsmServiceSafely(intent)
         isServiceAudioActive = false
         isTestAudioActive = false
         updateButtonState()
@@ -433,7 +426,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, GsmService::class.java).apply {
             action = GsmService.ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
         }
-        startService(intent)
+        if (!startGsmServiceSafely(intent)) return
         isTestAudioActive = true
         isServiceAudioActive = false
         pendingStartAudioTest = false
@@ -446,7 +439,7 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, GsmService::class.java).apply {
             action = GsmService.ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
         }
-        startService(intent)
+        if (!startGsmServiceSafely(intent)) return
         isServiceAudioActive = true
         isTestAudioActive = false
         updateButtonState()
@@ -457,12 +450,29 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, GsmService::class.java).apply {
             action = GsmService.ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
         }
-        startService(intent)
+        startGsmServiceSafely(intent)
         isTestAudioActive = false
         isServiceAudioActive = false
         pendingStartAudioTest = false
         updateButtonState()
         addLog("🛑 Test audio stopped")
+    }
+
+    private fun startGsmServiceSafely(intent: Intent): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
+            else startService(intent)
+            true
+        } catch (error: IllegalStateException) {
+            addLog("❌ Cannot start service right now: ${error.message}")
+            false
+        } catch (error: SecurityException) {
+            addLog("❌ Service start blocked by permissions: ${error.message}")
+            false
+        } catch (error: Exception) {
+            addLog("❌ Unexpected service start error: ${error.message}")
+            false
+        }
     }
 
     fun addLog(message: String) {
