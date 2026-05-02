@@ -53,17 +53,21 @@ class MainActivity : AppCompatActivity() {
     private var isServiceAudioActive = false
 
     private val logBuffer = StringBuilder()
+    private val logLock = Any()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     private var originalBrightness = -1f
     private var originalScreenTimeout: Long = -1
     private var hasCallPermissions = false
+    private var logUpdatePending = false
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
         private const val REQUEST_ROLE_DIALER = 200
+        private const val TAG = "GSM"
         private var instance: WeakReference<MainActivity>? = null
 
         fun log(message: String) {
+            android.util.Log.d(TAG, message)
             instance?.get()?.addLog(message)
         }
     }
@@ -137,8 +141,10 @@ class MainActivity : AppCompatActivity() {
         addLog("Android version: ${Build.VERSION.RELEASE}")
         if (!meetsMinAndroid) addLog("❌ Android ${Build.VERSION.RELEASE} unsupported - SERVICE mode requires Android 10+ (API 29)")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
-        val isRooted = RootUtils.isRooted()
-        addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
+        Thread {
+            val isRooted = RootUtils.isRooted()
+            addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
+        }.start()
 
         checkServiceStatus()
 
@@ -158,8 +164,12 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         checkNetworkAvailability()
+        // Re-check SIM on every resume — subscription list can be empty on first onCreate
+        if (hasPhoneStatePermission()) {
+            try { loadSimSelection() } catch (_: Exception) {}
+        }
         updateButtonState()
-        // 1. Re-check actual running state - handles crash/restart scenario
+        // Re-check actual running state - handles crash/restart scenario
         checkActualServiceState()
     }
 
@@ -476,39 +486,42 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun addLog(message: String) {
-        runOnUiThread {
-            val compactMessage = sanitizeLogMessage(message)
-            val timestamp = dateFormat.format(Date())
-            val logEntry = "[$timestamp] $compactMessage\n"
+        val compactMessage = sanitizeLogMessage(message)
+        val timestamp = dateFormat.format(Date())
+        val logEntry = "[$timestamp] $compactMessage\n"
+
+        val shouldPost: Boolean
+        synchronized(logLock) {
             logBuffer.append(logEntry)
-
+            // Trim to last 300 lines to bound memory — do string work off UI thread here
             val lines = logBuffer.lines()
-            if (lines.size > 500) {
+            if (lines.size > 300) {
                 logBuffer.clear()
-                logBuffer.append(lines.takeLast(500).joinToString("\n"))
+                logBuffer.append(lines.takeLast(300).joinToString("\n"))
             }
+            shouldPost = !logUpdatePending
+            if (shouldPost) logUpdatePending = true
+        }
 
-            logTextView.text = logBuffer.toString()
-            scrollView.post {
-                scrollView.fullScroll(ScrollView.FOCUS_DOWN)
+        if (!shouldPost) return  // UI update already queued, skip
+
+        runOnUiThread {
+            val snapshot = synchronized(logLock) {
+                logUpdatePending = false
+                logBuffer.toString()
             }
+            logTextView.text = snapshot
+            val child = scrollView.getChildAt(0) ?: return@runOnUiThread
+            val atBottom = scrollView.scrollY + scrollView.height >= child.height - 100
+            if (atBottom) scrollView.fullScroll(ScrollView.FOCUS_DOWN)
         }
     }
 
     private fun copyLastLogsToClipboard() {
-        val lines = logBuffer.lines().filter { it.isNotBlank() }
-        // Filter to show only important logs (errors, state changes, audio events)
-        val importantLogs = lines.filter { line ->
-            val lower = line.lowercase()
-            lower.contains("error") || lower.contains("call") || lower.contains("connected") ||
-                    lower.contains("warning") || lower.contains("fatal") || lower.contains("ended") ||
-                    lower.contains("started") || lower.contains("audio capture") || lower.contains("websocket") ||
-                    lower.contains("dtmf") || lower.contains("service") || lower.contains("permission")
-        }
-        val last30 = importantLogs.takeLast(30).joinToString("\n")
+        val logs = synchronized(logLock) { logBuffer.toString() }
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", last30))
-        addLog("📋 Copied ${importantLogs.takeLast(30).size} important logs to clipboard")
+        clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", logs))
+        addLog("📋 All logs copied to clipboard")
     }
 
     private fun sanitizeLogMessage(message: String): String {
@@ -599,6 +612,17 @@ class MainActivity : AppCompatActivity() {
         val subs = subMgr.activeSubscriptionInfoList ?: emptyList()
 
         if (subs.isEmpty()) {
+            // Fallback: check simState directly — activeSubscriptionInfoList can return empty
+            // on some devices during early startup even when a SIM is present.
+            val tm = getSystemService(Context.TELEPHONY_SERVICE) as android.telephony.TelephonyManager
+            val simReady = tm.simState == android.telephony.TelephonyManager.SIM_STATE_READY
+            if (simReady) {
+                addLog("⚠️ SubscriptionManager returned empty but SIM state=READY — treating as SIM available")
+                hasSimAvailable = true
+                findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
+                updateButtonState()
+                return
+            }
             hasSimAvailable = false
             addLog("❌ No SIM cards detected - GSM calling is unavailable")
             findViewById<View>(R.id.sim_selection_container).visibility = View.GONE

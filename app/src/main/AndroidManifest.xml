@@ -28,9 +28,9 @@
     <!-- Permissions for foreground service types (required on Android 14+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />  <!-- Added for microphone type -->
-    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />  <!-- Required for Android 14+ -->
-    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />  <!-- For overlays if needed, but optional -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Prevent app from being killed -->
@@ -76,10 +76,10 @@
                   android:turnScreenOn="true"
                   android:theme="@android:style/Theme.Translucent.NoTitleBar"
                   android:taskAffinity=""
-                  android:excludeFromRecents="true" />  <!-- Prevent dialer from closing app -->
+                  android:excludeFromRecents="true" />
 
         <service android:name=".GsmService" android:enabled="true" android:exported="false"
-                 android:foregroundServiceType="connectedDevice|microphone|mediaPlayback" />  <!-- Updated types -->
+                 android:foregroundServiceType="connectedDevice|microphone|mediaPlayback" />
 
         <!-- ConnectionService to allow app to be set as default dialer -->
         <service

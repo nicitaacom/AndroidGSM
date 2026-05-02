@@ -21,6 +21,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
 import org.json.JSONObject
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -44,6 +46,9 @@ class AudioWebSocketHandler(
     private var wsConnection: WebSocketAudioClient? = null
     private var seqTx = 0L
     private var seqRx = -1L
+
+    // Single consumer drains this channel — prevents flooding DefaultDispatcher with 50 coroutines/sec
+    private var playbackChannel = Channel<ShortArray>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     private val isRooted: Boolean by lazy { RootUtils.isRooted() }
 
@@ -90,7 +95,7 @@ class AudioWebSocketHandler(
                 seqRx = seq
             }
 
-            if (seq % 50L == 0L) MainActivity.log("WS-RX audio chunk seq=$seq")
+            if (seq % 50L == 0L) Log.d(TAG, "WS-RX audio chunk seq=$seq")
             playAudioChunk(audio, seq)
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error handling audio packet: ${exception.message}")
@@ -124,10 +129,10 @@ class AudioWebSocketHandler(
 
         try {
             MainActivity.log("🎤 WebSocket: Starting capture...")
-            if (isCallActive) {
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = false // earpiece only - eliminates feedback physically
-            }
+            // Always use MODE_IN_COMMUNICATION + earpiece so hardware AEC suppresses feedback.
+            // Speakerphone causes a mic→speaker→mic loop regardless of mode.
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
 
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid buffer size"); return }
@@ -141,8 +146,11 @@ class AudioWebSocketHandler(
                 return
             }
 
-            // 3. Recreate scope if previous was cancelled (happens after stopTestAudio nulls the handler)
+            // 3. Recreate scope and channel if previous session was cancelled
             scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            playbackChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+            hpfPrev = 0f
+            hpfPrevIn = 0f
 
             isRecording = true
             audioRecord?.startRecording()
@@ -229,21 +237,65 @@ class AudioWebSocketHandler(
         return null
     }
 
+    // High-pass filter state (single-pole IIR, cutoff ~80Hz at 16kHz)
+    // y[n] = α * (y[n-1] + x[n] - x[n-1])
+    // α = RC / (RC + dt), RC = 1/(2π*fc), dt = 1/fs
+    private var hpfPrev: Float = 0f
+    private var hpfPrevIn: Float = 0f
+    private val hpfAlpha: Float = run {
+        val fc = 80.0
+        val rc = 1.0 / (2.0 * Math.PI * fc)
+        val dt = 1.0 / SAMPLE_RATE
+        (rc / (rc + dt)).toFloat()
+    }
+
+    // Noise gate: RMS threshold below which the chunk is dropped (not transmitted)
+    // 0.008f ≈ -42 dBFS — enough to kill background hiss, won't cut normal speech
+    private val NOISE_GATE_RMS_THRESHOLD = 0.008f
+
+    private fun applyHighPassFilter(samples: ShortArray, count: Int) {
+        for (i in 0 until count) {
+            val x = samples[i].toFloat() / Short.MAX_VALUE
+            val y = hpfAlpha * (hpfPrev + x - hpfPrevIn)
+            hpfPrevIn = x
+            hpfPrev = y
+            samples[i] = (y * Short.MAX_VALUE).toInt()
+                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+        }
+    }
+
+    private fun rms(samples: ShortArray, count: Int): Float {
+        var sum = 0.0
+        for (i in 0 until count) sum += (samples[i].toDouble() / Short.MAX_VALUE).let { it * it }
+        return Math.sqrt(sum / count).toFloat()
+    }
+
     private suspend fun captureAndStreamAudio(bufferSize: Int) = withContext(Dispatchers.IO) {
         val buffer = ShortArray(bufferSize / 2)
         var chunkCount = 0
+        var gatedCount = 0
 
         while (isRecording) {
             try {
                 val read = audioRecord?.read(buffer, 0, buffer.size) ?: 0
 
                 if (read > 0) {
+                    // 1. High-pass filter — remove rumble/hum below ~80Hz
+                    applyHighPassFilter(buffer, read)
+
+                    // 2. Noise gate — skip chunk if RMS is below threshold
+                    if (rms(buffer, read) < NOISE_GATE_RMS_THRESHOLD) {
+                        gatedCount++
+                        if (gatedCount % 50 == 0) Log.d(TAG, "🔇 Noise gate: $gatedCount chunks suppressed")
+                        continue
+                    }
+
                     val byteBuffer = ByteArray(read * 2)
                     ByteBuffer.wrap(byteBuffer).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(buffer, 0, read)
                     val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
                     val seq = seqTx++
                     wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-                    if (seq % 50L == 0L) MainActivity.log("WS-SEND audio chunk seq=$seq")
+                    if (seq % 50L == 0L) Log.d(TAG, "WS-SEND audio chunk seq=$seq")
                     chunkCount++
                 } else if (read < 0) {
                     Log.e(TAG, "❌ Read error: $read")
@@ -254,7 +306,7 @@ class AudioWebSocketHandler(
                 break
             }
         }
-        Log.d(TAG, "Capture ended: $chunkCount chunks")
+        Log.d(TAG, "Capture ended: $chunkCount chunks sent, $gatedCount gated")
     }
 
     fun startAudioPlayback() {
@@ -262,14 +314,10 @@ class AudioWebSocketHandler(
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
-            if (isCallActive) {
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = false
-            } else {
-                // TEST mode: MODE_IN_COMMUNICATION enables hardware AEC so mic won't pick up speaker output
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = true
-            }
+            // Earpiece in all modes — speakerphone causes mic→speaker→mic feedback loop.
+            // Hardware AEC on VOICE_COMMUNICATION stream handles echo suppression.
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
 
             val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
@@ -295,7 +343,8 @@ class AudioWebSocketHandler(
 
             isPlaying = true
             audioTrack?.play()
-            MainActivity.log("✅ Playback started - mode: ${if (isCallActive) "CALL/earpiece" else "TEST/speaker+AEC"}")
+            startPlaybackConsumer()
+            MainActivity.log("✅ Playback started - earpiece/AEC mode")
         } catch (exception: Exception) {
             MainActivity.log("❌ ERROR starting playback: ${exception.message}")
         }
@@ -303,62 +352,61 @@ class AudioWebSocketHandler(
 
     fun setCallActive(active: Boolean) {
         isCallActive = active
-        MainActivity.log("WebSocket call state: $active")
+        Log.d(TAG, "WebSocket call state: $active")
     }
 
     private fun playAudioChunk(base64Audio: String, seq: Long = -1) {
         if (!isPlaying) return
-        if (!scope.coroutineContext[Job]!!.isActive) return
+        if (base64Audio.isBlank()) return
 
-        scope.launch {
-            try {
-                if (base64Audio.isBlank()) { Log.w(TAG, "⚠️ Empty audio chunk"); return@launch }
+        val audioBytes = try {
+            Base64.decode(base64Audio, Base64.NO_WRAP)
+        } catch (e: IllegalArgumentException) {
+            Log.e(TAG, "❌ Base64 decode failed: ${e.message}")
+            return
+        }
+        if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) return
 
-                val audioBytes = try {
-                    Base64.decode(base64Audio, Base64.NO_WRAP)
-                } catch (exception: IllegalArgumentException) {
-                    Log.e(TAG, "❌ Base64 decode failed: ${exception.message}")
-                    return@launch
+        val shortBuffer = ShortArray(audioBytes.size / 2)
+        ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
+
+        val gain = 0.7f
+        for (i in shortBuffer.indices) {
+            shortBuffer[i] = (shortBuffer[i] * gain).toInt()
+                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+        }
+
+        // Non-blocking offer — channel drops oldest if full (brief network burst), no coroutine launched
+        playbackChannel.trySend(shortBuffer)
+    }
+
+    private fun startPlaybackConsumer() {
+        scope.launch(Dispatchers.IO) {
+            for (samples in playbackChannel) {
+                if (!isPlaying) break
+                try {
+                    val track = audioTrack ?: break
+                    if (track.state != AudioTrack.STATE_INITIALIZED) break
+                    if (track.playState != AudioTrack.PLAYSTATE_PLAYING) continue
+                    val written = track.write(samples, 0, samples.size)
+                    if (written < 0) Log.e(TAG, "❌ AudioTrack write error: $written")
+                } catch (t: Throwable) {
+                    if (t !is kotlinx.coroutines.CancellationException) Log.e(TAG, "❌ Playback consumer error: ${t.message}")
+                    break
                 }
-
-                if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) { Log.e(TAG, "❌ Invalid audio size"); return@launch }
-
-                val shortBuffer = ShortArray(audioBytes.size / 2)
-                ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
-
-                val gain = 0.7f
-                for (index in shortBuffer.indices) {
-                    val amplified = (shortBuffer[index] * gain).toInt()
-                    shortBuffer[index] = amplified.coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
-                }
-
-                // 2. Check isPlaying immediately before write - stopAudioPlayback() sets false before release
-                if (!isPlaying) return@launch
-                val track = audioTrack ?: return@launch
-                if (track.state != AudioTrack.STATE_INITIALIZED) return@launch
-
-                val written = track.write(shortBuffer, 0, shortBuffer.size)
-                when {
-                    written == AudioTrack.ERROR_INVALID_OPERATION -> { Log.e(TAG, "❌ ERROR_INVALID_OPERATION"); isPlaying = false }
-                    written == AudioTrack.ERROR_BAD_VALUE -> { Log.e(TAG, "❌ ERROR_BAD_VALUE"); isPlaying = false }
-                    written < 0 -> Log.e(TAG, "❌ AudioTrack write error: $written")
-                    written != shortBuffer.size -> Log.w(TAG, "⚠️ Partial write: $written/${shortBuffer.size}")
-                    else -> Log.d(TAG, "✅ Wrote ${shortBuffer.size} samples")
-                }
-            } catch (exception: Exception) {
-                Log.e(TAG, "❌ Error playing chunk: ${exception.message}")
             }
+            Log.d(TAG, "Playback consumer exited")
         }
     }
 
     fun stopAudioPlayback() {
         try {
-            // 1. Set flags first so in-flight coroutines bail before calling write()
             isPlaying = false
             val track = audioTrack
             audioTrack = null
-            // 2. Small delay to let any coroutine past the guard finish its current write()
-            Thread.sleep(60)
+            // Close channel to unblock consumer coroutine, then recreate for next session
+            playbackChannel.close()
+            playbackChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
             track?.stop()
             track?.release()
             scope.cancel()

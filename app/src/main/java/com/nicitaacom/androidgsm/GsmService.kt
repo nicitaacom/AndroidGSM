@@ -40,15 +40,15 @@ class GsmService : Service() {
                         try {
                             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                            audioManager.isSpeakerphoneOn = true
+                            audioManager.isSpeakerphoneOn = false
 
                             Thread {
                                 try {
                                     // 1. Re-init WS handler if null — call can arrive without SERVICE mode active
                                     if (audioWsHandler == null) {
                                         config?.let { safeConfig ->
-                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
-                                    }
+                                            audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
+                                        }
                                         val wsUrl = config?.BACKEND_URL
                                             ?.replace("http://", "ws://")
                                             ?.replace("https://", "wss://")
@@ -304,7 +304,7 @@ class GsmService : Service() {
                 }
                 if (audioWsHandler == null) {
                     config?.let { safeConfig ->
-                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
+                                        audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
                                     }
                 }
                 MainActivity.log("GsmService: Audio handlers initialized")
@@ -402,7 +402,7 @@ class GsmService : Service() {
                 // 2. Init WS handler if needed
                 if (audioWsHandler == null) {
                     config?.let { safeConfig ->
-                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
+                                        audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
                                     }
                     MainActivity.log("Test audio: WebSocket handler initialized")
                 }
@@ -465,42 +465,20 @@ class GsmService : Service() {
 
         isServiceAudioActive = true
 
+        // SERVICE mode: just connect to backend and wait for CALL_STARTED command.
+        // Audio capture/playback starts only when a call connects (OFFHOOK via GsmDialer callback).
+        // Do NOT start audio here — REMOTE_SUBMIX would stream all system sounds.
         Thread {
             try {
-                // 1. Re-init handler fresh each start to avoid stale WS state (same as TEST mode)
-                if (audioWsHandler == null) {
-                    config?.let { safeConfig ->
-                                        audioWsHandler = AudioWebSocketHandler(this, safeConfig) { _: ShortArray -> }
-                                    }
-                    MainActivity.log("SERVICE audio: WebSocket handler initialized")
+                // Wait for Pusher to be ready
+                val deadline = System.currentTimeMillis() + 5000
+                while (pusherClient == null && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(300)
                 }
-
-                val ws = audioWsHandler ?: run {
-                    isServiceAudioActive = false
-                    return@Thread
-                }
-
-                val wsUrl = baseUrl
-                    .replace("http://", "ws://")
-                    .replace("https://", "wss://")
-                    .removeSuffix("/") + "/ws/audio"
-
-                // 2. Use callActive=false during init — same path as TEST mode to avoid crash
-                // Call audio routing is handled separately by callStateReceiver broadcast
-                ws.setCallActive(false)
-                ws.connect(wsUrl, bearerToken, deviceToken)
-                Thread.sleep(500)
-
-                // 3. Start duplex — mic capture + inbound playback
-                ws.startAudioPlayback()
-                ws.startAudioCapture()
-
-                // 4. Notify server so connectedDevices stays alive
-                pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap()) // reuse existing frontend handler
                 pusherClient?.sendEvent("CONNECTED", emptyMap())
-                MainActivity.log("✅ SERVICE mode active: duplex android<->server<->browser")
+                MainActivity.log("✅ SERVICE mode active: connected to backend, waiting for CALL_STARTED")
             } catch (error: Exception) {
-                MainActivity.log("ERROR starting SERVICE audio: ${error.message}")
+                MainActivity.log("ERROR in SERVICE start: ${error.message}")
                 isServiceAudioActive = false
             }
         }.start()
@@ -659,11 +637,10 @@ class GsmService : Service() {
                 override fun onCallStateChanged(state: Int, phoneNumber: String?) {
                     when (state) {
                         TelephonyManager.CALL_STATE_OFFHOOK -> {
-                            // Call is active - ensure audio mode is set correctly
                             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                            audioManager.isSpeakerphoneOn = true
-                            MainActivity.log("PhoneStateListener: OFFHOOK - set MODE_IN_COMMUNICATION")
+                            audioManager.isSpeakerphoneOn = false
+                            MainActivity.log("PhoneStateListener: OFFHOOK - set MODE_IN_COMMUNICATION + earpiece")
                         }
                         TelephonyManager.CALL_STATE_IDLE -> {
                             // Call ended - reset audio mode
