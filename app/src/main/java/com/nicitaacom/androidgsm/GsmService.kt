@@ -116,6 +116,7 @@ class GsmService : Service() {
     override fun onCreate() {
         super.onCreate()
         try {
+            AppContextHolder.ctx = applicationContext
             MainActivity.log("GsmService: onCreate called")
 
             // 1. Create notification channels FIRST
@@ -593,8 +594,6 @@ class GsmService : Service() {
                 if (started) {
                     MainActivity.log("Call started via GsmDialer to $number")
                 } else {
-                                    // expose application context to other components
-                                    AppContextHolder.ctx = applicationContext
                     MainActivity.log("Call start failed - syncing CALL_ENDED state")
                     audioStreamHandler?.stopAudioCapture()
                     audioStreamHandler?.stopAudioPlayback()

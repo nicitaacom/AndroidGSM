@@ -23,10 +23,19 @@ object RootUtils {
 
     private fun runSuCommand(command: String): Pair<Int, String> {
         val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
-        val out = process.inputStream.bufferedReader().use { it.readText() }
-        val err = process.errorStream.bufferedReader().use { it.readText() }
-        val exit = process.waitFor()
-        return exit to (out + "\n" + err).trim()
+        // Drain streams on separate threads to avoid blocking waitFor()
+        var out = ""
+        var err = ""
+        val outThread = Thread { out = process.inputStream.bufferedReader().readText() }.also { it.start() }
+        val errThread = Thread { err = process.errorStream.bufferedReader().readText() }.also { it.start() }
+        val finished = process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
+        if (!finished) {
+            process.destroy()
+            return -1 to "timeout"
+        }
+        outThread.join(500)
+        errThread.join(500)
+        return process.exitValue() to (out + "\n" + err).trim()
     }
 
     private fun logRootState(rooted: Boolean, reason: String): Boolean {

@@ -3,22 +3,21 @@ package com.nicitaacom.androidgsm
 import android.Manifest
 import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioManager
 import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
-import android.media.AudioManager
 import android.telephony.PhoneStateListener
-import android.telephony.SubscriptionManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
-import android.os.PowerManager
 
 
 class GsmDialer(private val context: Context) {
@@ -28,14 +27,38 @@ class GsmDialer(private val context: Context) {
     private var onCallEnded: (() -> Unit)? = null
     private var onCallConnected: (() -> Unit)? = null
 
+    companion object {
+        const val PHONE_ACCOUNT_ID = "androidgsm_connection"
+    }
+
     init {
         telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+        registerPhoneAccount()
 
         // 1. check permission once
         if (hasPermission(Manifest.permission.READ_PHONE_STATE)) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) registerModernCallback()
             else registerLegacyCallback()
         } else MainActivity.log("⚠️ READ_PHONE_STATE permission missing - call state monitoring disabled")
+    }
+
+    // Register our ConnectionService PhoneAccount so placeCall() routes through GsmConnectionService
+    // without opening the system dialer UI.
+    private fun registerPhoneAccount() {
+        try {
+            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            val handle = PhoneAccountHandle(
+                ComponentName(context, GsmConnectionService::class.java),
+                PHONE_ACCOUNT_ID
+            )
+            val account = PhoneAccount.builder(handle, "AndroidGSM")
+                .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
+                .build()
+            telecomManager.registerPhoneAccount(account)
+            MainActivity.log("✅ PhoneAccount registered for GsmConnectionService")
+        } catch (e: Exception) {
+            MainActivity.log("⚠️ PhoneAccount registration failed: ${e.message}")
+        }
     }
 
     // 2. modern API (Android 12+)
@@ -95,6 +118,12 @@ class GsmDialer(private val context: Context) {
                 return false
             }
 
+            val simState = telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
+            if (simState != TelephonyManager.SIM_STATE_READY) {
+                MainActivity.log("ERROR: SIM not ready (state: $simState)")
+                return false
+            }
+
             // 1. wake up screen if locked
             try {
                 val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -102,71 +131,26 @@ class GsmDialer(private val context: Context) {
                     PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
                     "GsmDialer::CallWakeLock"
                 )
-                wakeLock.acquire(3000) // 3 seconds
+                wakeLock.acquire(3000)
                 MainActivity.log("Screen wake lock acquired for call")
             } catch (error: Exception) {
                 MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
             }
 
-            val prefs = context.getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-            val selectedSubId = prefs.getInt("selected_sim", -1)
-
-            var handle: PhoneAccountHandle? = null
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-
-            if (selectedSubId != -1 && hasPermission(Manifest.permission.READ_PHONE_STATE)) {
-                val subMgr = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
-                val subInfo = subMgr.getActiveSubscriptionInfo(selectedSubId)
-
-                if (subInfo != null) {
-                    val targetAccount = telecomManager.callCapablePhoneAccounts.firstOrNull { account ->
-                        val extras = telecomManager.getPhoneAccount(account)?.extras
-                        val subIdFromExtras = extras?.getInt(SubscriptionManager.EXTRA_SUBSCRIPTION_INDEX, -1)
-                            ?: extras?.getInt("android.telephony.extra.SUBSCRIPTION_INDEX", -1)
-                            ?: extras?.getInt("android.telephony.extra.SUBSCRIPTION_ID", -1)
-                            ?: -1
-
-                        subIdFromExtras == selectedSubId
-                    }
-
-                    if (targetAccount != null) {
-                        handle = targetAccount
-                        MainActivity.log("Using PhoneAccountHandle for SIM slot ${subInfo.simSlotIndex + 1} (SubId: $selectedSubId)")
-                    } else {
-                        MainActivity.log("WARNING: Could not find PhoneAccount for SubId $selectedSubId - using default")
-                    }
-                } else {
-                    MainActivity.log("Selected subId invalid or inactive - falling back to default SIM")
-                }
-            } else if (selectedSubId != -1) {
-                MainActivity.log("READ_PHONE_STATE missing - cannot select specific SIM, using default")
-            }
-
-            val simState = telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
-
-            if (simState != TelephonyManager.SIM_STATE_READY) {
-                MainActivity.log("ERROR: SIM not ready (state: $simState)")
-                return false
-            }
-
-            // 2. Place call through TelecomManager on modern Android to avoid SIM picker fallback.
             val uri = Uri.parse("tel:$number")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                val extras = Bundle().apply {
-                    handle?.let { putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, it) }
-                }
-                telecomManager.placeCall(uri, extras)
-            } else {
-                val intent = Intent(Intent.ACTION_CALL).apply {
-                    data = uri
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                    if (handle != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                        putExtra(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
-                    }
-                }
-                context.startActivity(intent)
+
+            // 2. Always route through our registered PhoneAccountHandle so GsmConnectionService
+            // handles the call — this prevents the system dialer UI from opening.
+            val ourHandle = PhoneAccountHandle(
+                ComponentName(context, GsmConnectionService::class.java),
+                PHONE_ACCOUNT_ID
+            )
+            val extras = Bundle().apply {
+                putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, ourHandle)
             }
-            MainActivity.log("GsmDialer: Call started to $number")
+            telecomManager.placeCall(uri, extras)
+            MainActivity.log("GsmDialer: placeCall() dispatched via GsmConnectionService to $number")
             return true
         } catch (exception: Exception) {
             MainActivity.log("ERROR starting call: ${exception.message}")
