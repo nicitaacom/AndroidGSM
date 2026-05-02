@@ -149,7 +149,6 @@ class PusherClient(
 
                     override fun onEvent(event: com.pusher.client.channel.PusherEvent) {
                         try {
-                            MainActivity.log("Pusher event: ${event.eventName} -> ${event.data}")
                             if (event.eventName == "command") handleCommand(event.data)
                         } catch (error: Exception) {
                             MainActivity.log("❌ ERROR in onEvent: ${error.message}")
@@ -168,7 +167,6 @@ class PusherClient(
 
     private fun handleCommand(jsonData: String) {
         try {
-            MainActivity.log("Command received raw: $jsonData")
             val json = JSONObject(jsonData)
             val type = json.optString("type")
             val dataObj = if (json.has("data")) json.getJSONObject("data") else JSONObject()
@@ -179,16 +177,23 @@ class PusherClient(
                 "CALL_STARTED" -> {
                     val number = dataMap["number"]?.toString() ?: dataObj.optString("number")
                     if (!number.isNullOrEmpty()) {
-                        MainActivity.log("COMMAND -> CALL_STARTED $number")
+                        MainActivity.log("📞 CALL_STARTED → $number")
                         service.handleCommand("CALL_STARTED", mapOf("number" to number))
                     } else MainActivity.log("CALL_STARTED missing number")
                 }
                 "CALL_ENDED" -> {
-                    MainActivity.log("COMMAND -> CALL_ENDED")
+                    MainActivity.log("📴 CALL_ENDED")
                     service.handleCommand("CALL_ENDED", emptyMap())
                 }
-                "SEND_DTMF" -> service.handleCommand("SEND_DTMF", dataMap)
-                "AUDIO_CHUNK" -> service.handleCommand("AUDIO_CHUNK", dataMap)
+                "SEND_DTMF" -> {
+                    MainActivity.log("🔢 SEND_DTMF: ${dataMap["digit"]}")
+                    service.handleCommand("SEND_DTMF", dataMap)
+                }
+                "AUDIO_CHUNK" -> {
+                    // Fallback path — audio via Pusher instead of WebSocket. Log to logcat only.
+                    Log.d("PusherClient", "AUDIO_CHUNK via Pusher (fallback)")
+                    service.handleCommand("AUDIO_CHUNK", dataMap)
+                }
                 else -> MainActivity.log("Unknown command type: $type")
             }
         } catch (error: Exception) {

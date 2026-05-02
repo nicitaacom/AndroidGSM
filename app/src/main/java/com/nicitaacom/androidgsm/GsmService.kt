@@ -28,6 +28,7 @@ class GsmService : Service() {
     private var config: Config? = null
     private var isTestAudioActive = false
     private var isServiceAudioActive = false
+    private var isCallActive = false
     private var telephonyManager: TelephonyManager? = null
     private var phoneStateListener: PhoneStateListener? = null
     private val callStateReceiver: BroadcastReceiver = object : BroadcastReceiver() {
@@ -170,6 +171,26 @@ class GsmService : Service() {
                 // init dialer
                 gsmDialer = GsmDialer(this)
                 MainActivity.log("GsmService: GsmDialer initialized")
+
+                // Set callbacks once at init — these fire on ANY call state change,
+                // including manual hang-up or remote party ending the call.
+                gsmDialer?.setCallEndedCallback {
+                    if (!isCallActive) return@setCallEndedCallback  // ignore IDLE fired on boot/init
+                    isCallActive = false
+                    MainActivity.log("📴 Call ended (IDLE) — stopping audio, notifying backend")
+                    try {
+                        audioWsHandler?.setCallActive(false)
+                        audioWsHandler?.stopAudioCapture()
+                        audioWsHandler?.stopAudioPlayback()
+                        audioWsHandler?.disconnect()
+                        audioWsHandler = null
+                    } catch (_: Exception) {}
+                    Thread { pusherClient?.sendEvent("CALL_ENDED", emptyMap()) }.start()
+                }
+                gsmDialer?.setCallConnectedCallback {
+                    isCallActive = true
+                    MainActivity.log("📞 Call connected (OFFHOOK)")
+                }
                 // Register for broadcasts from ConnectionService (default-dialer)
                 try {
                     val filter = IntentFilter().apply {
@@ -500,7 +521,7 @@ class GsmService : Service() {
     // central command dispatcher - single entrypoint
     fun handleCommand(type: String, data: Map<String, Any>) {
         try {
-            MainActivity.log("Command received: $type")
+            if (type != "AUDIO_CHUNK") MainActivity.log("Command received: $type")
 
             val normalizedType = when (type) {
                 "MAKE_CALL", "CALL_START" -> "CALL_STARTED"
@@ -529,41 +550,31 @@ class GsmService : Service() {
             }
             MainActivity.log("Starting call to: $number")
 
-            // 1. set callbacks BEFORE starting call
+            // Override onCallConnected for this call — sets up WS audio for SERVICE mode
             gsmDialer?.setCallConnectedCallback {
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = false // earpiece, not speaker
+                audioManager.isSpeakerphoneOn = false
 
                 Thread {
                     try {
                         val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")
                             ?.replace("https://", "wss://")?.removeSuffix("/") + "/ws/audio"
-                        Thread.sleep(300)
+                        if (audioWsHandler == null) {
+                            config?.let { c -> audioWsHandler = AudioWebSocketHandler(this@GsmService, c) { } }
+                        }
                         audioWsHandler?.connect(wsUrl, config?.BACKEND_BEARER ?: "", config?.DEVICE_TOKEN ?: "")
+                        Thread.sleep(300)
+                        isCallActive = true
                         audioWsHandler?.setCallActive(true)
                         audioWsHandler?.startAudioCapture()
                         audioWsHandler?.startAudioPlayback()
                         pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                        MainActivity.log("SERVICE call connected: Android audio input -> server.ts, and server.ts -> Android audio input (call path)")
+                        MainActivity.log("📞 WS audio started for call")
                     } catch (error: Exception) {
                         MainActivity.log("ERROR in CALL_CONNECTED callback: ${error.message}")
                     }
                 }.start()
-            }
-
-            gsmDialer?.setCallEndedCallback {
-                try {
-                    MainActivity.log("Call ended - stopping audio and WebSocket")
-                    audioStreamHandler?.stopAudioCapture()
-                    audioStreamHandler?.stopAudioPlayback()
-                    audioWsHandler?.setCallActive(false)
-                    audioWsHandler?.disconnect()
-                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
-                } catch (e: Exception) {
-                    MainActivity.log("ERROR in CALL_ENDED callback: ${e.message}")
-                    e.printStackTrace()
-                }
             }
 
             // 2. start call with error handling

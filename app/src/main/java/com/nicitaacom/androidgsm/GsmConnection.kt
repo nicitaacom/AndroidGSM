@@ -25,14 +25,12 @@ class GsmConnection : Connection() {
 
     override fun onDisconnect() {
         try {
-            MainActivity.log("GsmConnection: onDisconnect called - broadcasting DISCONNECTED")
-            
+            MainActivity.log("GsmConnection: onDisconnect — user or remote ended call")
             val audioManager = AppContextHolder.ctx?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             audioManager?.mode = AudioManager.MODE_NORMAL
-            
             setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
-            val intent = Intent(GsmService.ACTION_CALL_DISCONNECTED_BROADCAST)
-            AppContextHolder.ctx?.sendBroadcast(intent)
+            // Broadcast so GsmService callStateReceiver also cleans up
+            AppContextHolder.ctx?.sendBroadcast(Intent(GsmService.ACTION_CALL_DISCONNECTED_BROADCAST))
             destroy()
         } catch (e: Exception) {
             MainActivity.log("GsmConnection onDisconnect error: ${e.message}")

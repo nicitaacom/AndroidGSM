@@ -210,15 +210,8 @@ class AudioStreamHandler(
         try {
             MainActivity.log("🔊 Starting audio playback...")
 
-            // Route playback to default media output device (speaker/headphones).
-            audioManager.mode = AudioManager.MODE_NORMAL
-            audioManager.isSpeakerphoneOn = true
-
-            audioManager.setStreamVolume(
-                AudioManager.STREAM_MUSIC,
-                audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC),
-                0
-            )
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
 
             val bufferSize = AudioTrack.getMinBufferSize(
                 SAMPLE_RATE,
@@ -265,7 +258,7 @@ class AudioStreamHandler(
     }
 
     fun playAudioChunk(base64Audio: String) {
-        if (!isPlaying) startAudioPlayback()
+        if (!isPlaying) return  // never auto-start — caller must explicitly start playback
         
         scope.launch {
             // 1. Wrap entire coroutine — any exception here must never crash the process

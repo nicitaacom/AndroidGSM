@@ -55,6 +55,8 @@ class AudioWebSocketHandler(
     companion object {
         private const val TAG = "AudioWebSocket"
         private const val SAMPLE_RATE = 16000
+        @Volatile var micGain: Float = 1.0f
+        @Volatile var playbackGain: Float = 0.7f
         private const val CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
         private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
@@ -91,7 +93,8 @@ class AudioWebSocketHandler(
             }
 
             if (seq != -1L) {
-                if (seq < seqRx) { Log.w(TAG, "⚠️ Out of order: got seq=$seq, expected > $seqRx"); return }
+                if (seq < seqRx && seqRx - seq < 10000) { Log.w(TAG, "⚠️ Out of order: got seq=$seq, expected > $seqRx"); return }
+            if (seq < seqRx) seqRx = seq  // seq wrapped/reset (new session) — accept and resync
                 seqRx = seq
             }
 
@@ -251,7 +254,7 @@ class AudioWebSocketHandler(
 
     // Noise gate: RMS threshold below which the chunk is dropped (not transmitted)
     // 0.008f ≈ -42 dBFS — enough to kill background hiss, won't cut normal speech
-    private val NOISE_GATE_RMS_THRESHOLD = 0.008f
+    private val NOISE_GATE_RMS_THRESHOLD = 0.002f
 
     private fun applyHighPassFilter(samples: ShortArray, count: Int) {
         for (i in 0 until count) {
@@ -283,12 +286,16 @@ class AudioWebSocketHandler(
                     // 1. High-pass filter — remove rumble/hum below ~80Hz
                     applyHighPassFilter(buffer, read)
 
-                    // 2. Noise gate — skip chunk if RMS is below threshold
-                    if (rms(buffer, read) < NOISE_GATE_RMS_THRESHOLD) {
-                        gatedCount++
-                        if (gatedCount % 50 == 0) Log.d(TAG, "🔇 Noise gate: $gatedCount chunks suppressed")
-                        continue
+                    // Apply mic gain
+                    if (micGain != 1.0f) {
+                        for (i in 0 until read) {
+                            buffer[i] = (buffer[i] * micGain).toInt()
+                                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+                        }
                     }
+
+                    // Noise gate disabled — threshold was too aggressive, cutting speech
+                    // if (rms(buffer, read) < NOISE_GATE_RMS_THRESHOLD) { gatedCount++; continue }
 
                     val byteBuffer = ByteArray(read * 2)
                     ByteBuffer.wrap(byteBuffer).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(buffer, 0, read)
@@ -370,10 +377,12 @@ class AudioWebSocketHandler(
         val shortBuffer = ShortArray(audioBytes.size / 2)
         ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
 
-        val gain = 0.7f
-        for (i in shortBuffer.indices) {
-            shortBuffer[i] = (shortBuffer[i] * gain).toInt()
-                .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+        val gain = playbackGain
+        if (gain != 1.0f) {
+            for (i in shortBuffer.indices) {
+                shortBuffer[i] = (shortBuffer[i] * gain).toInt()
+                    .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+            }
         }
 
         // Non-blocking offer — channel drops oldest if full (brief network burst), no coroutine launched

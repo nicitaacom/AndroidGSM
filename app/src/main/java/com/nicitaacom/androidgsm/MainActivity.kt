@@ -22,6 +22,7 @@ import android.widget.Button
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.TextView
 import android.telecom.TelecomManager
 import androidx.appcompat.app.AppCompatActivity
@@ -43,6 +44,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private lateinit var versionTextView: TextView
+    private lateinit var micGainSeekBar: SeekBar
+    private lateinit var micGainLabel: TextView
+    private lateinit var playbackVolSeekBar: SeekBar
+    private lateinit var playbackVolLabel: TextView
     private var hasSimAvailable = true
     private var hasInternetConnection = true
     private var hasRequiredPermissions = false
@@ -101,6 +106,40 @@ class MainActivity : AppCompatActivity() {
         versionTextView = findViewById(R.id.versionTextView)
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
         evaluateVersionFreshness()
+
+        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        micGainSeekBar = findViewById(R.id.micGainSeekBar)
+        micGainLabel = findViewById(R.id.micGainLabel)
+        playbackVolSeekBar = findViewById(R.id.playbackVolSeekBar)
+        playbackVolLabel = findViewById(R.id.playbackVolLabel)
+
+        micGainSeekBar.progress = prefs.getInt("mic_gain_progress", 100)
+        playbackVolSeekBar.progress = prefs.getInt("playback_vol_progress", 70)
+        updateGainLabels()
+
+        micGainSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                updateGainLabels()
+                prefs.edit { putInt("mic_gain_progress", progress) }
+                AudioWebSocketHandler.micGain = progress / 100f
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+
+        playbackVolSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
+                updateGainLabels()
+                prefs.edit { putInt("playback_vol_progress", progress) }
+                AudioWebSocketHandler.playbackGain = progress / 100f
+            }
+            override fun onStartTrackingTouch(sb: SeekBar) {}
+            override fun onStopTrackingTouch(sb: SeekBar) {}
+        })
+
+        // Apply saved values immediately
+        AudioWebSocketHandler.micGain = micGainSeekBar.progress / 100f
+        AudioWebSocketHandler.playbackGain = playbackVolSeekBar.progress / 100f
 
         toggleButton.setOnClickListener {
             when {
@@ -522,6 +561,11 @@ class MainActivity : AppCompatActivity() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", logs))
         addLog("📋 All logs copied to clipboard")
+    }
+
+    private fun updateGainLabels() {
+        micGainLabel.text = "%.1fx".format(micGainSeekBar.progress / 100f)
+        playbackVolLabel.text = "%.1fx".format(playbackVolSeekBar.progress / 100f)
     }
 
     private fun sanitizeLogMessage(message: String): String {
