@@ -528,7 +528,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
       ws.onopen = () => {
         resetInboundAudioState()
-        setIsReady(true)
         setError("")
         if (audioContextRef.current?.state === "suspended") audioContextRef.current.resume().catch(() => {})
 

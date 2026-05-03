@@ -5,6 +5,8 @@ Android foreground service that exposes **real GSM calls** to a backend via
 
 Phone = modem. Backend = brain.
 
+The architecture is a Rube Goldberg machine wearing a suit
+
 ---
 
 ## First-time setup (Kali / no Android SDK)

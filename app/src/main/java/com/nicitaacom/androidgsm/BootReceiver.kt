@@ -11,12 +11,8 @@ class BootReceiver : BroadcastReceiver() {
         if (context == null || intent == null) return
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
 
-        Log.d("BootReceiver", "Boot completed, starting GsmService")
-        val serviceIntent = Intent(context, GsmService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(serviceIntent)
-        } else {
-            context.startService(serviceIntent)
-        }
+        // Do not auto-start on boot — user must explicitly tap START SERVICE.
+        // Auto-starting would send heartbeats indefinitely without user intent.
+        Log.d("BootReceiver", "Boot completed — not auto-starting service")
     }
 }

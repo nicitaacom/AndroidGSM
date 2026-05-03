@@ -256,34 +256,31 @@ class GsmService : Service() {
             startForegroundSafely(notification)
             MainActivity.log("GsmService: Foreground started")
 
-            // Ensure realtime clients are initialized for BOTH default starts and explicit action starts.
-            // Android may deliver only the latest intent when multiple startService calls happen quickly,
-            // so action-only starts must not skip Pusher/WS initialization.
-            ensureRealtimeClientsInitialized()
-
             when (intent?.action) {
                 ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT -> {
+                    ensureRealtimeClientsInitialized()
                     startTestDuplexMicToServerAndServerToOutput()
-                    return START_STICKY
+                    return START_NOT_STICKY
                 }
                 ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT -> {
                     stopTestDuplexMicToServerAndServerToOutput()
-                    return START_STICKY
+                    return START_NOT_STICKY
                 }
                 ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT -> {
+                    ensureRealtimeClientsInitialized()
                     startServiceDuplexOutputToServerAndServerToInput()
-                    return START_STICKY
+                    return START_NOT_STICKY
                 }
                 ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT -> {
                     stopServiceDuplexOutputToServerAndServerToInput()
-                    return START_STICKY
+                    return START_NOT_STICKY
                 }
             }
 
         } catch (error: Exception) {
             MainActivity.log("ERROR in onStartCommand: ${error.message}")
         }
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     private fun ensureRealtimeClientsInitialized() {
@@ -460,9 +457,14 @@ class GsmService : Service() {
         audioWsHandler?.stopAudioCapture()
         audioWsHandler?.stopAudioPlayback()
         audioWsHandler?.disconnect()
-        audioWsHandler = null // 1. force re-init on next test start to avoid stale WS state
-        pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap())
-        MainActivity.log("🛑 STOP TEST active: duplex stopped (no TEST audio capture/playback)")
+        audioWsHandler = null
+        Thread {
+            try { pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap()) } catch (_: Exception) {}
+            Thread.sleep(300)
+            pusherClient?.disconnect()
+            pusherClient = null
+        }.start()
+        MainActivity.log("🛑 TEST stopped — Pusher disconnected")
     }
 
     private fun startServiceDuplexOutputToServerAndServerToInput() {
@@ -515,7 +517,13 @@ class GsmService : Service() {
             MainActivity.log("WARNING: error stopping SERVICE ws: ${error.message}")
         }
         audioWsHandler = null
-        MainActivity.log("🛑 STOP SERVICE: duplex stopped")
+        Thread {
+            try { pusherClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
+            Thread.sleep(300)
+            pusherClient?.disconnect()
+            pusherClient = null
+        }.start()
+        MainActivity.log("🛑 SERVICE stopped — Pusher disconnected")
     }
 
     // central command dispatcher - single entrypoint
