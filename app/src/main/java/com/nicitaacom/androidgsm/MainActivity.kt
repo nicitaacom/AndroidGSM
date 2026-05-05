@@ -173,6 +173,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         checkNetworkAvailability()
+        registerNetworkCallback()
         requestPermissionsOnLaunchIfNeeded()
         updateButtonState()
 
@@ -202,7 +203,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
-        checkNetworkAvailability()
+        checkNetworkAvailability()  // snapshot check on resume; real-time handled by networkCallback
         // Re-check SIM on every resume — subscription list can be empty on first onCreate
         if (hasPhoneStatePermission()) {
             try { loadSimSelection() } catch (_: Exception) {}
@@ -599,17 +600,50 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+
     private fun checkNetworkAvailability() {
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val network = connectivityManager.activeNetwork
         val caps = connectivityManager.getNetworkCapabilities(network)
-        val wasConnected = hasInternetConnection
         hasInternetConnection = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+    }
 
-        if (!hasInternetConnection && wasConnected) {
-            addLog("❌ No internet connection. Controls are disabled until internet is available.")
-        } else if (hasInternetConnection && !wasConnected) {
-            addLog("✅ Internet connection restored")
+    private fun registerNetworkCallback() {
+        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        networkCallback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: android.net.Network) {
+                if (!hasInternetConnection) {
+                    hasInternetConnection = true
+                    addLog("✅ Internet connection restored")
+                    updateButtonState()
+                }
+            }
+            override fun onLost(network: android.net.Network) {
+                // Confirm no other network is available before declaring lost
+                val caps = connectivityManager.getNetworkCapabilities(connectivityManager.activeNetwork)
+                if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) return
+                hasInternetConnection = false
+                addLog("❌ No internet — stopping active audio")
+                updateButtonState()
+                // Stop whichever mode is active
+                if (isTestAudioActive) stopTestAudio()
+                else if (isServiceAudioActive) stopServiceAudioInput()
+            }
+        }
+        val request = android.net.NetworkRequest.Builder()
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            .build()
+        connectivityManager.registerNetworkCallback(request, networkCallback!!)
+    }
+
+    private fun unregisterNetworkCallback() {
+        networkCallback?.let {
+            try {
+                val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                cm.unregisterNetworkCallback(it)
+            } catch (_: Exception) {}
+            networkCallback = null
         }
     }
 
@@ -632,6 +666,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        unregisterNetworkCallback()
         if (instance?.get() == this) {
             instance = null
         }
