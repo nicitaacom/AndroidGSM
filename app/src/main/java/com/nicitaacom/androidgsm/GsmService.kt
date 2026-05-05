@@ -560,6 +560,7 @@ class GsmService : Service() {
 
             // Override onCallConnected for this call — sets up WS audio for SERVICE mode
             gsmDialer?.setCallConnectedCallback {
+                MainActivity.log("📞 OFFHOOK callback fired — call connected")
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 audioManager.isSpeakerphoneOn = false
@@ -577,8 +578,9 @@ class GsmService : Service() {
                         audioWsHandler?.setCallActive(true)
                         audioWsHandler?.startAudioCapture()
                         audioWsHandler?.startAudioPlayback()
+                        MainActivity.log("📞 WS audio started, pusherClient=${if (pusherClient != null) "alive" else "NULL"}")
                         pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                        MainActivity.log("📞 WS audio started for call")
+                        MainActivity.log("📞 CALL_CONNECTED sent to backend")
                     } catch (error: Exception) {
                         MainActivity.log("ERROR in CALL_CONNECTED callback: ${error.message}")
                     }

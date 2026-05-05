@@ -108,6 +108,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const wsReconnectTimerRef = useRef<NodeJS.Timeout | null>(null)
   const duplexValidationModeRef = useRef(false)
   const isTestAudioActiveRef = useRef(false)
+  const isCallActiveRef = useRef(false) // true between call() and hungUp()/CALL_ENDED
 
   const shouldStreamMic = () => isConnected || isTestAudioActiveRef.current || duplexValidationModeRef.current
 
@@ -400,6 +401,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     // Call ended or rejected
     const onCallEnded = (eventData: GsmCallsEvent) => {
       if (!deviceToken || eventData?.deviceToken !== deviceToken) return
+      isCallActiveRef.current = false
       setIsConnected(false)
       setIsCalling(false)
       // Stop audio streams and clear queues when call ends
@@ -455,10 +457,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const onAudioChunk = (eventData: GsmCallsEvent) => {
       if (!deviceToken || eventData?.deviceToken !== deviceToken || !eventData?.audio) return
 
-      // 1. Same auto-start for Pusher fallback path
-      if (!isConnected && !isTestAudioActiveRef.current && !mediaStreamRef.current) {
-        console.info("[gsm/pusher] first audio chunk - auto-starting mic (TEST mode fallback)")
-        isTestAudioActiveRef.current = true
+      if (!mediaStreamRef.current && isTestAudioActiveRef.current) {
         startMicCapture().catch(error => setError(String(error)))
       }
 
@@ -572,10 +571,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
           if (audioContextRef.current?.state === "suspended") audioContextRef.current.resume().catch(() => {})
 
-          // 1. First inbound audio packet = TEST mode active → auto-start mic (Pusher trigger is unreliable)
-          if (!isConnected && !isTestAudioActiveRef.current && !mediaStreamRef.current) {
-            console.info("[gsm/ws] first audio packet detected - auto-starting mic (TEST mode)")
-            isTestAudioActiveRef.current = true
+          // Auto-start mic in TEST mode or during an active SERVICE call
+          if (!mediaStreamRef.current && (isTestAudioActiveRef.current || isCallActiveRef.current)) {
             startMicCapture().catch(error => setError(String(error)))
           }
 
@@ -608,6 +605,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
    */
   useEffect(() => {
     if (!isConnected) return
+    // Force-restart playout loop on each call connect — stale isPlayoutRunningRef from
+    // a previous TEST or call session would otherwise prevent it from starting.
+    stopPlayoutLoop()
+    resetInboundAudioState()
     ensurePlayoutLoop()
   }, [isConnected])
 
@@ -696,6 +697,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     console.info("[gsm/call] initiating call", { deviceToken, num })
 
     try {
+      isCallActiveRef.current = true
       setIsCalling(true)
       const res = await fetch("/api/gsm/call-started", {
         method: "POST",
@@ -726,6 +728,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
     // Immediate local cleanup
     isCleaningUpRef.current = true
+    isCallActiveRef.current = false
     setIsConnected(false)
     setIsCalling(false)
     stopMicCapture()

@@ -1,7 +1,6 @@
 package com.nicitaacom.androidgsm
 
 import android.Manifest
-import android.content.ComponentName
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioManager
@@ -10,8 +9,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
-import android.telecom.PhoneAccount
-import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyCallback
@@ -27,38 +24,14 @@ class GsmDialer(private val context: Context) {
     private var onCallEnded: (() -> Unit)? = null
     private var onCallConnected: (() -> Unit)? = null
 
-    companion object {
-        const val PHONE_ACCOUNT_ID = "androidgsm_connection"
-    }
-
     init {
         telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
-        registerPhoneAccount()
 
         // 1. check permission once
         if (hasPermission(Manifest.permission.READ_PHONE_STATE)) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) registerModernCallback()
             else registerLegacyCallback()
         } else MainActivity.log("⚠️ READ_PHONE_STATE permission missing - call state monitoring disabled")
-    }
-
-    // Register our ConnectionService PhoneAccount so placeCall() routes through GsmConnectionService
-    // without opening the system dialer UI.
-    private fun registerPhoneAccount() {
-        try {
-            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            val handle = PhoneAccountHandle(
-                ComponentName(context, GsmConnectionService::class.java),
-                PHONE_ACCOUNT_ID
-            )
-            val account = PhoneAccount.builder(handle, "AndroidGSM")
-                .setCapabilities(PhoneAccount.CAPABILITY_CALL_PROVIDER)
-                .build()
-            telecomManager.registerPhoneAccount(account)
-            MainActivity.log("✅ PhoneAccount registered for GsmConnectionService")
-        } catch (e: Exception) {
-            MainActivity.log("⚠️ PhoneAccount registration failed: ${e.message}")
-        }
     }
 
     // 2. modern API (Android 12+)
@@ -140,17 +113,11 @@ class GsmDialer(private val context: Context) {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             val uri = Uri.parse("tel:$number")
 
-            // 2. Always route through our registered PhoneAccountHandle so GsmConnectionService
-            // handles the call — this prevents the system dialer UI from opening.
-            val ourHandle = PhoneAccountHandle(
-                ComponentName(context, GsmConnectionService::class.java),
-                PHONE_ACCOUNT_ID
-            )
-            val extras = Bundle().apply {
-                putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, ourHandle)
-            }
-            telecomManager.placeCall(uri, extras)
-            MainActivity.log("GsmDialer: placeCall() dispatched via GsmConnectionService to $number")
+            // Route through the default SIM PhoneAccount so the real GSM modem dials.
+            // Do NOT pass our GsmConnectionService handle — that makes Telecom treat us as a
+            // VoIP provider and never touches the actual radio.
+            telecomManager.placeCall(uri, Bundle())
+            MainActivity.log("GsmDialer: placeCall() dispatched to GSM modem for $number")
             return true
         } catch (exception: Exception) {
             MainActivity.log("ERROR starting call: ${exception.message}")
