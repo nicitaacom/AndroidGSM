@@ -178,6 +178,15 @@ class GsmService : Service() {
                     if (!isCallActive) return@setCallEndedCallback  // ignore IDLE fired on boot/init
                     isCallActive = false
                     MainActivity.log("📴 Call ended (IDLE) — stopping audio, notifying backend")
+                    // Restore audio routing
+                    try {
+                        RootUtils.restoreAudioRouting()
+                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+                        am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0)
+                        am.isSpeakerphoneOn = false
+                        am.mode = AudioManager.MODE_NORMAL
+                    } catch (_: Exception) {}
                     try {
                         audioWsHandler?.setCallActive(false)
                         audioWsHandler?.stopAudioCapture()
@@ -190,6 +199,10 @@ class GsmService : Service() {
                 gsmDialer?.setCallConnectedCallback {
                     isCallActive = true
                     MainActivity.log("📞 Call connected (OFFHOOK)")
+                    // Force speakerphone so GSM audio routes through media mixer (REMOTE_SUBMIX can tap it)
+                    val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                    am.mode = AudioManager.MODE_IN_CALL
+                    am.isSpeakerphoneOn = true
                 }
                 // Register for broadcasts from ConnectionService (default-dialer)
                 try {
@@ -310,8 +323,9 @@ class GsmService : Service() {
                 Thread {
                     try {
                         Thread.sleep(1500) // allow WS handshake to complete
-                        pusherClient?.sendEvent("CONNECTED", emptyMap())
-                        MainActivity.log("GsmService: CONNECTED event sent to backend")
+                        // CONNECTED_EXPLICIT bypasses server debounce — fires Pusher regardless of 5-min window
+                        pusherClient?.sendEvent("CONNECTED_EXPLICIT", emptyMap())
+                        MainActivity.log("GsmService: CONNECTED_EXPLICIT event sent to backend")
                     } catch (error: Exception) {
                         MainActivity.log("WARNING: Failed to send CONNECTED event: ${error.message}")
                     }
@@ -491,20 +505,7 @@ class GsmService : Service() {
         // SERVICE mode: just connect to backend and wait for CALL_STARTED command.
         // Audio capture/playback starts only when a call connects (OFFHOOK via GsmDialer callback).
         // Do NOT start audio here — REMOTE_SUBMIX would stream all system sounds.
-        Thread {
-            try {
-                // Wait for Pusher to be ready
-                val deadline = System.currentTimeMillis() + 5000
-                while (pusherClient == null && System.currentTimeMillis() < deadline) {
-                    Thread.sleep(300)
-                }
-                pusherClient?.sendEvent("CONNECTED", emptyMap())
-                MainActivity.log("✅ SERVICE mode active: connected to backend, waiting for CALL_STARTED")
-            } catch (error: Exception) {
-                MainActivity.log("ERROR in SERVICE start: ${error.message}")
-                isServiceAudioActive = false
-            }
-        }.start()
+        MainActivity.log("✅ SERVICE mode active: connected to backend, waiting for CALL_STARTED")
     }
 
     private fun stopServiceDuplexOutputToServerAndServerToInput() {
@@ -561,12 +562,23 @@ class GsmService : Service() {
             // Override onCallConnected for this call — sets up WS audio for SERVICE mode
             gsmDialer?.setCallConnectedCallback {
                 MainActivity.log("📞 OFFHOOK callback fired — call connected")
+                // MODE_IN_CALL + speakerphone routes GSM audio through the media HAL mixer,
+                // which REMOTE_SUBMIX can capture without CAPTURE_AUDIO_OUTPUT.
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = false
+                audioManager.mode = AudioManager.MODE_IN_CALL
+                audioManager.isSpeakerphoneOn = true
+                // Mute the speaker so audio only streams to website, not played on phone
+                audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
+                MainActivity.log("📞 Speakerphone ON + voice stream muted (capture-only mode)")
 
                 Thread {
                     try {
+                        // Force speaker at HAL level via root — system dialer overrides setSpeakerphoneOn()
+                        // so we bypass it with a direct AudioFlinger binder call.
+                        val speakerForced = RootUtils.forceSpeakerForCapture()
+                        MainActivity.log("📞 Root force-speaker: $speakerForced")
+                        Thread.sleep(300) // let HAL routing settle before opening AudioRecord
+
                         val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")
                             ?.replace("https://", "wss://")?.removeSuffix("/") + "/ws/audio"
                         if (audioWsHandler == null) {

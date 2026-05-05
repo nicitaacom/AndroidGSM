@@ -181,68 +181,39 @@ class AudioWebSocketHandler(
         }
     }
 
-    // 6. Build AudioRecord — source depends on whether a real GSM call is active.
-    // REMOTE_SUBMIX captures the media framework mixer (music, media, VoIP).
-    // It does NOT capture GSM telephony audio — that goes through a separate radio path.
-    // VOICE_DOWNLINK (3) / VOICE_CALL (4) capture from the telephony path and require
-    // CAPTURE_AUDIO_OUTPUT (granted via root).
+    // 6. Build AudioRecord using REMOTE_SUBMIX when a GSM call is active.
+    // GsmService forces speakerphone + MODE_IN_CALL before capture starts, which routes
+    // GSM telephony audio through the media HAL mixer. REMOTE_SUBMIX taps that mixer
+    // output without needing CAPTURE_AUDIO_OUTPUT (which cannot be pm-granted at runtime).
     private fun buildRootedAudioRecord(bufferSize: Int): AudioRecord? {
-        val hasCapture = ContextCompat.checkSelfPermission(context, "android.permission.CAPTURE_AUDIO_OUTPUT") == PackageManager.PERMISSION_GRANTED
-        if (!hasCapture) {
-            val granted = RootUtils.grantAudioOutputCapture(context)
-            if (!granted) {
-                MainActivity.log("❌ Failed to grant CAPTURE_AUDIO_OUTPUT via root - falling back to mic")
-                return buildMicAudioRecord(bufferSize)
-            }
-        }
-
-        // For a real GSM call, try telephony capture sources first
         if (isCallActive) {
-            val callSources = intArrayOf(
-                MediaRecorder.AudioSource.VOICE_DOWNLINK,  // incoming voice from radio
-                MediaRecorder.AudioSource.VOICE_CALL,       // both sides mixed
-            )
-            for (source in callSources) {
-                try {
-                    val record = AudioRecord(source, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
-                    if (record.state == AudioRecord.STATE_INITIALIZED) {
-                        MainActivity.log("✅ Telephony capture source $source initialized (GSM call audio)")
-                        return record
-                    }
+            return try {
+                val record = AudioRecord(MediaRecorder.AudioSource.REMOTE_SUBMIX, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
+                if (record.state == AudioRecord.STATE_INITIALIZED) {
+                    MainActivity.log("✅ REMOTE_SUBMIX initialized (GSM call via speakerphone path)")
+                    record
+                } else {
                     record.release()
-                } catch (e: Exception) {
-                    MainActivity.log("⚠️ Telephony source $source failed: ${e.message}")
+                    MainActivity.log("❌ REMOTE_SUBMIX failed — falling back to mic")
+                    buildMicAudioRecord(bufferSize)
                 }
-            }
-            MainActivity.log("⚠️ Telephony sources unavailable — falling back to REMOTE_SUBMIX")
-        }
-
-        return try {
-            val record = AudioRecord(MediaRecorder.AudioSource.REMOTE_SUBMIX, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
-            if (record.state == AudioRecord.STATE_INITIALIZED) {
-                MainActivity.log("✅ REMOTE_SUBMIX initialized")
-                record
-            } else {
-                record.release()
-                MainActivity.log("❌ REMOTE_SUBMIX failed - falling back to mic")
+            } catch (exception: Exception) {
+                MainActivity.log("❌ REMOTE_SUBMIX exception: ${exception.message} — falling back to mic")
                 buildMicAudioRecord(bufferSize)
             }
-        } catch (exception: SecurityException) {
-            MainActivity.log("❌ REMOTE_SUBMIX permission denied: ${exception.message} - falling back to mic")
-            buildMicAudioRecord(bufferSize)
-        } catch (exception: Exception) {
-            MainActivity.log("❌ REMOTE_SUBMIX exception: ${exception.message} - falling back to mic")
-            buildMicAudioRecord(bufferSize)
         }
+
+        // Non-call capture (TEST mode): use mic
+        return buildMicAudioRecord(bufferSize)
     }
 
     private fun resolveCaptureSourceLabel(): String {
         val source = try { audioRecord?.audioSource } catch (_: Exception) { null }
         return when (source) {
-            MediaRecorder.AudioSource.VOICE_DOWNLINK -> "VOICE_DOWNLINK (GSM incoming)"
-            MediaRecorder.AudioSource.VOICE_CALL -> "VOICE_CALL (GSM both sides)"
-            MediaRecorder.AudioSource.REMOTE_SUBMIX -> "REMOTE_SUBMIX"
-            else -> "MIC/VOICE_COMMUNICATION"
+            MediaRecorder.AudioSource.REMOTE_SUBMIX -> "REMOTE_SUBMIX (GSM via speakerphone)"
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION -> "VOICE_COMMUNICATION (mic)"
+            MediaRecorder.AudioSource.MIC -> "MIC"
+            else -> "source=$source"
         }
     }
 

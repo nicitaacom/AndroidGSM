@@ -35,6 +35,18 @@ const connectedDevices = new Map<string, DeviceInfo>()
 const browserByDevice = new Map<string, WebSocket>()
 const androidByDevice = new Map<string, WebSocket>()
 
+// Debounce gsm:device-connected — only fire once per 5 min per device to save Pusher quota
+const CONNECTED_DEBOUNCE_MS = 5 * 60 * 1000
+const lastConnectedPusherFire = new Map<string, number>()
+
+async function safeTrigger(channel: string, event: string, data: object) {
+  try {
+    await pusher.trigger(channel, event, data)
+  } catch (err: any) {
+    console.error(`❌ [pusher] trigger failed (${channel}/${event}): ${err?.message ?? err}`)
+  }
+}
+
 const app = express()
 app.use(cors())
 app.use(bodyParser.json({ limit: '2mb' }))
@@ -87,16 +99,11 @@ function authOk(auth?: string) {
 }
 
 async function sendCommand(deviceToken: string, type: string, data: any = {}) {
-  try {
-    // Fire the pusher event and handle errors - don't let a Pusher failure crash the server
-    await pusher.trigger(`private-device-${deviceToken}`, 'command', {
-      type,
-      data,
-      timestamp: new Date().toISOString(),
-    })
-  } catch (err) {
-    console.error('❌ [sendCommand] failed to trigger pusher command', { deviceToken, type, err: String(err) })
-  }
+  await safeTrigger(`private-device-${deviceToken}`, 'command', {
+    type,
+    data,
+    timestamp: new Date().toISOString(),
+  })
 }
 
 app.get('/health', (_req, res) => {
@@ -188,19 +195,36 @@ app.post('/api/events', async (req, res) => {
 
   switch (type) {
     case 'CONNECTED':
-      await pusher.trigger('gsm-devices', 'gsm:device-connected', { deviceToken, timestamp: new Date().toISOString() })
+    case 'CONNECTED_EXPLICIT': {
+      const now = Date.now()
+      const last = lastConnectedPusherFire.get(deviceToken) ?? 0
+      const forced = type === 'CONNECTED_EXPLICIT'
+      if (forced || now - last >= CONNECTED_DEBOUNCE_MS) {
+        lastConnectedPusherFire.set(deviceToken, now)
+        await safeTrigger('gsm-devices', 'gsm:device-connected', { deviceToken, timestamp: new Date().toISOString() })
+        console.log(`✅ [api/events] CONNECTED pusher fired for ${deviceToken}${forced ? ' (explicit)' : ''}`)
+      } else {
+        console.log(`⏭️ [api/events] CONNECTED debounced for ${deviceToken} (next in ${Math.round((CONNECTED_DEBOUNCE_MS - (now - last)) / 1000)}s)`)
+      }
+      break
+    }
+    case 'DISCONNECTED':
+      // Clear debounce so reconnect fires immediately next time
+      lastConnectedPusherFire.delete(deviceToken)
+      connectedDevices.delete(deviceToken)
+      console.log(`📴 [api/events] DISCONNECTED ${deviceToken}`)
       break
     case 'CALL_STARTED':
       console.log(`📞 [api/events] CALL_STARTED to ${data?.number}`)
-      await pusher.trigger('gsm-calls', 'gsm:call-started', { deviceToken, number: data?.number, timestamp: new Date().toISOString() })
+      await safeTrigger('gsm-calls', 'gsm:call-started', { deviceToken, number: data?.number, timestamp: new Date().toISOString() })
       break
     case 'CALL_CONNECTED':
       console.log(`✅ [api/events] CALL_CONNECTED - call is being answered`)
-      await pusher.trigger('gsm-calls', 'gsm:call-connected', { deviceToken, timestamp: new Date().toISOString() })
+      await safeTrigger('gsm-calls', 'gsm:call-connected', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'CALL_ENDED':
       console.log(`❌ [api/events] CALL_ENDED`)
-      await pusher.trigger('gsm-calls', 'gsm:call-ended', { deviceToken, timestamp: new Date().toISOString() })
+      await safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'DTMF_SENT':
       console.log(`🔢 [api/events] DTMF sent: ${data?.digit}`)
@@ -208,16 +232,14 @@ app.post('/api/events', async (req, res) => {
       break
     case 'TEST_AUDIO_STARTED':
       console.log(`🎧 [api/events] TEST_AUDIO_STARTED device=${deviceToken}`)
-      await pusher.trigger('gsm-calls', 'gsm:test-audio-started', { deviceToken, timestamp: new Date().toISOString() })
+      await safeTrigger('gsm-calls', 'gsm:test-audio-started', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'TEST_AUDIO_STOPPED':
       console.log(`🛑 [api/events] TEST_AUDIO_STOPPED device=${deviceToken}`)
-      await pusher.trigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken, timestamp: new Date().toISOString() })
+      await safeTrigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken, timestamp: new Date().toISOString() })
       break
-      case 'AUDIO_CHUNK': {
-      // concise debug log for inbound audio from android
-      console.log(`[ws/audio] RX AUDIO_CHUNK device=${deviceToken} seq=${data?.seq} size=${data?.audio ? data.audio.length : 0}`)
-      // Route audio to browser WebSocket peer (primary path)
+    case 'AUDIO_CHUNK': {
+      // Route audio to browser WebSocket peer (primary path — no Pusher cost)
       const browserPeer = browserByDevice.get(deviceToken)
       if (browserPeer?.readyState === WebSocket.OPEN) {
         try {
@@ -233,18 +255,12 @@ app.post('/api/events', async (req, res) => {
               audio: data?.audio,
             }),
           )
-          console.log(`[ws/audio] SENT -> browser device=${deviceToken} seq=${data?.seq}`)
         } catch (err) {
           console.error('❌ [api/events/audio] failed to send to browser ws peer', String(err))
         }
       } else {
-        // Fallback: Route via Pusher for backward compatibility
-        await pusher.trigger('gsm-calls', 'gsm:audio-chunk', {
-          deviceToken,
-          audio: data?.audio,
-          timestamp: new Date().toISOString(),
-        })
-        console.log(`[ws/audio] FALLBACK -> pusher device=${deviceToken} size=${data?.audio ? data.audio.length : 0}`)
+        // Pusher fallback only when no WS peer — avoid if possible to save quota
+        console.warn(`⚠️ [ws/audio] no browser peer, dropping chunk (Pusher fallback disabled to save quota)`)
       }
       break
     }
