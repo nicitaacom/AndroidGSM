@@ -602,33 +602,53 @@ class MainActivity : AppCompatActivity() {
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    private fun isNetworkValidated(): Boolean {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+               caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+    }
+
     private fun checkNetworkAvailability() {
-        val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
-        val network = connectivityManager.activeNetwork
-        val caps = connectivityManager.getNetworkCapabilities(network)
-        hasInternetConnection = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        val wasConnected = hasInternetConnection
+        hasInternetConnection = isNetworkValidated()
+        if (!hasInternetConnection && wasConnected) {
+            addLog("❌ No validated internet connection")
+        } else if (hasInternetConnection && !wasConnected) {
+            addLog("✅ Internet connection available")
+        }
     }
 
     private fun registerNetworkCallback() {
         val connectivityManager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         networkCallback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: android.net.Network) {
-                if (!hasInternetConnection) {
+            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+                val validated = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+                                caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+                if (validated && !hasInternetConnection) {
                     hasInternetConnection = true
                     addLog("✅ Internet connection restored")
-                    updateButtonState()
+                    runOnUiThread { updateButtonState() }
+                } else if (!validated && hasInternetConnection) {
+                    hasInternetConnection = false
+                    addLog("❌ No internet — stopping active audio")
+                    runOnUiThread {
+                        updateButtonState()
+                        if (isTestAudioActive) stopTestAudio()
+                        else if (isServiceAudioActive) stopServiceAudioInput()
+                    }
                 }
             }
             override fun onLost(network: android.net.Network) {
-                // Confirm no other network is available before declaring lost
-                val caps = connectivityManager.getNetworkCapabilities(connectivityManager.activeNetwork)
-                if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) return
-                hasInternetConnection = false
-                addLog("❌ No internet — stopping active audio")
-                updateButtonState()
-                // Stop whichever mode is active
-                if (isTestAudioActive) stopTestAudio()
-                else if (isServiceAudioActive) stopServiceAudioInput()
+                if (!isNetworkValidated() && hasInternetConnection) {
+                    hasInternetConnection = false
+                    addLog("❌ Network lost — stopping active audio")
+                    runOnUiThread {
+                        updateButtonState()
+                        if (isTestAudioActive) stopTestAudio()
+                        else if (isServiceAudioActive) stopServiceAudioInput()
+                    }
+                }
             }
         }
         val request = android.net.NetworkRequest.Builder()
