@@ -26,11 +26,13 @@ object RootUtils {
         // Drain streams on separate threads to avoid blocking waitFor()
         var out = ""
         var err = ""
-        val outThread = Thread { out = process.inputStream.bufferedReader().readText() }.also { it.start() }
-        val errThread = Thread { err = process.errorStream.bufferedReader().readText() }.also { it.start() }
+        val outThread = Thread { try { out = process.inputStream.bufferedReader().readText() } catch (_: Exception) {} }.also { it.start() }
+        val errThread = Thread { try { err = process.errorStream.bufferedReader().readText() } catch (_: Exception) {} }.also { it.start() }
         val finished = process.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
         if (!finished) {
-            process.destroy()
+            process.destroyForcibly()
+            outThread.interrupt()
+            errThread.interrupt()
             return -1 to "timeout"
         }
         outThread.join(500)
