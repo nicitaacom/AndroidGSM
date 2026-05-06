@@ -98,8 +98,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const playoutTimerRef = useRef<NodeJS.Timeout | null>(null)
   const isPlayoutRunningRef = useRef(false)
 
-  // Playout delay: ~250ms (good enough for <=1000ms user requirement)
-  const PLAYOUT_INTERVAL_MS = 20
   const MAX_QUEUE = 80
 
   // Cleanup refs to prevent memory leaks
@@ -134,7 +132,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   useEffect(() => {
     if (!audioContextRef.current) {
       try {
-        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)()
+        // Force 16kHz so createBuffer(…, 16000) is native — no browser resampling artifacts
+        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 })
         audioContextRef.current = ctx
         console.info("[gsm] AudioContext created", { sampleRate: ctx.sampleRate })
       } catch (err) {
@@ -232,27 +231,35 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     rxEnqueueSeqRef.current = 0
   }
 
-  const ensurePlayoutLoop = () => {
-    const ctx = audioContextRef.current
-    if (!ctx || isPlayoutRunningRef.current) return
+  // Tracks the AudioContext time at which the next chunk should start playing.
+  // Scheduling chunks end-to-end eliminates gaps/overlaps caused by setInterval jitter.
+  const nextPlayTimeRef = useRef(0)
+  // Initial buffering delay before first playback (seconds) — absorbs network jitter
+  const PLAYOUT_BUFFER_S = 0.15 // 150ms — enough to buffer ~7 chunks before starting
+  // How far ahead to keep the schedule filled (seconds). The scheduler loop fires
+  // whenever a new chunk arrives and fills the lookahead window.
+  const SCHEDULE_AHEAD_S = 0.25 // fill 250ms of audio ahead of current time
+  let playoutCount = 0
 
-    if (ctx.state === "suspended") {
-      ctx.resume().catch(e => console.error("[gsm/playback] resume error", e))
+  // Drains the rx queue and schedules all available chunks into the AudioContext
+  // timeline up to SCHEDULE_AHEAD_S ahead of current time. Called on every new
+  // chunk arrival — no polling timer needed.
+  const drainAndSchedule = () => {
+    const ctx = audioContextRef.current
+    if (!ctx || !isPlayoutRunningRef.current) return
+
+    if (ctx.state !== "running") {
+      ctx.resume().catch(() => {})
+      return
     }
 
-    isPlayoutRunningRef.current = true
-    let playoutCount = 0
-    console.info("[gsm/playback] loop started", { state: ctx.state })
+    // Anchor the schedule head the first time (or after a reset/gap)
+    if (nextPlayTimeRef.current < ctx.currentTime + PLAYOUT_BUFFER_S) {
+      nextPlayTimeRef.current = ctx.currentTime + PLAYOUT_BUFFER_S
+    }
 
-    playoutTimerRef.current = setInterval(() => {
-      if (ctx.state !== "running") {
-        ctx.resume().catch(() => {
-          // Browser autoplay policy can reject resume until a user gesture exists.
-          // Keep queue intact and retry on next tick.
-        })
-        return
-      }
-
+    // Fill the lookahead window with as many queued chunks as are available
+    while (nextPlayTimeRef.current < ctx.currentTime + SCHEDULE_AHEAD_S) {
       const expectedSeq = nextRxSeqRef.current
       let seqToPlay = expectedSeq
       let chunk = rxQueueRef.current.get(seqToPlay)
@@ -266,10 +273,12 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
           seqToPlay = minAvailableSeq
           nextRxSeqRef.current = minAvailableSeq
           chunk = rxQueueRef.current.get(seqToPlay)
+          // Gap in stream — reset schedule head so next chunk anchors fresh
+          nextPlayTimeRef.current = ctx.currentTime + PLAYOUT_BUFFER_S
         }
       }
 
-      if (!chunk || chunk.length === 0) return
+      if (!chunk || chunk.length === 0) break // queue empty — wait for more chunks
 
       rxQueueRef.current.delete(seqToPlay)
       nextRxSeqRef.current = seqToPlay + 1
@@ -277,31 +286,47 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
       try {
         const buf = ctx.createBuffer(1, chunk.length, 16000)
-        const channelData = buf.getChannelData(0)
-        channelData.set(chunk)
+        buf.getChannelData(0).set(chunk)
 
         const src = ctx.createBufferSource()
         src.buffer = buf
-
-        const gainNode = ctx.createGain()
-        gainNode.gain.value = 1.0
-        src.connect(gainNode)
-        gainNode.connect(ctx.destination)
-        src.start(ctx.currentTime)
+        src.connect(ctx.destination)
+        src.start(nextPlayTimeRef.current)
+        nextPlayTimeRef.current += chunk.length / 16000
 
         if (playoutCount % 50 === 0) {
-          console.log("[gsm/playback] playing chunk seq", seqToPlay, "total played:", playoutCount)
+          console.log("[gsm/playback] scheduled chunk seq", seqToPlay, "total:", playoutCount, "ahead:", (nextPlayTimeRef.current - ctx.currentTime).toFixed(3) + "s")
         }
       } catch (err) {
-        console.error("[gsm/playback] error playing chunk", err)
+        console.error("[gsm/playback] error scheduling chunk", err)
       }
-    }, PLAYOUT_INTERVAL_MS)
+    }
+  }
+
+  const ensurePlayoutLoop = () => {
+    const ctx = audioContextRef.current
+    if (!ctx || isPlayoutRunningRef.current) return
+
+    if (ctx.state === "suspended") {
+      ctx.resume().catch((e: unknown) => console.error("[gsm/playback] resume error", e))
+    }
+
+    isPlayoutRunningRef.current = true
+    nextPlayTimeRef.current = 0
+    playoutCount = 0
+    console.info("[gsm/playback] scheduler started", { state: ctx.state })
+
+    // Heartbeat timer: fires every 20ms to catch any chunks that arrived between
+    // drainAndSchedule() calls (e.g. during a gap recovery). Low overhead since
+    // most work is done eagerly in drainAndSchedule() on each ws.onmessage.
+    playoutTimerRef.current = setInterval(() => drainAndSchedule(), 20)
   }
 
   const stopPlayoutLoop = () => {
     if (playoutTimerRef.current) clearInterval(playoutTimerRef.current)
     playoutTimerRef.current = null
     isPlayoutRunningRef.current = false
+    nextPlayTimeRef.current = 0
   }
 
   /**
@@ -511,12 +536,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
     console.info("[gsm/ws] init", { callingSetup, deviceToken })
 
-    // Create audio context if needed
-    if (!audioContextRef.current) {
-      audioContextRef.current = new AudioContext({ sampleRate: 16000 })
-      console.log("[gsm/audio] AudioContext created, state:", audioContextRef.current.state)
-    }
-
     const bearerToken = process.env.NEXT_PUBLIC_BACKEND_BEARER
     const wsBase = process.env.NEXT_PUBLIC_WS_URL
     if (!bearerToken || !wsBase) {
@@ -563,7 +582,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       }
 
       ws.onclose = event => {
-        setIsReady(false)
+        // Don't set isReady=false here — device may still be connected,
+        // the status poll (every 2s) is the authoritative source for readiness
         console.warn("[gsm/ws] closed", { code: event.code, reason: event.reason })
 
         if (!isUnmounted) {
