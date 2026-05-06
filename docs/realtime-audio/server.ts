@@ -35,6 +35,8 @@ interface DeviceInfo {
   deviceToken: string
   lastSeen: Date
   sims?: SimAccount[]
+  isServiceActive?: boolean
+  isTestActive?: boolean
 }
 
 const connectedDevices = new Map<string, DeviceInfo>()
@@ -189,6 +191,8 @@ app.get('/api/device-status/:deviceToken', (req, res) => {
     lastSeen: device.lastSeen.toISOString(),
     deviceToken: device.deviceToken,
     sims: device.sims ?? [],
+    isServiceActive: device.isServiceActive ?? false,
+    isTestActive: device.isTestActive ?? false,
   })
 })
 
@@ -539,14 +543,28 @@ wsCmd.on('connection', (ws, req) => {
           serverLog(`❌ [ws/cmd] CALL_ENDED: ${tok}`)
           safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken: tok, timestamp: new Date().toISOString() })
           break
-        case 'TEST_AUDIO_STARTED':
+        case 'TEST_AUDIO_STARTED': {
           serverLog(`🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
+          const devTas = connectedDevices.get(tok); if (devTas) { devTas.isTestActive = true; devTas.isServiceActive = false }
           safeTrigger('gsm-calls', 'gsm:test-audio-started', { deviceToken: tok, timestamp: new Date().toISOString() })
           break
-        case 'TEST_AUDIO_STOPPED':
+        }
+        case 'TEST_AUDIO_STOPPED': {
           serverLog(`🛑 [ws/cmd] TEST_AUDIO_STOPPED: ${tok}`)
+          const devTasp = connectedDevices.get(tok); if (devTasp) devTasp.isTestActive = false
           safeTrigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken: tok, timestamp: new Date().toISOString() })
           break
+        }
+        case 'SERVICE_STARTED': {
+          serverLog(`▶️ [ws/cmd] SERVICE_STARTED: ${tok}`)
+          const devSs = connectedDevices.get(tok); if (devSs) { devSs.isServiceActive = true; devSs.isTestActive = false }
+          break
+        }
+        case 'SERVICE_STOPPED': {
+          serverLog(`⏹️ [ws/cmd] SERVICE_STOPPED: ${tok}`)
+          const devSsp = connectedDevices.get(tok); if (devSsp) devSsp.isServiceActive = false
+          break
+        }
         case 'SIM_LIST': {
           try {
             const simsRaw: string = data?.sims ?? ''

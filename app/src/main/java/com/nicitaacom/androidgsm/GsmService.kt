@@ -502,6 +502,7 @@ class GsmService : Service() {
 
         isServiceAudioActive = true
         MainActivity.setStatus("Status: Service Active", true)
+        Thread { cmdWsClient?.sendEvent("SERVICE_STARTED", emptyMap()) }.start()
 
         // SERVICE mode: just connect to backend and wait for CALL_STARTED command.
         // Audio capture/playback starts only when a call connects (OFFHOOK via GsmDialer callback).
@@ -512,6 +513,7 @@ class GsmService : Service() {
     private fun stopServiceDuplexOutputToServerAndServerToInput() {
         isServiceAudioActive = false
         MainActivity.setStatus("Status: Ready", false)
+        Thread { cmdWsClient?.sendEvent("SERVICE_STOPPED", emptyMap()) }.start()
         try {
             audioWsHandler?.stopAudioCapture()
             audioWsHandler?.stopAudioPlayback()

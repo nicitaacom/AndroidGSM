@@ -116,6 +116,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const isCallActiveRef = useRef(false) // true between call() and hungUp()/CALL_ENDED
   const simsRef = useRef<SimAccount[]>([])
   const selectedSimRef = useRef<SimAccount | null>(null)
+  const isServiceActiveRef = useRef(false)
+  const isTestActiveRef = useRef(false)
 
   const shouldStreamMic = () => isConnected || isTestAudioActiveRef.current || duplexValidationModeRef.current
 
@@ -370,6 +372,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
           simsRef.current = data.sims as SimAccount[]
           if (!selectedSimRef.current) selectedSimRef.current = data.sims[0]
         }
+
+        isServiceActiveRef.current = data?.isServiceActive ?? false
+        isTestActiveRef.current = data?.isTestActive ?? false
 
         statusFailureCountRef.current = 0
         setIsReady(authorized && !!nextDeviceToken)
@@ -863,6 +868,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     call, hungUp, sendDTMF, stopTestAudio,
     startService, stopService, startTest, stopTest, fetchLogs,
     setMicGain, setPlaybackGain,
-    isTestAudioActiveRef, simsRef, selectedSimRef, selectSim,
+    isTestAudioActiveRef, isServiceActiveRef, isTestActiveRef, simsRef, selectedSimRef, selectSim,
   }
 }
