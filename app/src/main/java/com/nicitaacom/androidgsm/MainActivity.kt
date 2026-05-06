@@ -20,7 +20,6 @@ import android.widget.Button
 import android.widget.RadioButton
 import android.widget.RadioGroup
 import android.widget.ScrollView
-import android.widget.SeekBar
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -35,15 +34,9 @@ import java.util.*
 class MainActivity : AppCompatActivity() {
     private lateinit var logTextView: TextView
     private lateinit var scrollView: ScrollView
-    private lateinit var toggleButton: Button
-    private lateinit var testAudioButton: Button
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private lateinit var versionTextView: TextView
-    private lateinit var micGainSeekBar: SeekBar
-    private lateinit var micGainLabel: TextView
-    private lateinit var playbackVolSeekBar: SeekBar
-    private lateinit var playbackVolLabel: TextView
     private var hasSimAvailable = true
     private var hasInternetConnection = true
     private var hasRequiredPermissions = false
@@ -70,6 +63,19 @@ class MainActivity : AppCompatActivity() {
             android.util.Log.d(TAG, message)
             instance?.get()?.addLog(message)
         }
+
+        fun setStatus(text: String, active: Boolean) {
+            instance?.get()?.runOnUiThread {
+                val activity = instance?.get() ?: return@runOnUiThread
+                activity.statusTextView.text = text
+                activity.statusTextView.setTextColor(
+                    ContextCompat.getColor(
+                        activity,
+                        if (active) R.color.brand_green else R.color.error_red
+                    )
+                )
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -93,71 +99,11 @@ class MainActivity : AppCompatActivity() {
 
         logTextView = findViewById(R.id.logTextView)
         scrollView = findViewById(R.id.scrollView)
-        toggleButton = findViewById(R.id.toggleButton)
-        testAudioButton = findViewById(R.id.testAudioButton)
         copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
         versionTextView = findViewById(R.id.versionTextView)
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
         evaluateVersionFreshness()
-
-        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
-        micGainSeekBar = findViewById(R.id.micGainSeekBar)
-        micGainLabel = findViewById(R.id.micGainLabel)
-        playbackVolSeekBar = findViewById(R.id.playbackVolSeekBar)
-        playbackVolLabel = findViewById(R.id.playbackVolLabel)
-
-        micGainSeekBar.progress = prefs.getInt("mic_gain_progress", 100)
-        playbackVolSeekBar.progress = prefs.getInt("playback_vol_progress", 70)
-        updateGainLabels()
-
-        micGainSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                updateGainLabels()
-                prefs.edit { putInt("mic_gain_progress", progress) }
-                AudioWebSocketHandler.micGain = progress / 100f
-            }
-            override fun onStartTrackingTouch(sb: SeekBar) {}
-            override fun onStopTrackingTouch(sb: SeekBar) {}
-        })
-
-        playbackVolSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(sb: SeekBar, progress: Int, fromUser: Boolean) {
-                updateGainLabels()
-                prefs.edit { putInt("playback_vol_progress", progress) }
-                AudioWebSocketHandler.playbackGain = progress / 100f
-            }
-            override fun onStartTrackingTouch(sb: SeekBar) {}
-            override fun onStopTrackingTouch(sb: SeekBar) {}
-        })
-
-        // Apply saved values immediately
-        AudioWebSocketHandler.micGain = micGainSeekBar.progress / 100f
-        AudioWebSocketHandler.playbackGain = playbackVolSeekBar.progress / 100f
-
-        // SERVICE starts automatically — toggle is just a manual emergency stop/restart
-        toggleButton.setOnClickListener {
-            when {
-                isServiceAudioActive -> stopServiceAudioInput()
-                !hasSimAvailable -> addLog("❌ SERVICE mode unavailable: no SIM card detected")
-                else -> {
-                    pendingStartAudioTest = false
-                    requestPermissionsAndStart()
-                }
-            }
-        }
-
-        testAudioButton.setOnClickListener {
-            when {
-                isTestAudioActive -> stopTestAudio()
-                isServiceAudioActive -> addLog("⚠️ Stop SERVICE first before starting TEST")
-                else -> {
-                    pendingStartAudioTest = true
-                    addLog("🎧 Test audio requested")
-                    requestPermissionsAndStart(allowWithoutSim = true)
-                }
-            }
-        }
 
         copyLogsButton.setOnClickListener {
             copyLastLogsToClipboard()
@@ -166,7 +112,7 @@ class MainActivity : AppCompatActivity() {
         checkNetworkAvailability()
         registerNetworkCallback()
         requestPermissionsOnLaunchIfNeeded() // auto-starts SERVICE inside once granted
-        updateButtonState()
+        updateStatus()
 
         addLog("App started")
         addLog("Android version: ${Build.VERSION.RELEASE}")
@@ -199,7 +145,7 @@ class MainActivity : AppCompatActivity() {
         if (hasPhoneStatePermission()) {
             try { loadSimSelection() } catch (_: Exception) {}
         }
-        updateButtonState()
+        updateStatus()
         // Re-check actual running state - handles crash/restart scenario
         checkActualServiceState()
     }
@@ -216,88 +162,30 @@ class MainActivity : AppCompatActivity() {
             isServiceAudioActive = false
             pendingStartAudioTest = false
         }
-        updateButtonState()
+        updateStatus()
     }
 
 
 
     private fun checkServiceStatus() {
-        statusTextView.text = "Status: Ready"
-        updateButtonState()
+        updateStatus()
     }
 
-    private fun updateButtonState() {
-        val controlsEnabled = hasInternetConnection && hasRequiredPermissions && meetsMinAndroid
-        if (!controlsEnabled) {
-            toggleButton.text = if (!hasInternetConnection) "NO INTERNET" else "PERMISSIONS REQUIRED"
-            toggleButton.isEnabled = false
-            toggleButton.alpha = 0.5f
-            testAudioButton.text = "TEST AUDIO"
-            testAudioButton.isEnabled = false
-            testAudioButton.alpha = 0.5f
-            copyLogsButton.isEnabled = true
-            copyLogsButton.alpha = 1f
-            statusTextView.text = when {
-                !meetsMinAndroid -> "Status: Android 10+ required"
-                !hasInternetConnection -> "Status: No Internet"
-                else -> "Status: Waiting for permissions"
-            }
-            return
+    private fun updateStatus() {
+        val active = isServiceAudioActive || isTestAudioActive
+        val text = when {
+            !meetsMinAndroid -> "Status: Android 10+ required"
+            !hasInternetConnection -> "Status: No Internet"
+            !hasRequiredPermissions -> "Status: Waiting for permissions"
+            isTestAudioActive -> "Status: Test Audio Active"
+            isServiceAudioActive -> "Status: Service Active"
+            !hasSimAvailable -> "Status: No SIM"
+            else -> "Status: Ready"
         }
-
-        copyLogsButton.isEnabled = true
-        copyLogsButton.alpha = 1f
-
-        when {
-            // 1. TEST active — only STOP TEST allowed
-            isTestAudioActive -> {
-                toggleButton.text = if (hasSimAvailable) "START SERVICE" else "NO SIM DETECTED"
-                toggleButton.isEnabled = false
-                toggleButton.alpha = 0.5f
-                toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-                testAudioButton.text = "STOP TEST"
-                testAudioButton.isEnabled = true
-                testAudioButton.alpha = 1f
-                testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
-                statusTextView.text = "Status: Test Audio Active"
-            }
-            // 2. SERVICE active — only STOP SERVICE allowed
-            isServiceAudioActive -> {
-                toggleButton.text = "STOP SERVICE"
-                toggleButton.isEnabled = true
-                toggleButton.alpha = 1f
-                toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.error_red))
-                testAudioButton.text = "TEST AUDIO"
-                testAudioButton.isEnabled = false
-                testAudioButton.alpha = 0.5f
-                testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-                statusTextView.text = "Status: Service Active"
-            }
-            // 3. Idle, no SIM
-            !hasSimAvailable -> {
-                toggleButton.text = "NO SIM DETECTED"
-                toggleButton.isEnabled = false
-                toggleButton.alpha = 0.5f
-                toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-                testAudioButton.text = "TEST AUDIO"
-                testAudioButton.isEnabled = true
-                testAudioButton.alpha = 1f
-                testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-                statusTextView.text = "Status: No SIM"
-            }
-            // 4. Idle, SIM available
-            else -> {
-                toggleButton.text = if (hasCallPermissions) "START SERVICE" else "CALL PERMISSIONS REQUIRED"
-                toggleButton.isEnabled = hasCallPermissions
-                toggleButton.alpha = if (hasCallPermissions) 1f else 0.5f
-                toggleButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-                testAudioButton.text = "TEST AUDIO"
-                testAudioButton.isEnabled = true
-                testAudioButton.alpha = 1f
-                testAudioButton.setBackgroundColor(ContextCompat.getColor(this, R.color.brand_green))
-                statusTextView.text = if (hasCallPermissions) "Status: Inactive" else "Status: Missing call permissions"
-            }
-        }
+        statusTextView.text = text
+        statusTextView.setTextColor(
+            ContextCompat.getColor(this, if (active) R.color.brand_green else R.color.error_red)
+        )
     }
 
     private fun requestPermissionsAndStart(allowWithoutSim: Boolean = false) {
@@ -347,7 +235,7 @@ class MainActivity : AppCompatActivity() {
         try {
             if (!hasSimAvailable && !allowWithoutSim) {
                 addLog("❌ Cannot start: no SIM")
-                updateButtonState()
+                updateStatus()
                 return
             }
             val intent = Intent(this, GsmService::class.java)
@@ -367,7 +255,7 @@ class MainActivity : AppCompatActivity() {
 
             isTestAudioActive = false
             pendingStartAudioTest = false
-            updateButtonState()
+            updateStatus()
             addLog("Service stopped successfully!")
 
             if (originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
@@ -391,7 +279,7 @@ class MainActivity : AppCompatActivity() {
         startGsmServiceSafely(intent)
         isServiceAudioActive = false
         isTestAudioActive = false
-        updateButtonState()
+        updateStatus()
         addLog("🛑 Service audio stopped")
     }
 
@@ -421,7 +309,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 addLog("Denied: ${deniedPermissions.joinToString()}")
             }
-            updateButtonState()
+            updateStatus()
         }
     }
 
@@ -433,7 +321,7 @@ class MainActivity : AppCompatActivity() {
         isTestAudioActive = true
         isServiceAudioActive = false
         pendingStartAudioTest = false
-        updateButtonState()
+        updateStatus()
         addLog("🎧 TEST audio started")
     }
 
@@ -445,7 +333,7 @@ class MainActivity : AppCompatActivity() {
         if (!startGsmServiceSafely(intent)) return
         isServiceAudioActive = true
         isTestAudioActive = false
-        updateButtonState()
+        updateStatus()
         addLog("📞 SERVICE audio started")
     }
 
@@ -457,7 +345,7 @@ class MainActivity : AppCompatActivity() {
         isTestAudioActive = false
         isServiceAudioActive = false
         pendingStartAudioTest = false
-        updateButtonState()
+        updateStatus()
         addLog("🛑 Test audio stopped")
     }
 
@@ -515,11 +403,6 @@ class MainActivity : AppCompatActivity() {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("GSM Logs", logs))
         addLog("📋 All logs copied to clipboard")
-    }
-
-    private fun updateGainLabels() {
-        micGainLabel.text = "%.1fx".format(micGainSeekBar.progress / 100f)
-        playbackVolLabel.text = "%.1fx".format(playbackVolSeekBar.progress / 100f)
     }
 
     private fun sanitizeLogMessage(message: String): String {
@@ -588,12 +471,12 @@ class MainActivity : AppCompatActivity() {
                 if (validated && !hasInternetConnection) {
                     hasInternetConnection = true
                     addLog("✅ Internet connection restored")
-                    runOnUiThread { updateButtonState() }
+                    runOnUiThread { updateStatus() }
                 } else if (!validated && hasInternetConnection) {
                     hasInternetConnection = false
                     addLog("❌ No internet — stopping active audio")
                     runOnUiThread {
-                        updateButtonState()
+                        updateStatus()
                         if (isTestAudioActive) stopTestAudio()
                         else if (isServiceAudioActive) stopServiceAudioInput()
                     }
@@ -604,7 +487,7 @@ class MainActivity : AppCompatActivity() {
                     hasInternetConnection = false
                     addLog("❌ Network lost — stopping active audio")
                     runOnUiThread {
-                        updateButtonState()
+                        updateStatus()
                         if (isTestAudioActive) stopTestAudio()
                         else if (isServiceAudioActive) stopServiceAudioInput()
                     }
@@ -679,18 +562,18 @@ class MainActivity : AppCompatActivity() {
                 addLog("⚠️ SubscriptionManager returned empty but SIM state=READY — treating as SIM available")
                 hasSimAvailable = true
                 findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
-                updateButtonState()
+                updateStatus()
                 return
             }
             hasSimAvailable = false
             addLog("❌ No SIM cards detected - GSM calling is unavailable")
             findViewById<View>(R.id.sim_selection_container).visibility = View.GONE
-            updateButtonState()
+            updateStatus()
             return
         }
 
         hasSimAvailable = true
-        updateButtonState()
+        updateStatus()
 
         if (subs.size < 2) {
             addLog("Single SIM detected - no selection UI shown")

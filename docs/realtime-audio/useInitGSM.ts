@@ -845,6 +845,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const stopService = () => sendCommand("STOP_SERVICE")
   const startTest = () => sendCommand("START_TEST")
   const stopTest = () => sendCommand("STOP_TEST")
+  const setMicGain = (value: number) => sendCommand("SET_GAIN", { micGain: value })
+  const setPlaybackGain = (value: number) => sendCommand("SET_GAIN", { playbackGain: value })
 
   const fetchLogs = async (): Promise<string[]> => {
     try {
@@ -860,6 +862,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   return {
     call, hungUp, sendDTMF, stopTestAudio,
     startService, stopService, startTest, stopTest, fetchLogs,
+    setMicGain, setPlaybackGain,
     isTestAudioActiveRef, simsRef, selectedSimRef, selectSim,
   }
 }

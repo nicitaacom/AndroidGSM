@@ -233,6 +233,9 @@ class GsmService : Service() {
                 } catch (e: Exception) {
                     MainActivity.log("Failed to register callStateReceiver: ${e.message}")
                 }
+
+                // Connect WS cmd channel immediately — frontend needs "ready" before any button click
+                ensureRealtimeClientsInitialized()
             } catch (error: Exception) {
                 MainActivity.log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
                 error.printStackTrace()
@@ -404,6 +407,7 @@ class GsmService : Service() {
             stopServiceDuplexOutputToServerAndServerToInput()
         }
         isTestAudioActive = true
+        MainActivity.setStatus("Status: Test Audio Active", true)
 
         val baseUrl = config?.BACKEND_URL
         val bearerToken = config?.BACKEND_BEARER
@@ -467,6 +471,7 @@ class GsmService : Service() {
 
     private fun stopTestDuplexMicToServerAndServerToOutput() {
         isTestAudioActive = false
+        MainActivity.setStatus("Status: Ready", false)
         audioWsHandler?.stopAudioCapture()
         audioWsHandler?.stopAudioPlayback()
         audioWsHandler?.disconnect()
@@ -496,6 +501,7 @@ class GsmService : Service() {
         }
 
         isServiceAudioActive = true
+        MainActivity.setStatus("Status: Service Active", true)
 
         // SERVICE mode: just connect to backend and wait for CALL_STARTED command.
         // Audio capture/playback starts only when a call connects (OFFHOOK via GsmDialer callback).
@@ -505,6 +511,7 @@ class GsmService : Service() {
 
     private fun stopServiceDuplexOutputToServerAndServerToInput() {
         isServiceAudioActive = false
+        MainActivity.setStatus("Status: Ready", false)
         try {
             audioWsHandler?.stopAudioCapture()
             audioWsHandler?.stopAudioPlayback()
@@ -532,6 +539,13 @@ class GsmService : Service() {
                 "CALL_ENDED" -> handleCallEnded()
                 "SEND_DTMF" -> handleSendDtmf(data)
                 "AUDIO_CHUNK" -> handleAudioChunk(data)
+                "SET_GAIN" -> {
+                    val mic = (data["micGain"] as? Number)?.toFloat()
+                    val playback = (data["playbackGain"] as? Number)?.toFloat()
+                    if (mic != null) AudioWebSocketHandler.micGain = mic.coerceIn(0f, 4f)
+                    if (playback != null) AudioWebSocketHandler.playbackGain = playback.coerceIn(0f, 4f)
+                    MainActivity.log("🎚️ Gain: mic=${mic} playback=${playback}")
+                }
                 "START_SERVICE" -> {
                     ensureRealtimeClientsInitialized()
                     startServiceDuplexOutputToServerAndServerToInput()
