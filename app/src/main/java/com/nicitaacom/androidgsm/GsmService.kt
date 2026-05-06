@@ -506,8 +506,9 @@ class GsmService : Service() {
         Thread {
             val deadline = System.currentTimeMillis() + 10000
             while (System.currentTimeMillis() < deadline) {
-                if (cmdWsClient?.isConnected == true) {
-                    cmdWsClient?.sendEvent("SERVICE_STARTED", emptyMap())
+                val client = cmdWsClient
+                if (client != null && client.isConnected) {
+                    client.sendEvent("SERVICE_STARTED", emptyMap())
                     break
                 }
                 Thread.sleep(300)
@@ -561,13 +562,21 @@ class GsmService : Service() {
                 "START_SERVICE" -> {
                     ensureRealtimeClientsInitialized()
                     startServiceDuplexOutputToServerAndServerToInput()
+                    MainActivity.notifyServiceActive(true)
                 }
-                "STOP_SERVICE" -> stopServiceDuplexOutputToServerAndServerToInput()
+                "STOP_SERVICE" -> {
+                    stopServiceDuplexOutputToServerAndServerToInput()
+                    MainActivity.notifyServiceActive(false)
+                }
                 "START_TEST" -> {
                     ensureRealtimeClientsInitialized()
                     startTestDuplexMicToServerAndServerToOutput()
+                    MainActivity.notifyTestActive(true)
                 }
-                "STOP_TEST" -> stopTestDuplexMicToServerAndServerToOutput()
+                "STOP_TEST" -> {
+                    stopTestDuplexMicToServerAndServerToOutput()
+                    MainActivity.notifyTestActive(false)
+                }
                 else -> MainActivity.log("Unhandled command: $type")
             }
         } catch (e: Exception) {

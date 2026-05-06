@@ -76,6 +76,26 @@ class MainActivity : AppCompatActivity() {
                 )
             }
         }
+
+        // Called by GsmService when START_SERVICE/STOP_SERVICE arrives over WebSocket,
+        // so MainActivity.isServiceAudioActive stays in sync and onResume doesn't reset the UI.
+        fun notifyServiceActive(active: Boolean) {
+            instance?.get()?.runOnUiThread {
+                val activity = instance?.get() ?: return@runOnUiThread
+                activity.isServiceAudioActive = active
+                if (active) activity.isTestAudioActive = false
+                activity.updateStatus()
+            }
+        }
+
+        fun notifyTestActive(active: Boolean) {
+            instance?.get()?.runOnUiThread {
+                val activity = instance?.get() ?: return@runOnUiThread
+                activity.isTestAudioActive = active
+                if (active) activity.isServiceAudioActive = false
+                activity.updateStatus()
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
