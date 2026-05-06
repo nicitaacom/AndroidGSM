@@ -631,6 +631,11 @@ class GsmService : Service() {
                         audioWsHandler?.setCallActive(true)
                         audioWsHandler?.startAudioCapture()
                         audioWsHandler?.startAudioPlayback()
+                        // Mute phone speaker — audio is routed to frontend via WebSocket only.
+                        // REMOTE_SUBMIX still captures from the mixer even at volume 0.
+                        val amMute = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                        amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
+                        MainActivity.log("📞 Phone speaker muted (audio to frontend only)")
                         MainActivity.log("📞 WS audio started, cmdWsClient=${if (cmdWsClient != null) "alive" else "NULL"}")
                         cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
                         MainActivity.log("📞 CALL_CONNECTED sent to backend")

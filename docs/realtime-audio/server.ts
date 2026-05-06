@@ -347,6 +347,16 @@ app.post('/api/commands', async (req, res) => {
 
   serverLog('ℹ️ [api/commands] accepted', { deviceToken, type: commands.type })
 
+  // Fire Pusher immediately for call state commands so the frontend UI updates
+  // without waiting for Android to echo the event back over WebSocket.
+  if (commands.type === 'CALL_ENDED') {
+    await safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken, timestamp: new Date().toISOString() })
+    serverLog(`✅ [api/commands] gsm:call-ended pushed immediately for ${deviceToken}`)
+  } else if (commands.type === 'CALL_STARTED' || commands.type === 'MAKE_CALL') {
+    await safeTrigger('gsm-calls', 'gsm:call-started', { deviceToken, number: commands.data?.number, timestamp: new Date().toISOString() })
+    serverLog(`✅ [api/commands] gsm:call-started pushed immediately for ${deviceToken}`)
+  }
+
   await sendCommand(deviceToken, commands.type, commands.data || {})
   res.json({ success: true })
 })
