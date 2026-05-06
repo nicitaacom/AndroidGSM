@@ -832,5 +832,34 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
   const selectSim = (sim: SimAccount) => { selectedSimRef.current = sim }
 
-  return { call, hungUp, sendDTMF, stopTestAudio, isTestAudioActiveRef, simsRef, selectedSimRef, selectSim }
+  const sendCommand = async (type: string, data: Record<string, unknown> = {}) => {
+    if (!deviceToken) return
+    await fetch("/api/gsm/commands", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deviceToken, commands: { type, data } }),
+    })
+  }
+
+  const startService = () => sendCommand("START_SERVICE")
+  const stopService = () => sendCommand("STOP_SERVICE")
+  const startTest = () => sendCommand("START_TEST")
+  const stopTest = () => sendCommand("STOP_TEST")
+
+  const fetchLogs = async (): Promise<string[]> => {
+    try {
+      const res = await fetch("/api/gsm/logs", { cache: "no-store" })
+      if (!res.ok) return []
+      const data = await res.json()
+      return data.logs ?? []
+    } catch {
+      return []
+    }
+  }
+
+  return {
+    call, hungUp, sendDTMF, stopTestAudio,
+    startService, stopService, startTest, stopTest, fetchLogs,
+    isTestAudioActiveRef, simsRef, selectedSimRef, selectSim,
+  }
 }

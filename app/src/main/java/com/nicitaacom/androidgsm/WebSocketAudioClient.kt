@@ -12,7 +12,8 @@ class WebSocketAudioClient(
     private val wsUrl: String,
     private val bearerToken: String,
     private val deviceToken: String,
-    private val onAudioPacket: (JSONObject) -> Unit
+    private val onAudioPacket: (JSONObject) -> Unit,
+    private val onCommand: ((type: String, data: JSONObject) -> Unit)? = null
 ) : WebSocketListener() {
 
     private val httpClient = OkHttpClient.Builder()
@@ -70,9 +71,15 @@ class WebSocketAudioClient(
     override fun onMessage(webSocket: WebSocket, text: String) {
         try {
             val packet = JSONObject(text)
-            Log.d(TAG, "📨 Received: role=${packet.optString("role")}, dir=${packet.optString("dir")}")
-            
-            onAudioPacket(packet)
+            // Route command messages to command handler; everything else is audio
+            if (packet.optString("type") == "command") {
+                val cmdType = packet.optString("cmdType", "")
+                val data = packet.optJSONObject("data") ?: JSONObject()
+                Log.d(TAG, "📨 WS command: $cmdType")
+                onCommand?.invoke(cmdType, data)
+            } else {
+                onAudioPacket(packet)
+            }
         } catch (e: Exception) {
             Log.e(TAG, "❌ Parse error: ${e.message}")
         }
@@ -92,6 +99,21 @@ class WebSocketAudioClient(
         isConnected = false
         Log.d(TAG, "⚠️ Closed: code=$code, reason=$reason")
         MainActivity.log("WebSocket closed: $reason")
+    }
+
+    fun sendEvent(type: String, data: Map<String, Any> = emptyMap()) {
+        if (!isConnected) return
+        try {
+            val payload = JSONObject().apply {
+                put("type", "event")
+                put("eventType", type)
+                put("deviceToken", deviceToken)
+                if (data.isNotEmpty()) put("data", JSONObject(data))
+            }
+            ws?.send(payload.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ sendEvent error: ${e.message}")
+        }
     }
 
     fun sendAudioChunk(audio: String, seq: Long, sampleRate: Int, codec: String) {

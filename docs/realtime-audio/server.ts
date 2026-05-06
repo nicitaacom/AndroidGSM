@@ -39,6 +39,17 @@ interface DeviceInfo {
 
 const connectedDevices = new Map<string, DeviceInfo>()
 
+// Circular log buffer — last 200 lines, available via GET /api/logs
+const logBuffer: string[] = []
+const MAX_LOG_LINES = 200
+
+function serverLog(...args: any[]) {
+  const line = `[${new Date().toISOString()}] ${args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`
+  logBuffer.push(line)
+  if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift()
+  console.log(...args)
+}
+
 // One browser listener + one android uplink per device (single-user assumption)
 const browserByDevice = new Map<string, WebSocket>()
 const androidByDevice = new Map<string, WebSocket>()
@@ -106,13 +117,13 @@ function authOk(auth?: string) {
   return !!incoming && !!expected && incoming === expected
 }
 
-async function sendCommand(deviceToken: string, type: string, data: any = {}) {
-  await safeTrigger(`private-device-${deviceToken}`, 'command', {
-    type,
-    data,
-    timestamp: new Date().toISOString(),
-  })
-}
+// sendCommand is defined below after androidCmdByDevice is initialized
+
+app.get('/api/logs', (req, res) => {
+  if (!authOk(req.headers.authorization)) return res.status(401).json({ error: 'Unauthorized' })
+  const n = Math.min(Number((req.query as any).n ?? 50), 200)
+  res.json({ logs: logBuffer.slice(-n) })
+})
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -198,7 +209,7 @@ app.post('/api/events', async (req, res) => {
     return res.status(400).json({ error: 'Missing deviceToken or type' })
   }
 
-  console.log(`📱 [api/events] ${type}`, { deviceToken })
+  serverLog(`📱 [api/events] ${type}`, { deviceToken })
 
   connectedDevices.set(deviceToken, { deviceToken, lastSeen: new Date() })
 
@@ -211,9 +222,9 @@ app.post('/api/events', async (req, res) => {
       if (forced || now - last >= CONNECTED_DEBOUNCE_MS) {
         lastConnectedPusherFire.set(deviceToken, now)
         await safeTrigger('gsm-devices', 'gsm:device-connected', { deviceToken, timestamp: new Date().toISOString() })
-        console.log(`✅ [api/events] CONNECTED pusher fired for ${deviceToken}${forced ? ' (explicit)' : ''}`)
+        serverLog(`✅ [api/events] CONNECTED pusher fired for ${deviceToken}${forced ? ' (explicit)' : ''}`)
       } else {
-        console.log(`⏭️ [api/events] CONNECTED debounced for ${deviceToken} (next in ${Math.round((CONNECTED_DEBOUNCE_MS - (now - last)) / 1000)}s)`)
+        serverLog(`⏭️ [api/events] CONNECTED debounced for ${deviceToken} (next in ${Math.round((CONNECTED_DEBOUNCE_MS - (now - last)) / 1000)}s)`)
       }
       break
     }
@@ -252,15 +263,15 @@ app.post('/api/events', async (req, res) => {
       break
     }
     case 'CALL_STARTED':
-      console.log(`📞 [api/events] CALL_STARTED to ${data?.number}`)
+      serverLog(`📞 [api/events] CALL_STARTED to ${data?.number}`)
       await safeTrigger('gsm-calls', 'gsm:call-started', { deviceToken, number: data?.number, timestamp: new Date().toISOString() })
       break
     case 'CALL_CONNECTED':
-      console.log(`✅ [api/events] CALL_CONNECTED - call is being answered`)
+      serverLog(`✅ [api/events] CALL_CONNECTED - call is being answered`)
       await safeTrigger('gsm-calls', 'gsm:call-connected', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'CALL_ENDED':
-      console.log(`❌ [api/events] CALL_ENDED`)
+      serverLog(`❌ [api/events] CALL_ENDED`)
       await safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'DTMF_SENT':
@@ -268,11 +279,11 @@ app.post('/api/events', async (req, res) => {
       await sendCommand(deviceToken, 'SEND_DTMF', data)
       break
     case 'TEST_AUDIO_STARTED':
-      console.log(`🎧 [api/events] TEST_AUDIO_STARTED device=${deviceToken}`)
+      serverLog(`🎧 [api/events] TEST_AUDIO_STARTED device=${deviceToken}`)
       await safeTrigger('gsm-calls', 'gsm:test-audio-started', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'TEST_AUDIO_STOPPED':
-      console.log(`🛑 [api/events] TEST_AUDIO_STOPPED device=${deviceToken}`)
+      serverLog(`🛑 [api/events] TEST_AUDIO_STOPPED device=${deviceToken}`)
       await safeTrigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken, timestamp: new Date().toISOString() })
       break
     case 'AUDIO_CHUNK': {
@@ -330,7 +341,7 @@ app.post('/api/commands', async (req, res) => {
     return res.status(400).json({ error: 'Missing deviceToken or commands.type' })
   }
 
-  console.log('ℹ️ [api/commands] accepted', { deviceToken, type: commands.type })
+  serverLog('ℹ️ [api/commands] accepted', { deviceToken, type: commands.type })
 
   await sendCommand(deviceToken, commands.type, commands.data || {})
   res.json({ success: true })
@@ -363,8 +374,36 @@ app.post('/pusher/auth', (req, res) => {
   res.json(authResponse)
 })
 
+// Android command WebSocket peers: deviceToken -> WebSocket
+// Used by /ws/cmd for persistent command delivery without Pusher
+const androidCmdByDevice = new Map<string, WebSocket>()
+
+// Deliver a command to the Android device over /ws/cmd (preferred) or Pusher fallback
+async function sendCommand(deviceToken: string, type: string, data: any = {}) {
+  const cmdWs = androidCmdByDevice.get(deviceToken)
+  if (cmdWs?.readyState === WebSocket.OPEN) {
+    try {
+      cmdWs.send(JSON.stringify({ type: 'command', cmdType: type, data, timestamp: new Date().toISOString() }))
+      serverLog(`✅ [ws/cmd] command sent to android: ${type}`)
+      return
+    } catch (err) {
+      console.error(`❌ [ws/cmd] failed to send command: ${err}`)
+    }
+  }
+  // Fallback to Pusher if WS not available
+  await safeTrigger(`private-device-${deviceToken}`, 'command', {
+    type,
+    data,
+    timestamp: new Date().toISOString(),
+  })
+}
+
 const server = http.createServer(app)
 const wss = new WebSocketServer({ server, path: '/ws/audio' })
+
+// Persistent command channel: Android connects once at startup, stays connected.
+// Handles heartbeats (updates lastSeen), receives commands with zero Pusher cost.
+const wsCmd = new WebSocketServer({ server, path: '/ws/cmd' })
 
 /**
  * Message schema (JSON text frame):
@@ -457,6 +496,85 @@ wss.on('connection', (ws, req) => {
     console.log('ℹ️ [ws/audio] disconnected')
     for (const [k, v] of browserByDevice) if (v === ws) browserByDevice.delete(k)
     for (const [k, v] of androidByDevice) if (v === ws) androidByDevice.delete(k)
+  })
+})
+
+wsCmd.on('connection', (ws, req) => {
+  const url = new URL(req.url || '', `http://${req.headers.host}`)
+  const token = url.searchParams.get('token')
+  const deviceToken = url.searchParams.get('deviceToken') || ''
+  if (!authOk(token ? `Bearer ${token}` : undefined) || !deviceToken) {
+    ws.close(1008, 'Unauthorized')
+    return
+  }
+
+  androidCmdByDevice.set(deviceToken, ws)
+  connectedDevices.set(deviceToken, { deviceToken, lastSeen: new Date(), sims: connectedDevices.get(deviceToken)?.sims })
+  serverLog(`✅ [ws/cmd] android connected: ${deviceToken}`)
+
+  ws.on('message', (buf) => {
+    try {
+      const msg = JSON.parse(buf.toString('utf8'))
+      if (msg.type !== 'event') return
+
+      const { eventType, deviceToken: dt, data } = msg
+      const tok = dt || deviceToken
+      // Update lastSeen on every event (heartbeat or otherwise)
+      const existing = connectedDevices.get(tok)
+      connectedDevices.set(tok, { deviceToken: tok, lastSeen: new Date(), sims: existing?.sims })
+
+      serverLog(`📱 [ws/cmd] event: ${eventType} from ${tok}`)
+
+      // Only forward state-change events to browser via Pusher — not heartbeats
+      switch (eventType) {
+        case 'CONNECTED_EXPLICIT':
+          serverLog(`✅ [ws/cmd] device-connected: ${tok}`)
+          safeTrigger('gsm-devices', 'gsm:device-connected', { deviceToken: tok, timestamp: new Date().toISOString() })
+          break
+        case 'CALL_CONNECTED':
+          serverLog(`📞 [ws/cmd] CALL_CONNECTED: ${tok}`)
+          safeTrigger('gsm-calls', 'gsm:call-connected', { deviceToken: tok, timestamp: new Date().toISOString() })
+          break
+        case 'CALL_ENDED':
+          serverLog(`❌ [ws/cmd] CALL_ENDED: ${tok}`)
+          safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken: tok, timestamp: new Date().toISOString() })
+          break
+        case 'TEST_AUDIO_STARTED':
+          serverLog(`🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
+          safeTrigger('gsm-calls', 'gsm:test-audio-started', { deviceToken: tok, timestamp: new Date().toISOString() })
+          break
+        case 'TEST_AUDIO_STOPPED':
+          serverLog(`🛑 [ws/cmd] TEST_AUDIO_STOPPED: ${tok}`)
+          safeTrigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken: tok, timestamp: new Date().toISOString() })
+          break
+        case 'SIM_LIST': {
+          try {
+            const simsRaw: string = data?.sims ?? ''
+            const matches = [...simsRaw.matchAll(/\{([^}]+)\}/g)]
+            const sims = matches.map(m => {
+              const pairs: Record<string, string> = {}
+              m[1].split(', ').forEach((p: string) => { const eq = p.indexOf('='); if (eq > 0) pairs[p.slice(0, eq).trim()] = p.slice(eq + 1).trim() })
+              return { id: pairs.id ?? '', componentName: pairs.componentName ?? '', label: pairs.label ?? 'SIM', simSlotIndex: Number(pairs.simSlotIndex ?? 0) }
+            })
+            const dev = connectedDevices.get(tok)
+            if (dev) dev.sims = sims
+          } catch (e) { console.error('SIM_LIST parse error', e) }
+          break
+        }
+        case 'CONNECTED':
+          // heartbeat — lastSeen already updated above, no Pusher trigger needed
+          break
+        default:
+          console.log(`⚠️ [ws/cmd] unknown event: ${eventType}`)
+      }
+    } catch (e) {
+      console.error('❌ [ws/cmd] parse error', e)
+    }
+  })
+
+  ws.on('close', () => {
+    console.log(`ℹ️ [ws/cmd] android disconnected: ${deviceToken}`)
+    androidCmdByDevice.delete(deviceToken)
   })
 })
 

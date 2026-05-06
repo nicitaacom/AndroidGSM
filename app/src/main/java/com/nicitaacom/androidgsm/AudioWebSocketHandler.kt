@@ -71,7 +71,7 @@ class AudioWebSocketHandler(
     fun connect(wsUrl: String, bearerToken: String, deviceToken: String) {
         MainActivity.log("🔌 WebSocket Audio: Connecting to $wsUrl")
         seqRx = -1L
-        wsConnection = WebSocketAudioClient(wsUrl, bearerToken, deviceToken) { packet -> handleAudioPacket(packet) }
+        wsConnection = WebSocketAudioClient(wsUrl, bearerToken, deviceToken, onAudioPacket = { packet -> handleAudioPacket(packet) })
     }
 
     fun disconnect() {

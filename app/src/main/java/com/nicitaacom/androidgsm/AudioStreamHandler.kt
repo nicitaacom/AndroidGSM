@@ -21,7 +21,7 @@ import java.nio.ByteOrder
 
 class AudioStreamHandler(
     private val context: Context,
-    private val pusherClient: PusherClient,
+    @Suppress("UNUSED_PARAMETER") pusherClient: Any? = null,
     private val onAudioCaptured: ((String) -> Unit)? = null
 ) {
     private var audioRecord: AudioRecord? = null
@@ -164,7 +164,7 @@ class AudioStreamHandler(
 
                     // 5. Send to backend with error handling
                     try {
-                        pusherClient.sendEvent("AUDIO_CHUNK", mapOf("audio" to base64Audio))
+                        onAudioCaptured?.invoke(base64Audio)
                     } catch (e: Exception) {
                         Log.e(TAG, "Error sending audio chunk via Pusher", e)
                     }

@@ -21,7 +21,7 @@ import androidx.core.app.NotificationCompat
 class GsmService : Service() {
 
     private var wakeLock: PowerManager.WakeLock? = null
-    private var pusherClient: PusherClient? = null
+    private var cmdWsClient: CommandWebSocketClient? = null
     private var gsmDialer: GsmDialer? = null
     private var audioStreamHandler: AudioStreamHandler? = null
     private var audioWsHandler: AudioWebSocketHandler? = null
@@ -63,7 +63,7 @@ class GsmService : Service() {
                                     audioWsHandler?.setCallActive(true)
                                     audioWsHandler?.startAudioCapture()
                                     audioWsHandler?.startAudioPlayback()
-                                    pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
+                                    cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
                                     MainActivity.log("callStateReceiver: WS audio started (call mode)")
                                 } catch (error: Exception) {
                                     MainActivity.log("callStateReceiver error: ${error.message}")
@@ -81,7 +81,7 @@ class GsmService : Service() {
                             audioWsHandler?.setCallActive(false)
                             audioWsHandler?.disconnect()
                             Thread {
-                                try { pusherClient?.sendEvent("CALL_ENDED", emptyMap()) } catch (_: Exception) {}
+                                try { cmdWsClient?.sendEvent("CALL_ENDED", emptyMap()) } catch (_: Exception) {}
                             }.start()
                         } catch (e: Exception) {
                             MainActivity.log("callStateReceiver disconnect error: ${e.message}")
@@ -177,7 +177,7 @@ class GsmService : Service() {
                         val sims = gsmDialer?.getSimAccounts() ?: emptyList()
                         if (sims.isNotEmpty()) {
                             val simData = mapOf("sims" to sims.toString())
-                            pusherClient?.sendEvent("SIM_LIST", simData)
+                            cmdWsClient?.sendEvent("SIM_LIST", simData)
                             MainActivity.log("GsmService: SIM_LIST sent: ${sims.size} accounts")
                         }
                     } catch (e: Exception) {
@@ -208,7 +208,7 @@ class GsmService : Service() {
                         audioWsHandler?.disconnect()
                         audioWsHandler = null
                     } catch (_: Exception) {}
-                    Thread { pusherClient?.sendEvent("CALL_ENDED", emptyMap()) }.start()
+                    Thread { cmdWsClient?.sendEvent("CALL_ENDED", emptyMap()) }.start()
                 }
                 gsmDialer?.setCallConnectedCallback {
                     isCallActive = true
@@ -313,49 +313,34 @@ class GsmService : Service() {
     private fun ensureRealtimeClientsInitialized() {
         Thread {
             try {
-                val hasPusherCreds = !config?.PUSHER_KEY.isNullOrBlank() &&
-                    !config?.PUSHER_CLUSTER.isNullOrBlank() &&
-                    !config?.BACKEND_BEARER.isNullOrBlank() &&
-                    !config?.BACKEND_URL.isNullOrBlank()
-
-                if (!hasPusherCreds) {
-                    MainActivity.log("WARNING: Missing Pusher/Backend config")
-                    return@Thread
-                }
-
-               if (pusherClient == null) {
                 val safeConfig = config ?: run {
                     MainActivity.log("WARNING: Config unavailable, skipping realtime init")
                     return@Thread
                 }
 
-                pusherClient = PusherClient(this, safeConfig)
-                pusherClient?.connect()
-                MainActivity.log("GsmService: Pusher connecting...")
-
-                // 1. Wait for connection then notify backend so connectedDevices is populated
-                Thread {
-                    try {
-                        Thread.sleep(1500) // allow WS handshake to complete
-                        // CONNECTED_EXPLICIT bypasses server debounce — fires Pusher regardless of 5-min window
-                        pusherClient?.sendEvent("CONNECTED_EXPLICIT", emptyMap())
-                        MainActivity.log("GsmService: CONNECTED_EXPLICIT event sent to backend")
-                    } catch (error: Exception) {
-                        MainActivity.log("WARNING: Failed to send CONNECTED event: ${error.message}")
+                if (!safeConfig.BACKEND_BEARER.isNullOrBlank() && !safeConfig.BACKEND_URL.isNullOrBlank()) {
+                    if (cmdWsClient == null) {
+                        val wsUrl = safeConfig.BACKEND_URL
+                            .replace("http://", "ws://")
+                            .replace("https://", "wss://")
+                            .removeSuffix("/") + "/ws/cmd"
+                        cmdWsClient = CommandWebSocketClient(wsUrl, safeConfig.BACKEND_BEARER, safeConfig.DEVICE_TOKEN) { type, data ->
+                            handleWsCommand(type, data)
+                        }
+                        cmdWsClient?.connect()
+                        MainActivity.log("GsmService: CommandWS connecting...")
                     }
-                }.start()
-            }
-                if (audioStreamHandler == null && pusherClient != null) {
-                    audioStreamHandler = AudioStreamHandler(this, pusherClient!!)
+                }
+
+                if (audioStreamHandler == null) {
+                    audioStreamHandler = AudioStreamHandler(this, null)
                 }
                 if (audioWsHandler == null) {
-                    config?.let { safeConfig ->
-                                        audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
-                                    }
+                    audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
                 }
-                MainActivity.log("GsmService: Audio handlers initialized")
+                MainActivity.log("GsmService: realtime clients initialized")
             } catch (error: Exception) {
-                MainActivity.log("WARNING: Pusher/Audio init failed: ${error.message}")
+                MainActivity.log("WARNING: realtime init failed: ${error.message}")
             }
         }.start()
     }
@@ -377,8 +362,8 @@ class GsmService : Service() {
 
         // 2. Notify backend device is gone
         Thread {
-            try { pusherClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
-            try { pusherClient?.disconnect() } catch (_: Exception) {}
+            try { cmdWsClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
+            try { cmdWsClient?.disconnect() } catch (_: Exception) {}
         }.apply { isDaemon = true; start() }.join(1000)
 
         try { unregisterReceiver(callStateReceiver) } catch (_: Exception) {}
@@ -432,14 +417,14 @@ class GsmService : Service() {
 
         Thread {
             try {
-                // 1. Wait up to 5s for pusherClient to be ready before sending event
+                // 1. Wait up to 5s for cmdWsClient to be ready before sending event
                 val deadline = System.currentTimeMillis() + 5000
-                while (pusherClient == null && System.currentTimeMillis() < deadline) {
+                while (cmdWsClient == null && System.currentTimeMillis() < deadline) {
                     MainActivity.log("⏳ Waiting for Pusher to connect...")
                     Thread.sleep(300)
                 }
 
-                if (pusherClient == null) {
+                if (cmdWsClient == null) {
                     MainActivity.log("❌ Pusher not available after 5s - TEST AUDIO aborted")
                     isTestAudioActive = false
                     return@Thread
@@ -471,7 +456,7 @@ class GsmService : Service() {
                 ws.startAudioCapture()
 
                 // 5. Notify browser AFTER WS is ready so browser starts mic capture immediately
-                pusherClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
+                cmdWsClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
                 MainActivity.log("✅ TEST mode active: duplex browser<->android over websocket")
             } catch (error: Exception) {
                 MainActivity.log("ERROR starting test audio: ${error.message}")
@@ -486,13 +471,9 @@ class GsmService : Service() {
         audioWsHandler?.stopAudioPlayback()
         audioWsHandler?.disconnect()
         audioWsHandler = null
-        Thread {
-            try { pusherClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap()) } catch (_: Exception) {}
-            Thread.sleep(300)
-            pusherClient?.disconnect()
-            pusherClient = null
-        }.start()
-        MainActivity.log("🛑 TEST stopped — Pusher disconnected")
+        // cmdWsClient stays connected — it's the persistent command channel
+        Thread { try { cmdWsClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap()) } catch (_: Exception) {} }.start()
+        MainActivity.log("🛑 TEST stopped")
     }
 
     private fun startServiceDuplexOutputToServerAndServerToInput() {
@@ -532,13 +513,8 @@ class GsmService : Service() {
             MainActivity.log("WARNING: error stopping SERVICE ws: ${error.message}")
         }
         audioWsHandler = null
-        Thread {
-            try { pusherClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
-            Thread.sleep(300)
-            pusherClient?.disconnect()
-            pusherClient = null
-        }.start()
-        MainActivity.log("🛑 SERVICE stopped — Pusher disconnected")
+        // cmdWsClient stays connected — it's the persistent command channel
+        MainActivity.log("🛑 SERVICE stopped")
     }
 
     // central command dispatcher - single entrypoint
@@ -556,12 +532,29 @@ class GsmService : Service() {
                 "CALL_ENDED" -> handleCallEnded()
                 "SEND_DTMF" -> handleSendDtmf(data)
                 "AUDIO_CHUNK" -> handleAudioChunk(data)
+                "START_SERVICE" -> {
+                    ensureRealtimeClientsInitialized()
+                    startServiceDuplexOutputToServerAndServerToInput()
+                }
+                "STOP_SERVICE" -> stopServiceDuplexOutputToServerAndServerToInput()
+                "START_TEST" -> {
+                    ensureRealtimeClientsInitialized()
+                    startTestDuplexMicToServerAndServerToOutput()
+                }
+                "STOP_TEST" -> stopTestDuplexMicToServerAndServerToOutput()
                 else -> MainActivity.log("Unhandled command: $type")
             }
         } catch (e: Exception) {
             MainActivity.log("FATAL: Uncaught exception in handleCommand: ${e.message}")
             e.printStackTrace()
         }
+    }
+
+    // Dispatches commands arriving over the persistent command WebSocket (/ws/cmd)
+    private fun handleWsCommand(type: String, data: org.json.JSONObject) {
+        val dataMap = mutableMapOf<String, Any>()
+        data.keys().forEach { key -> dataMap[key] = data.get(key) }
+        handleCommand(type, dataMap)
     }
 
     private fun handleCallStarted(data: Map<String, Any>) {
@@ -608,8 +601,8 @@ class GsmService : Service() {
                         audioWsHandler?.setCallActive(true)
                         audioWsHandler?.startAudioCapture()
                         audioWsHandler?.startAudioPlayback()
-                        MainActivity.log("📞 WS audio started, pusherClient=${if (pusherClient != null) "alive" else "NULL"}")
-                        pusherClient?.sendEvent("CALL_CONNECTED", emptyMap())
+                        MainActivity.log("📞 WS audio started, cmdWsClient=${if (cmdWsClient != null) "alive" else "NULL"}")
+                        cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
                         MainActivity.log("📞 CALL_CONNECTED sent to backend")
                     } catch (error: Exception) {
                         MainActivity.log("ERROR in CALL_CONNECTED callback: ${error.message}")
@@ -627,14 +620,14 @@ class GsmService : Service() {
                     audioStreamHandler?.stopAudioCapture()
                     audioStreamHandler?.stopAudioPlayback()
                     audioWsHandler?.disconnect()
-                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                    cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
                 }
             } catch (error: Exception) {
                 MainActivity.log("ERROR starting call: ${error.message}")
                 audioStreamHandler?.stopAudioCapture()
                 audioStreamHandler?.stopAudioPlayback()
                 audioWsHandler?.disconnect()
-                pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
                 error.printStackTrace()
             }
         } catch (e: Exception) {
@@ -655,7 +648,7 @@ class GsmService : Service() {
                     audioWsHandler?.stopAudioPlayback()
                     audioStreamHandler?.stopAudioCapture()
                     audioStreamHandler?.stopAudioPlayback()
-                    pusherClient?.sendEvent("CALL_ENDED", emptyMap())
+                    cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
                 } catch (error: Exception) {
                     MainActivity.log("ERROR in handleCallEnded thread: ${error.message}")
                 }
@@ -674,7 +667,7 @@ class GsmService : Service() {
             }
             MainActivity.log("Sending DTMF: $digit")
             gsmDialer?.sendDtmf(digit[0])
-            pusherClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
+            cmdWsClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
         } catch (e: Exception) {
             MainActivity.log("ERROR in handleSendDtmf: ${e.message}")
             e.printStackTrace()
