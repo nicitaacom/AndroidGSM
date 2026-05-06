@@ -327,9 +327,10 @@ class GsmService : Service() {
                             .replace("http://", "ws://")
                             .replace("https://", "wss://")
                             .removeSuffix("/") + "/ws/cmd"
-                        cmdWsClient = CommandWebSocketClient(wsUrl, safeConfig.BACKEND_BEARER, safeConfig.DEVICE_TOKEN) { type, data ->
-                            handleWsCommand(type, data)
-                        }
+                        cmdWsClient = CommandWebSocketClient(wsUrl, safeConfig.BACKEND_BEARER, safeConfig.DEVICE_TOKEN,
+                            onCommand = { type, data -> handleWsCommand(type, data) },
+                            stateProvider = { mapOf("isServiceActive" to isServiceAudioActive, "isTestActive" to isTestAudioActive) }
+                        )
                         cmdWsClient?.connect()
                         MainActivity.log("GsmService: CommandWS connecting...")
                     }
@@ -502,7 +503,16 @@ class GsmService : Service() {
 
         isServiceAudioActive = true
         MainActivity.setStatus("Status: Service Active", true)
-        Thread { cmdWsClient?.sendEvent("SERVICE_STARTED", emptyMap()) }.start()
+        Thread {
+            val deadline = System.currentTimeMillis() + 10000
+            while (System.currentTimeMillis() < deadline) {
+                if (cmdWsClient?.isConnected == true) {
+                    cmdWsClient?.sendEvent("SERVICE_STARTED", emptyMap())
+                    break
+                }
+                Thread.sleep(300)
+            }
+        }.start()
 
         // SERVICE mode: just connect to backend and wait for CALL_STARTED command.
         // Audio capture/playback starts only when a call connects (OFFHOOK via GsmDialer callback).

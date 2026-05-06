@@ -513,7 +513,7 @@ wsCmd.on('connection', (ws, req) => {
   }
 
   androidCmdByDevice.set(deviceToken, ws)
-  connectedDevices.set(deviceToken, { deviceToken, lastSeen: new Date(), sims: connectedDevices.get(deviceToken)?.sims })
+  connectedDevices.set(deviceToken, { ...connectedDevices.get(deviceToken), deviceToken, lastSeen: new Date() })
   serverLog(`✅ [ws/cmd] android connected: ${deviceToken}`)
 
   ws.on('message', (buf) => {
@@ -523,9 +523,13 @@ wsCmd.on('connection', (ws, req) => {
 
       const { eventType, deviceToken: dt, data } = msg
       const tok = dt || deviceToken
-      // Update lastSeen on every event (heartbeat or otherwise)
+      // Update lastSeen on every event, preserving all existing fields
       const existing = connectedDevices.get(tok)
-      connectedDevices.set(tok, { deviceToken: tok, lastSeen: new Date(), sims: existing?.sims })
+      const updated: DeviceInfo = { ...existing, deviceToken: tok, lastSeen: new Date() }
+      // Heartbeat and explicit-connect carry current service/test state from Android
+      if (data?.isServiceActive !== undefined) updated.isServiceActive = !!data.isServiceActive
+      if (data?.isTestActive !== undefined) updated.isTestActive = !!data.isTestActive
+      connectedDevices.set(tok, updated)
 
       serverLog(`📱 [ws/cmd] event: ${eventType} from ${tok}`)
 

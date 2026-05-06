@@ -22,7 +22,8 @@ class CommandWebSocketClient(
     private val wsUrl: String,
     private val bearerToken: String,
     private val deviceToken: String,
-    private val onCommand: (type: String, data: JSONObject) -> Unit
+    private val onCommand: (type: String, data: JSONObject) -> Unit,
+    private val stateProvider: (() -> Map<String, Any>)? = null
 ) : WebSocketListener() {
 
     private val httpClient = OkHttpClient.Builder()
@@ -33,7 +34,8 @@ class CommandWebSocketClient(
         .build()
 
     private var ws: WebSocket? = null
-    @Volatile private var isConnected = false
+    @Volatile var isConnected = false
+        private set
     private val isClosed = AtomicBoolean(false)
     private var heartbeatThread: Thread? = null
 
@@ -65,7 +67,7 @@ class CommandWebSocketClient(
         isConnected = true
         Log.d(TAG, "✅ Connected")
         // Register immediately so server knows this is a command channel
-        sendEvent("CONNECTED_EXPLICIT")
+        sendEvent("CONNECTED_EXPLICIT", stateProvider?.invoke() ?: emptyMap())
         startHeartbeat()
     }
 
@@ -129,7 +131,7 @@ class CommandWebSocketClient(
         heartbeatThread = Thread {
             while (isConnected && !isClosed.get()) {
                 try { Thread.sleep(HEARTBEAT_INTERVAL_MS) } catch (_: InterruptedException) { break }
-                if (isConnected && !isClosed.get()) sendEvent("CONNECTED", mapOf("heartbeat" to true))
+                if (isConnected && !isClosed.get()) sendEvent("CONNECTED", mapOf("heartbeat" to true) + (stateProvider?.invoke() ?: emptyMap()))
             }
         }.also { it.isDaemon = true; it.start() }
     }
