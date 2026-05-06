@@ -333,6 +333,8 @@ class GsmService : Service() {
                         )
                         cmdWsClient?.connect()
                         MainActivity.log("GsmService: CommandWS connecting...")
+                        // Auto-enter SERVICE mode — phone is always ready to handle calls once connected
+                        startServiceDuplexOutputToServerAndServerToInput()
                     }
                 }
 

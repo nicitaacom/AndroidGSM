@@ -90,6 +90,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const { callingSetup, num, dtmfTone, isConnected, isMuted, setDTMFTone, setIsReady, setError, setIsConnected, setIsCalling } =
     useCallingSetup()
   const { deviceToken, setDeviceToken } = useGSM()
+  const deviceTokenRef = useRef(deviceToken)
+  deviceTokenRef.current = deviceToken
 
   // Audio context and WebSocket management
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -373,8 +375,18 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
           if (!selectedSimRef.current) selectedSimRef.current = data.sims[0]
         }
 
+        const prevService = isServiceActiveRef.current
+        const prevTest = isTestActiveRef.current
         isServiceActiveRef.current = data?.isServiceActive ?? false
         isTestActiveRef.current = data?.isTestActive ?? false
+
+        if (prevService !== isServiceActiveRef.current || prevTest !== isTestActiveRef.current) {
+          console.info("[gsm/status] state changed", {
+            isServiceActive: isServiceActiveRef.current,
+            isTestActive: isTestActiveRef.current,
+            prev: { service: prevService, test: prevTest },
+          })
+        }
 
         statusFailureCountRef.current = 0
         setIsReady(authorized && !!nextDeviceToken)
@@ -838,18 +850,18 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const selectSim = (sim: SimAccount) => { selectedSimRef.current = sim }
 
   const sendCommand = async (type: string, data: Record<string, unknown> = {}) => {
-    if (!deviceToken) return
+    const tok = deviceTokenRef.current
+    if (!tok) {
+      console.warn("[gsm/cmd] sendCommand called but deviceToken is empty", { type })
+      return
+    }
     await fetch("/api/gsm/commands", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ deviceToken, commands: { type, data } }),
+      body: JSON.stringify({ deviceToken: tok, commands: { type, data } }),
     })
   }
 
-  const startService = () => sendCommand("START_SERVICE")
-  const stopService = () => sendCommand("STOP_SERVICE")
-  const startTest = () => sendCommand("START_TEST")
-  const stopTest = () => sendCommand("STOP_TEST")
   const setMicGain = (value: number) => sendCommand("SET_GAIN", { micGain: value })
   const setPlaybackGain = (value: number) => sendCommand("SET_GAIN", { playbackGain: value })
 
@@ -866,8 +878,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
   return {
     call, hungUp, sendDTMF, stopTestAudio,
-    startService, stopService, startTest, stopTest, fetchLogs,
-    setMicGain, setPlaybackGain,
+    fetchLogs, setMicGain, setPlaybackGain,
     isTestAudioActiveRef, isServiceActiveRef, isTestActiveRef, simsRef, selectedSimRef, selectSim,
   }
 }
