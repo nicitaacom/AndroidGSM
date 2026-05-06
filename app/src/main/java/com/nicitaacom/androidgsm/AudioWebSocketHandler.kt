@@ -56,6 +56,7 @@ class AudioWebSocketHandler(
     companion object {
         private const val TAG = "AudioWebSocket"
         private const val SAMPLE_RATE = 16000
+        private const val PLAYBACK_SAMPLE_RATE = 8000 // browser sends 8kHz for GSM uplink
         @Volatile var micGain: Float = 1.0f
         @Volatile var playbackGain: Float = 0.7f
         private const val CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
@@ -354,20 +355,19 @@ class AudioWebSocketHandler(
             }
             // Call mode: keep GsmService-set MODE_IN_CALL + speakerphone=true intact for REMOTE_SUBMIX
 
-            val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
+            val playRate = if (isCallActive) PLAYBACK_SAMPLE_RATE else SAMPLE_RATE
+            val bufferSize = AudioTrack.getMinBufferSize(playRate, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
 
-            // 1. Both modes use VOICE_COMMUNICATION so hardware AEC activates
-            val audioUsage = AudioAttributes.USAGE_VOICE_COMMUNICATION
-
+            // Both modes use VOICE_COMMUNICATION so hardware AEC activates
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(audioUsage)
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build())
                 .setAudioFormat(AudioFormat.Builder()
                     .setEncoding(AUDIO_FORMAT)
-                    .setSampleRate(SAMPLE_RATE)
+                    .setSampleRate(playRate)
                     .setChannelMask(CHANNEL_OUT)
                     .build())
                 .setBufferSizeInBytes(bufferSize)

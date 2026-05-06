@@ -12,7 +12,7 @@ type AudioPacket = {
   codec: "pcm16"
   seq: number
   ts: number
-  sampleRate: 16000
+  sampleRate: 8000 | 16000
   audio: string
 }
 
@@ -31,30 +31,30 @@ type GsmCallsEvent = {
 /**
  * Utility: Downsample Float32Array audio buffer to 16kHz.
  */
-function downsampleTo16k(buffer: Float32Array, inputSampleRate: number): Float32Array {
-  if (inputSampleRate === 16000) return buffer
-  const sampleRateRatio = inputSampleRate / 16000
-  const newLength = Math.round(buffer.length / sampleRateRatio)
+function downsampleTo(buffer: Float32Array, inputSampleRate: number, targetRate: number): Float32Array {
+  if (inputSampleRate === targetRate) return buffer
+  const ratio = inputSampleRate / targetRate
+  const newLength = Math.round(buffer.length / ratio)
   const result = new Float32Array(newLength)
   let offsetResult = 0
   let offsetBuffer = 0
-
   while (offsetResult < result.length) {
-    const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio)
-    let accum = 0
-    let count = 0
-
-    for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
-      accum += buffer[i]
-      count++
-    }
-
+    const nextOffset = Math.round((offsetResult + 1) * ratio)
+    let accum = 0, count = 0
+    for (let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) { accum += buffer[i]; count++ }
     result[offsetResult] = count > 0 ? accum / count : 0
     offsetResult++
-    offsetBuffer = nextOffsetBuffer
+    offsetBuffer = nextOffset
   }
-
   return result
+}
+
+function downsampleTo16k(buffer: Float32Array, inputSampleRate: number): Float32Array {
+  return downsampleTo(buffer, inputSampleRate, 16000)
+}
+
+function downsampleTo8k(buffer: Float32Array, inputSampleRate: number): Float32Array {
+  return downsampleTo(buffer, inputSampleRate, 8000)
 }
 
 /**
@@ -86,7 +86,7 @@ function cleanAndEncodePcm16(downsampled: Float32Array) {
  * - Pusher events for call state and fallback audio
  * - DTMF tone sending
  */
-export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => {
+export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, endSoundRef: RefObject<HTMLAudioElement | null>) => {
   const { callingSetup, num, dtmfTone, isConnected, isMuted, setDTMFTone, setIsReady, setError, setIsConnected, setIsCalling } =
     useCallingSetup()
   // ⚠️ DO NOT change to `const { deviceToken, setDeviceToken } = useGSM()` — that subscribes the
@@ -124,6 +124,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const selectedSimRef = useRef<SimAccount | null>(null)
   const isServiceActiveRef = useRef(false)
   const isTestActiveRef = useRef(false)
+  const triggerCallEndedRef = useRef<() => void>(() => {})
+  const micGainRef = useRef(1.0)
+  const playbackGainRef = useRef(1.0)
 
   const shouldStreamMic = () => isConnected || isTestAudioActiveRef.current || duplexValidationModeRef.current
 
@@ -200,9 +203,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       const float32Array = new Float32Array(sampleCount)
       const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 
+      const pg = playbackGainRef.current
       for (let i = 0; i < sampleCount; i++) {
         const s16 = view.getInt16(i * 2, true)
-        float32Array[i] = s16 / 32768.0 // Normalize to [-1, 1]
+        float32Array[i] = Math.max(-1, Math.min(1, (s16 / 32768.0) * pg))
       }
 
       // Queue audio with sequence number for ordering
@@ -439,6 +443,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const devicesChannel = pusher.subscribe("gsm-devices")
     const callsChannel = pusher.subscribe("gsm-calls")
 
+    console.info("[gsm/pusher] subscribing to gsm-calls")
+
     // Device connected to backend
     const onDeviceConnected = async (eventData: { deviceToken?: string }) => {
       if (eventData?.deviceToken) {
@@ -488,15 +494,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         match: eventData?.deviceToken === tok,
       })
       if (!tok || eventData?.deviceToken !== tok) return
-      isCallActiveRef.current = false
-      setIsConnected(false)
-      setIsCalling(false)
-      stopMicCapture()
-      stopPlayoutLoop()
-      rxQueueRef.current.clear()
-      nextRxSeqRef.current = 0
-      rxEnqueueSeqRef.current = 0
       console.info("[gsm/pusher] call-ended (hangup/reject) - audio stopped", { deviceToken: tok })
+      triggerCallEndedRef.current()
     }
 
     // Test audio events from Android
@@ -570,10 +569,11 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       callsChannel.unbind("gsm:test-audio-started", onTestAudioStarted)
       callsChannel.unbind("gsm:test-audio-stopped", onTestAudioStopped)
       callsChannel.unbind("gsm:audio-chunk", onAudioChunk)
+
       pusher.unsubscribe("gsm-devices")
       pusher.unsubscribe("gsm-calls")
     }
-  }, [setIsReady, setIsCalling, setIsConnected])
+  }, []) // Zustand setters are stable — no deps needed; effect must stay mounted for the lifetime of the hook
 
   /**
    * 3. AUDIO PIPELINE - Inbound audio decoding
@@ -648,7 +648,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
       ws.onmessage = ev => {
         try {
-          const pkt: AudioPacket = JSON.parse(ev.data)
+          const pkt = JSON.parse(ev.data)
+
+          // Control frame: server forwarded gsm:call-ended directly over WS (Pusher bypass)
+          if (pkt.type === "gsm:call-ended" && pkt.deviceToken === deviceToken) {
+            console.info("[gsm/ws] call-ended received via WS direct", { deviceToken })
+            triggerCallEndedRef.current()
+            return
+          }
+
           if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
           if (!pkt.audio) return
 
@@ -713,13 +721,18 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       stopMicCapture()
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       // After the await, the call may have ended — bail out instead of leaking the stream.
-      if (isCleaningUpRef.current || (!isCallActiveRef.current && !isTestAudioActiveRef.current && !duplexValidationModeRef.current)) {
+      if (
+        isCleaningUpRef.current ||
+        (!isCallActiveRef.current && !isTestAudioActiveRef.current && !duplexValidationModeRef.current)
+      ) {
         stream.getTracks().forEach(t => t.stop())
         return
       }
       mediaStreamRef.current = stream
       const source = audioContextRef.current.createMediaStreamSource(stream)
-      const processor = audioContextRef.current.createScriptProcessor(1024, 1, 1)
+      // 4096 samples = ~85ms chunks at 48kHz — larger buffer means fewer packets and
+      // smoother delivery over the WS→Android→GSM uplink path.
+      const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1)
       processorRef.current = processor
 
       processor.onaudioprocess = e => {
@@ -731,7 +744,12 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         if (!isCallActiveRef.current && !isTestAudioActiveRef.current && !duplexValidationModeRef.current) return
         try {
           const inF32 = e.inputBuffer.getChannelData(0)
-          const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
+          // Apply mic gain in browser before encoding
+          const gain = micGainRef.current
+          if (gain !== 1.0) for (let i = 0; i < inF32.length; i++) inF32[i] = Math.max(-1, Math.min(1, inF32[i] * gain))
+          // GSM uplink is 8kHz narrowband — downsample to 8k so Android plays it natively
+          // without the network resampling 16k→8k poorly.
+          const downsampled = downsampleTo8k(inF32, e.inputBuffer.sampleRate)
           const audio = cleanAndEncodePcm16(downsampled)
           const pkt: AudioPacket = {
             role: "browser",
@@ -740,7 +758,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
             codec: "pcm16",
             seq: seqTxRef.current++,
             ts: performance.now(),
-            sampleRate: 16000,
+            sampleRate: 8000,
             audio,
           }
           wsRef.current.send(JSON.stringify(pkt))
@@ -765,6 +783,21 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     processorRef.current?.disconnect()
     processorRef.current = null
   }
+
+  const triggerCallEnded = () => {
+    endSoundRef.current?.play().catch(() => {})
+    isCallActiveRef.current = false
+    setIsConnected(false)
+    setIsCalling(false)
+    setTimeout(() => {
+      stopMicCapture()
+      stopPlayoutLoop()
+      rxQueueRef.current.clear()
+      nextRxSeqRef.current = 0
+      rxEnqueueSeqRef.current = 0
+    }, 6000)
+  }
+  triggerCallEndedRef.current = triggerCallEnded
 
   const stopTestAudio = () => {
     isTestAudioActiveRef.current = false
@@ -794,7 +827,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     try {
       isCallActiveRef.current = true
       setIsCalling(true)
-      const sim = selectedSimRef.current
+      // ⚠️ Read from store (single source of truth) — selectedSimRef is only updated by selectSim()
+      // which is never called from the UI. The UI calls useGSM's setSelectedSim directly.
+      const sim = useGSM.getState().selectedSim
       const res = await fetch("/api/gsm/call-started", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -899,8 +934,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     })
   }
 
-  const setMicGain = (value: number) => sendCommand("SET_GAIN", { micGain: value })
-  const setPlaybackGain = (value: number) => sendCommand("SET_GAIN", { playbackGain: value })
+  const setMicGain = (value: number) => { micGainRef.current = value; sendCommand("SET_GAIN", { micGain: value }) }
+  const setPlaybackGain = (value: number) => { playbackGainRef.current = value; sendCommand("SET_GAIN", { playbackGain: value }) }
 
   const fetchLogs = async (): Promise<string[]> => {
     try {

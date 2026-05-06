@@ -189,6 +189,7 @@ class GsmService : Service() {
                     // Close incall capture path
                     try {
                         RootUtils.disableIncallMusicCapture()
+                        RootUtils.unmutePhoneSpeaker()
                         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
                         am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0)
@@ -619,6 +620,8 @@ class GsmService : Service() {
             val simAccountId = data["simAccountId"] as? String
             val simComponentName = data["simComponentName"] as? String
             MainActivity.log("Starting call to: $number (sim=$simAccountId)")
+            // Mute earpiece/speaker immediately — dialing tones would otherwise be audible.
+            RootUtils.mutePhoneSpeaker()
             // Mark call active immediately — MIUI may not fire OFFHOOK callback via GsmDialer
             isCallActive = true
 
@@ -654,12 +657,17 @@ class GsmService : Service() {
                         isCallActive = true
                         audioWsHandler?.setCallActive(true)
                         audioWsHandler?.startAudioCapture()
-                        audioWsHandler?.startAudioPlayback()
-                        // Mute phone speaker — audio is routed to frontend via WebSocket only.
-                        // REMOTE_SUBMIX still captures from the mixer even at volume 0.
+                        // SERVICE mode: mute phone speaker via tinymix so GSM audio is only
+                        // audible on the frontend. REMOTE_SUBMIX capture path stays open.
                         val amMute = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
-                        MainActivity.log("📞 Phone speaker muted (audio to frontend only)")
+                        val speakerMuted = RootUtils.mutePhoneSpeaker()
+                        MainActivity.log("📞 Phone speaker muted via tinymix=$speakerMuted (audio to frontend only)")
+                        if (!speakerMuted) {
+                            // Log mixer controls so we can identify the correct control names
+                            val dump = RootUtils.dumpMixerControls()
+                            MainActivity.log("tinymix dump (find speaker control):\n$dump")
+                        }
                         MainActivity.log("📞 WS audio started, cmdWsClient=${if (cmdWsClient != null) "alive" else "NULL"}")
                         cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
                         MainActivity.log("📞 CALL_CONNECTED sent to backend")

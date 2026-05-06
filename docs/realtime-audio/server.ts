@@ -510,7 +510,16 @@ wss.on('connection', (ws, req) => {
   ws.on('close', () => {
     console.log('ℹ️ [ws/audio] disconnected')
     for (const [k, v] of browserByDevice) if (v === ws) browserByDevice.delete(k)
-    for (const [k, v] of androidByDevice) if (v === ws) androidByDevice.delete(k)
+    // When the Android audio peer drops, the call audio path is dead — tell the browser
+    // so the UI exits the in-call state even if the cmd-WS CALL_ENDED event was lost
+    // (Pusher hiccups, MIUI killing the cmd thread, etc).
+    for (const [k, v] of androidByDevice) {
+      if (v === ws) {
+        androidByDevice.delete(k)
+        serverLog(`[ws/audio] android audio peer dropped, firing gsm:call-ended for ${k}`)
+        safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken: k, timestamp: new Date().toISOString() })
+      }
+    }
   })
 })
 
@@ -555,10 +564,21 @@ wsCmd.on('connection', (ws, req) => {
           serverLog(`📞 [ws/cmd] CALL_CONNECTED: ${tok}`)
           safeTrigger('gsm-calls', 'gsm:call-connected', { deviceToken: tok, timestamp: new Date().toISOString() })
           break
-        case 'CALL_ENDED':
+        case 'CALL_ENDED': {
           serverLog(`❌ [ws/cmd] CALL_ENDED: ${tok}`)
           safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken: tok, timestamp: new Date().toISOString() })
+          // Also push directly over the browser audio WS — Pusher delivery is not guaranteed
+          const browserPeer = browserByDevice.get(tok)
+          if (browserPeer?.readyState === WebSocket.OPEN) {
+            try {
+              browserPeer.send(JSON.stringify({ type: 'gsm:call-ended', deviceToken: tok, timestamp: new Date().toISOString() }))
+              serverLog(`[ws/audio] gsm:call-ended forwarded directly to browser for ${tok}`)
+            } catch (err) {
+              console.error(`❌ [ws/audio] failed to forward call-ended to browser: ${err}`)
+            }
+          }
           break
+        }
         case 'TEST_AUDIO_STARTED': {
           serverLog(`🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
           const devTas = connectedDevices.get(tok); if (devTas) { devTas.isTestActive = true; devTas.isServiceActive = false }

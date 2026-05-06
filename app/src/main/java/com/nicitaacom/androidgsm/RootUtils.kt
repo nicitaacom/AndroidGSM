@@ -105,4 +105,32 @@ object RootUtils {
             else Log.e(TAG, "❌ tinymix VOC_REC_DL disable failed (exit=$exit): $output")
         }
     }
+
+    fun dumpMixerControls(): String {
+        val (_, output) = runSuCommand("tinymix")
+        return output
+    }
+
+    // Mute earpiece + speaker output controls so call audio is inaudible on the phone.
+    // VOC_REC_DL capture path remains open — REMOTE_SUBMIX still taps the mixer.
+    fun mutePhoneSpeaker(): Boolean {
+        // EAR_S = earpiece output, SPK = speaker output on sdm660/Redmi Note 7.
+        // Setting to ZERO disconnects the voice-call downlink from the physical output
+        // while leaving VOC_REC_DL capture path open for REMOTE_SUBMIX.
+        var ok = true
+        for (ctl in listOf("EAR_S", "SPK")) {
+            val (exit, output) = runSuCommand("tinymix '$ctl' ZERO")
+            if (exit == 0) Log.d(TAG, "✅ muted $ctl")
+            else { Log.w(TAG, "⚠️ could not mute $ctl (exit=$exit): $output"); ok = false }
+        }
+        return ok
+    }
+
+    fun unmutePhoneSpeaker() {
+        for (ctl in listOf("EAR_S", "SPK")) {
+            val (exit, output) = runSuCommand("tinymix '$ctl' Switch")
+            if (exit == 0) Log.d(TAG, "✅ unmuted $ctl")
+            else Log.w(TAG, "⚠️ could not unmute $ctl (exit=$exit): $output")
+        }
+    }
 }
