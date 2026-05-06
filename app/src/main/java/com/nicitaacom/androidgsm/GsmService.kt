@@ -81,6 +81,14 @@ class GsmService : Service() {
                             audioWsHandler?.setCallActive(false)
                             audioWsHandler?.disconnect()
                             Thread {
+                                repeat(3) { attempt ->
+                                    if (cmdWsClient?.isConnected == true) {
+                                        try { cmdWsClient?.sendEvent("CALL_ENDED", emptyMap()) } catch (_: Exception) {}
+                                        MainActivity.log("📴 [receiver] CALL_ENDED sent (attempt ${attempt + 1})")
+                                        return@Thread
+                                    }
+                                    Thread.sleep(500)
+                                }
                                 try { cmdWsClient?.sendEvent("CALL_ENDED", emptyMap()) } catch (_: Exception) {}
                             }.start()
                         } catch (e: Exception) {
@@ -175,7 +183,7 @@ class GsmService : Service() {
                 // Set callbacks once at init — these fire on ANY call state change,
                 // including manual hang-up or remote party ending the call.
                 gsmDialer?.setCallEndedCallback {
-                    if (!isCallActive) return@setCallEndedCallback  // ignore IDLE fired on boot/init
+                    if (!isCallActive && audioWsHandler == null) return@setCallEndedCallback  // ignore IDLE fired on boot/init
                     isCallActive = false
                     MainActivity.log("📴 Call ended (IDLE) — stopping audio, notifying backend")
                     // Close incall capture path
@@ -194,7 +202,21 @@ class GsmService : Service() {
                         audioWsHandler?.disconnect()
                         audioWsHandler = null
                     } catch (_: Exception) {}
-                    Thread { cmdWsClient?.sendEvent("CALL_ENDED", emptyMap()) }.start()
+                    Thread {
+                        // Retry a few times in case the WS is momentarily reconnecting
+                        repeat(3) { attempt ->
+                            if (cmdWsClient?.isConnected == true) {
+                                cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
+                                MainActivity.log("📴 CALL_ENDED sent (attempt ${attempt + 1})")
+                                return@Thread
+                            }
+                            MainActivity.log("📴 CALL_ENDED attempt ${attempt + 1} — WS not ready, retrying...")
+                            Thread.sleep(500)
+                        }
+                        // Last attempt regardless
+                        cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
+                        MainActivity.log("📴 CALL_ENDED final attempt sent")
+                    }.start()
                 }
                 gsmDialer?.setCallConnectedCallback {
                     isCallActive = true
@@ -597,6 +619,8 @@ class GsmService : Service() {
             val simAccountId = data["simAccountId"] as? String
             val simComponentName = data["simComponentName"] as? String
             MainActivity.log("Starting call to: $number (sim=$simAccountId)")
+            // Mark call active immediately — MIUI may not fire OFFHOOK callback via GsmDialer
+            isCallActive = true
 
             // Override onCallConnected for this call — sets up WS audio for SERVICE mode
             gsmDialer?.setCallConnectedCallback {
@@ -721,10 +745,25 @@ class GsmService : Service() {
                             MainActivity.log("PhoneStateListener: OFFHOOK - set MODE_IN_COMMUNICATION + earpiece")
                         }
                         TelephonyManager.CALL_STATE_IDLE -> {
-                            // Call ended - reset audio mode
                             val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                             audioManager.mode = AudioManager.MODE_NORMAL
                             MainActivity.log("PhoneStateListener: IDLE - reset audio mode")
+                            if (isCallActive || audioWsHandler != null) {
+                                isCallActive = false
+                                MainActivity.log("PhoneStateListener: IDLE while call active — sending CALL_ENDED")
+                                try { audioWsHandler?.setCallActive(false); audioWsHandler?.stopAudioCapture(); audioWsHandler?.stopAudioPlayback(); audioWsHandler?.disconnect(); audioWsHandler = null } catch (_: Exception) {}
+                                Thread {
+                                    repeat(3) { attempt ->
+                                        if (cmdWsClient?.isConnected == true) {
+                                            cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
+                                            MainActivity.log("PhoneStateListener: CALL_ENDED sent (attempt ${attempt + 1})")
+                                            return@Thread
+                                        }
+                                        Thread.sleep(500)
+                                    }
+                                    cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
+                                }.start()
+                            }
                         }
                         TelephonyManager.CALL_STATE_RINGING -> {
                             MainActivity.log("PhoneStateListener: RINGING")

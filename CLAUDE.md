@@ -57,16 +57,18 @@ Routed by `role` query param:
 5. Server sets `isServiceActive = true` in `connectedDevices`
 6. Frontend polls `/api/gsm/status` → sees `isServiceActive: true`
 
-## Pending deploy steps 🚨
+## Deploy workflow
 
-1. **Deploy `server.ts`** to VPS — unified `/ws/` upgrade handler (noServer mode).
-   The reverse proxy was blocking `/ws/cmd`; fix merges both onto `/ws/audio`.
-2. **Rebuild + reinstall APK** — Android now connects to `/ws/audio` with `role=android-cmd`.
-   Both must be deployed together or the cmd channel won't work.
+- APK build command: `adb shell am force-stop com.nicitaacom.androidgsm ; ./gradlew clean assembleDebug && adb install -r $(ls -t app/build/outputs/apk/debug/*.apk | head -n1) && adb shell am start -n com.nicitaacom.androidgsm/.MainActivity`
+- Logcat command: `adb logcat -s CmdWS:D GSM:D GsmDialer:D AudioWebSocket:D RootUtils:D *:S`
+- **Never list a deploy step the user has already confirmed deployed.** Only mention pending items.
+- `docs/` files must be manually copied to their real repos (`gsm-outreach-tool` for server.ts, frontend repo for useInitGSM.ts). Ask the user to confirm after each deploy before marking done.
 
 ## What NOT to do
 
 - Do not add `START_SERVICE` / `START_TEST` buttons — service auto-starts on phone boot
 - Do not use `getRunningServices()` to check if GsmService is running — broken on Android 8+
 - Do not set `isServiceAudioActive = false` in `handleCallEnded` — phone stays in SERVICE mode between calls
-- Do not trust `deviceToken` closure in `sendCommand` — always read from `deviceTokenRef.current`
+- Do not trust `deviceToken` closure in Pusher handlers — always read from `deviceTokenRef.current`
+- Do not guard `CALL_ENDED` with only `isCallActive` — also check `audioWsHandler != null` (MIUI may restart the service mid-call resetting the flag)
+- Do not route browser mic audio via the cmd WS fallback (`sendCommand AUDIO_CHUNK`) — drop it instead to keep the cmd channel clean

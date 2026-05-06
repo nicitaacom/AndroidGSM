@@ -89,7 +89,11 @@ function cleanAndEncodePcm16(downsampled: Float32Array) {
 export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => {
   const { callingSetup, num, dtmfTone, isConnected, isMuted, setDTMFTone, setIsReady, setError, setIsConnected, setIsCalling } =
     useCallingSetup()
-  const { deviceToken, setDeviceToken } = useGSM()
+  // ⚠️ DO NOT change to `const { deviceToken, setDeviceToken } = useGSM()` — that subscribes the
+  // parent component (TradingStyleDialer) to EVERY field in useGSM (sims, selectedSim, etc).
+  // The status poll updates `sims` every 2s → infinite re-render loop. Use single-field selector
+  // for reactive value, and `useGSM.getState().setX(...)` inside callbacks for setters.
+  const deviceToken = useGSM(state => state.deviceToken)
   const deviceTokenRef = useRef(deviceToken)
   deviceTokenRef.current = deviceToken
 
@@ -139,49 +143,46 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   /**
-   * 0. INITIALIZE AUDIO CONTEXT
-   * Must be created on first mount so we have it ready for audio playback
+   * 0. INITIALIZE AUDIO CONTEXT — DEFERRED TO FIRST USER GESTURE
+   * ⚠️ DO NOT create AudioContext eagerly on mount. Browsers block AudioContexts that are
+   * created OR resumed before a user gesture (click/keydown) and emit:
+   *   "The AudioContext was not allowed to start. It must be resumed (or created) after a user gesture on the page."
+   * We register click/keydown listeners and create-or-resume the context lazily on the first event.
    */
   useEffect(() => {
-    if (!audioContextRef.current) {
-      try {
-        // Force 16kHz so createBuffer(…, 16000) is native — no browser resampling artifacts
-        const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 })
-        audioContextRef.current = ctx
-        console.info("[gsm] AudioContext created", { sampleRate: ctx.sampleRate })
-      } catch (err) {
-        console.error("[gsm] failed to create AudioContext", err)
-        setError("Audio system not available")
-      }
-    }
-
     duplexValidationModeRef.current = isDuplexValidationEnabled()
     if (duplexValidationModeRef.current) {
       console.info(
         "[gsm/duplex-test] enabled (query: ?gsmDuplexValidation=1 or localStorage[gsm.duplexValidation]=1); uses existing ws+pusher channels",
       )
     }
-  }, [setError])
 
-  // 0b. Unlock AudioContext on first user gesture (browser autoplay policy)
-  useEffect(() => {
-    const unlock = () => {
-      if (audioContextRef.current?.state === "suspended") {
+    const initOrResume = () => {
+      if (!audioContextRef.current) {
+        try {
+          // Force 16kHz so createBuffer(…, 16000) is native — no browser resampling artifacts
+          const ctx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 })
+          audioContextRef.current = ctx
+          console.info("[gsm] AudioContext created on user gesture", { sampleRate: ctx.sampleRate })
+        } catch (err) {
+          console.error("[gsm] failed to create AudioContext", err)
+          setError("Audio system not available")
+        }
+      } else if (audioContextRef.current.state === "suspended") {
         audioContextRef.current
           .resume()
-          .then(() => console.info("[gsm] AudioContext unlocked by user gesture"))
+          .then(() => console.info("[gsm] AudioContext resumed by user gesture"))
           .catch(() => {})
       }
-      document.removeEventListener("click", unlock)
-      document.removeEventListener("keydown", unlock)
     }
-    document.addEventListener("click", unlock)
-    document.addEventListener("keydown", unlock)
+
+    document.addEventListener("click", initOrResume)
+    document.addEventListener("keydown", initOrResume)
     return () => {
-      document.removeEventListener("click", unlock)
-      document.removeEventListener("keydown", unlock)
+      document.removeEventListener("click", initOrResume)
+      document.removeEventListener("keydown", initOrResume)
     }
-  }, [])
+  }, [setError])
   /**
    * Helper function to decode and queue audio chunks
    */
@@ -308,7 +309,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         nextPlayTimeRef.current += chunk.length / 16000
 
         if (playoutCount % 50 === 0) {
-          console.log("[gsm/playback] scheduled chunk seq", seqToPlay, "total:", playoutCount, "ahead:", (nextPlayTimeRef.current - ctx.currentTime).toFixed(3) + "s")
+          console.log(
+            "[gsm/playback] scheduled chunk seq",
+            seqToPlay,
+            "total:",
+            playoutCount,
+            "ahead:",
+            (nextPlayTimeRef.current - ctx.currentTime).toFixed(3) + "s",
+          )
         }
       } catch (err) {
         console.error("[gsm/playback] error scheduling chunk", err)
@@ -359,7 +367,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         if (nextDeviceToken) {
           // Avoid token flapping when multiple devices are online
           if (!deviceToken) {
-            setDeviceToken(nextDeviceToken)
+            useGSM.getState().setDeviceToken(nextDeviceToken)
             console.info("[gsm] device discovered", { deviceToken: nextDeviceToken })
           } else if (deviceToken !== nextDeviceToken) {
             console.warn("[gsm] multiple devices detected, keeping selected token", {
@@ -369,10 +377,16 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
           }
         }
 
-        // Update SIM list whenever status returns it; auto-select first SIM if none selected
+        // Update SIM list whenever status returns it; auto-select first SIM if none selected.
+        // ⚠️ Defer store writes via queueMicrotask — calling setSims/setSelectedSim synchronously
+        // inside the poll fires Zustand subscribers during React render → "setState during render" warning.
         if (Array.isArray(data?.sims) && data.sims.length > 0) {
           simsRef.current = data.sims as SimAccount[]
           if (!selectedSimRef.current) selectedSimRef.current = data.sims[0]
+          queueMicrotask(() => {
+            useGSM.getState().setSims(data.sims)
+            if (!useGSM.getState().selectedSim) useGSM.getState().setSelectedSim(data.sims[0])
+          })
         }
 
         const prevService = isServiceActiveRef.current
@@ -405,14 +419,16 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     const id = setInterval(fetchDeviceToken, 2000) // Poll every 2s for near real-time readiness
 
     // Re-fetch immediately when tab regains focus — Pusher may have dropped while hidden
-    const onVisible = () => { if (document.visibilityState === "visible") fetchDeviceToken() }
+    const onVisible = () => {
+      if (document.visibilityState === "visible") fetchDeviceToken()
+    }
     document.addEventListener("visibilitychange", onVisible)
 
     return () => {
       clearInterval(id)
       document.removeEventListener("visibilitychange", onVisible)
     }
-  }, [deviceToken, setDeviceToken, setError, setIsReady])
+  }, [deviceToken, setError, setIsReady])
 
   /**
    * 2. PUSHER EVENTS - Call State Management
@@ -426,7 +442,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     // Device connected to backend
     const onDeviceConnected = async (eventData: { deviceToken?: string }) => {
       if (eventData?.deviceToken) {
-        setDeviceToken(eventData.deviceToken)
+        useGSM.getState().setDeviceToken(eventData.deviceToken)
         setIsReady(true)
         setError("")
         console.info("[gsm/pusher] device-connected", eventData.deviceToken)
@@ -438,7 +454,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
         const res = await fetch("/api/gsm/status")
         if (!res.ok) return
         const data = await res.json()
-        if (data?.deviceToken) setDeviceToken(data.deviceToken)
+        if (data?.deviceToken) useGSM.getState().setDeviceToken(data.deviceToken)
         setIsReady(!!data?.isAuthorized)
       } catch {
         // no-op
@@ -447,25 +463,31 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
     // Call initiated (dialing/ringing phase)
     const onCallStarted = (eventData: GsmCallsEvent) => {
-      if (!deviceToken || eventData?.deviceToken !== deviceToken) return
-      // DIALING PHASE: Phone is ringing, NOT connected yet
+      const tok = deviceTokenRef.current
+      if (!tok || eventData?.deviceToken !== tok) return
       setIsCalling(true)
       setIsConnected(false)
-      console.info("[gsm/pusher] call-started (dialing phase)", { deviceToken })
+      console.info("[gsm/pusher] call-started (dialing phase)", { deviceToken: tok })
     }
 
     // Call answered (person picked up)
     const onCallConnected = (eventData: GsmCallsEvent) => {
-      if (!deviceToken || eventData?.deviceToken !== deviceToken) return
-      // CONNECTED PHASE: Call was answered, person is on the line
-      setIsCalling(false) // Stop ringing sound
-      setIsConnected(true) // Start audio streaming
-      console.info("[gsm/pusher] call-connected (answered)", { deviceToken })
+      const tok = deviceTokenRef.current
+      if (!tok || eventData?.deviceToken !== tok) return
+      setIsCalling(false)
+      setIsConnected(true)
+      console.info("[gsm/pusher] call-connected (answered)", { deviceToken: tok })
     }
 
     // Call ended or rejected
     const onCallEnded = (eventData: GsmCallsEvent) => {
-      if (!deviceToken || eventData?.deviceToken !== deviceToken) return
+      const tok = deviceTokenRef.current
+      console.info("[gsm/pusher] call-ended RAW", {
+        eventToken: eventData?.deviceToken,
+        localToken: tok,
+        match: eventData?.deviceToken === tok,
+      })
+      if (!tok || eventData?.deviceToken !== tok) return
       isCallActiveRef.current = false
       setIsConnected(false)
       setIsCalling(false)
@@ -474,7 +496,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       rxQueueRef.current.clear()
       nextRxSeqRef.current = 0
       rxEnqueueSeqRef.current = 0
-      console.info("[gsm/pusher] call-ended (hangup/reject) - audio stopped", { deviceToken })
+      console.info("[gsm/pusher] call-ended (hangup/reject) - audio stopped", { deviceToken: tok })
     }
 
     // Test audio events from Android
@@ -520,7 +542,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
     // Incoming audio from Android device (fallback path via Pusher)
     const onAudioChunk = (eventData: GsmCallsEvent) => {
-      if (!deviceToken || eventData?.deviceToken !== deviceToken || !eventData?.audio) return
+      const tok = deviceTokenRef.current
+      if (!tok || eventData?.deviceToken !== tok || !eventData?.audio) return
 
       if (!mediaStreamRef.current && isTestAudioActiveRef.current) {
         startMicCapture().catch(error => setError(String(error)))
@@ -550,7 +573,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       pusher.unsubscribe("gsm-devices")
       pusher.unsubscribe("gsm-calls")
     }
-  }, [deviceToken, setDeviceToken, setIsReady, setIsCalling, setIsConnected])
+  }, [setIsReady, setIsCalling, setIsConnected])
 
   /**
    * 3. AUDIO PIPELINE - Inbound audio decoding
@@ -685,7 +708,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
 
     try {
+      // Defensive tear-down — protects against a race where two callers (status poll +
+      // ws.onmessage + useEffect) all enter startMicCapture concurrently and leak processors.
+      stopMicCapture()
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      // After the await, the call may have ended — bail out instead of leaking the stream.
+      if (isCleaningUpRef.current || (!isCallActiveRef.current && !isTestAudioActiveRef.current && !duplexValidationModeRef.current)) {
+        stream.getTracks().forEach(t => t.stop())
+        return
+      }
       mediaStreamRef.current = stream
       const source = audioContextRef.current.createMediaStreamSource(stream)
       const processor = audioContextRef.current.createScriptProcessor(1024, 1, 1)
@@ -694,6 +725,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       processor.onaudioprocess = e => {
         if (isMuted || isCleaningUpRef.current) return
         if (wsRef.current?.readyState !== WebSocket.OPEN) return
+        // Hard gate: only stream when call/test is actually active. Without this,
+        // `processor` survives `stopMicCapture()` if disconnect raced with an in-flight
+        // `getUserMedia` resolution, and would otherwise keep shipping mic to a dead Android peer.
+        if (!isCallActiveRef.current && !isTestAudioActiveRef.current && !duplexValidationModeRef.current) return
         try {
           const inF32 = e.inputBuffer.getChannelData(0)
           const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
@@ -847,7 +882,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
   }, [])
 
-  const selectSim = (sim: SimAccount) => { selectedSimRef.current = sim }
+  const selectSim = (sim: SimAccount) => {
+    selectedSimRef.current = sim
+  }
 
   const sendCommand = async (type: string, data: Record<string, unknown> = {}) => {
     const tok = deviceTokenRef.current
@@ -877,8 +914,18 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   }
 
   return {
-    call, hungUp, sendDTMF, stopTestAudio,
-    fetchLogs, setMicGain, setPlaybackGain,
-    isTestAudioActiveRef, isServiceActiveRef, isTestActiveRef, simsRef, selectedSimRef, selectSim,
+    call,
+    hungUp,
+    sendDTMF,
+    stopTestAudio,
+    fetchLogs,
+    setMicGain,
+    setPlaybackGain,
+    isTestAudioActiveRef,
+    isServiceActiveRef,
+    isTestActiveRef,
+    simsRef,
+    selectedSimRef,
+    selectSim,
   }
 }
