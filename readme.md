@@ -3,7 +3,7 @@
 Android foreground service that exposes **real GSM calls** to a browser via
 **WebSocket** (audio + commands) + **Pusher** (browser-side call state events only).
 
-Phone = modem. Backend = brain. Pusher = doorbell for the browser only.
+Phone = modem. Backend = brain. Frontend controls service lifecycle.
 
 ---
 
@@ -54,8 +54,9 @@ adb logcat -s GSM:D AudioWebSocket:D WebSocketAudio:D CmdWS:D RootUtils:D
 ## In-app setup (first run)
 
 1. Grant all permissions when prompted
-2. SERVICE starts automatically — the phone shows status and logs only
-3. Use the website to make/end calls
+2. Phone connects to backend via `/ws/cmd` — shows "Status: Not Active"
+3. Use the **website** to start SERVICE or TEST mode — phone UI updates accordingly
+4. Use the website to make/end calls
 
 ---
 
@@ -70,9 +71,21 @@ Android does NOT subscribe to Pusher. All Android↔backend communication goes o
 |------|-------|------|
 | Call state (started/connected/ended) | Pusher → browser | ~6 msgs/call |
 | Device ready state | Pusher → browser | 1 msg/connect (debounced 5min) |
-| Android commands (CALL_STARTED, CALL_ENDED) | `/ws/cmd` WebSocket | 0 Pusher msgs |
+| Android commands (CALL_STARTED, CALL_ENDED, START_SERVICE, etc.) | `/ws/cmd` WebSocket | 0 Pusher msgs |
 | Android heartbeats | `/ws/cmd` WebSocket | 0 Pusher msgs |
 | Audio | `/ws/audio` WebSocket | 0 Pusher msgs |
+
+### Service lifecycle
+
+The phone app **never auto-starts SERVICE or TEST mode** on launch. GsmService starts as a
+foreground process for WebSocket connectivity only. SERVICE/TEST audio modes are started and
+stopped exclusively from the frontend via commands over `/ws/cmd`.
+
+State sync is dual-path:
+1. **Immediate**: Android sends `SERVICE_STARTED`/`SERVICE_STOPPED` events over `/ws/cmd` with a retry loop (10s deadline, 300ms poll) to handle WS not yet open
+2. **Periodic fallback**: Heartbeat every 15s carries `isServiceActive` and `isTestActive` via `stateProvider` lambda
+
+Frontend polls `/api/gsm/status` every 2s — returns `isServiceActive` and `isTestActive` so the UI reflects real phone state.
 
 ### System diagram
 
@@ -81,56 +94,65 @@ Android does NOT subscribe to Pusher. All Android↔backend communication goes o
 │        Next.js Frontend          │
 │  useInitGSM hook                 │
 │  ┌──────────────────────────┐    │
-│  │ call() / hungUp()        │ ── POST /api/gsm/call-started|ended ──────────────┐
-│  │ sendDTMF()               │ ── POST /api/gsm/send-dtmf ────────────────────┐  │
-│  │ mic audio (PCM16)        │ ── WS /ws/audio (dir=toAndroid) ─────────────┐ │  │
-│  │ speaker playback ◄───────│─── WS /ws/audio (dir=toBrowser) ◄──────────┐ │ │  │
-│  └──────────────────────────┘    │                                        │ │ │  │
-│  Pusher subscriptions:           │                                        │ │ │  │
-│  gsm-calls ◄─────────────────────┤─ call-started/connected/ended         │ │ │  │
-│  gsm-devices ◄───────────────────┤─ device-connected                     │ │ │  │
-└──────────────────────────────────┘                                        │ │ │  │
-                                                                            │ │ │  │
-                         ┌──────────────────────────────────────────────────┘ │ │  │
-                         │   server.ts (VPS / Express)                         │ │  │
-                         │  WS /ws/cmd  ◄──── Android persistent cmd WS ──────┐│ │  │
-                         │    heartbeat → update lastSeen (no Pusher)          ││ │  │
-                         │    events → forward to browser via Pusher as needed ││ │  │
-                         │    commands → deliver over this WS                  ││ │  │
-                         │  WS /ws/audio ◄──── Android audio WS ──────────────┘│ │  │
-                         │    relay browser ↔ android PCM16 audio              │ │  │
-                         │  POST /api/gsm/call-started ◄────────────────────────┘ │  │
-                         │    → send command CALL_STARTED over /ws/cmd            │  │
-                         │  POST /api/gsm/call-ended ◄──────────────────────────── │  │
-                         │    → send command CALL_ENDED over /ws/cmd              │  │
-                         │  POST /api/gsm/send-dtmf ◄────────────────────────────┘  │
-                         │    → send command SEND_DTMF over /ws/cmd                 │
-                         │  GET /api/gsm/status ◄──────────────────────────────────┘
-                         │    → returns { isAuthorized, deviceToken, sims[] }
-                         └──────────────────────────────────────────────────────────
-                                              ↕ WS /ws/cmd  (persistent)
-                                      ┌──────────────────────┐
-                                      │   Android App        │
-                                      │                      │
-                                      │  GsmService          │
-                                      │  GsmDialer           │
-                                      │  CommandWebSocketClient (replaces PusherClient)
-                                      │  AudioWebSocketHandler
-                                      └──────────────────────┘
+│  │ startService/stopService │ ── POST /api/gsm/commands ─────────────────────────┐
+│  │ startTest/stopTest       │ ── POST /api/gsm/commands ─────────────────────────┤
+│  │ setMicGain/setPlayback   │ ── POST /api/gsm/commands ─────────────────────────┤
+│  │ call() / hungUp()        │ ── POST /api/gsm/call-started|ended ───────────────┤
+│  │ sendDTMF()               │ ── POST /api/gsm/send-dtmf ────────────────────────┤
+│  │ fetchLogs()              │ ── GET  /api/gsm/logs ─────────────────────────────┤
+│  │ mic audio (PCM16)        │ ── WS /ws/audio (dir=toAndroid) ──────────────┐    │
+│  │ speaker playback ◄───────│─── WS /ws/audio (dir=toBrowser) ◄────────────┤    │
+│  └──────────────────────────┘    │                                          │    │
+│  Pusher subscriptions:           │                                          │    │
+│  gsm-calls ◄─────────────────────┤─ call-started/connected/ended            │    │
+│  gsm-devices ◄───────────────────┤─ device-connected                        │    │
+└──────────────────────────────────┘                                          │    │
+                                                                              │    │
+                    ┌─────────────────────────────────────────────────────────┘    │
+                    │   server.ts (VPS / Express)                                   │
+                    │  WS /ws/cmd  ◄──── Android persistent cmd WS ───────────────┐│
+                    │    heartbeat → update lastSeen + isServiceActive/isTestActive ││
+                    │    SERVICE_STARTED/STOPPED → update connectedDevices          ││
+                    │    commands → deliver to Android over this WS                 ││
+                    │  WS /ws/audio ◄──── Android audio WS ────────────────────────┘│
+                    │    relay browser ↔ android PCM16 audio                        │
+                    │  POST /api/commands → sends command over /ws/cmd              │
+                    │  GET  /api/logs    → returns last 200 server log lines        │
+                    │  POST /api/gsm/call-started → send CALL_STARTED over /ws/cmd  │
+                    │  POST /api/gsm/call-ended   → send CALL_ENDED over /ws/cmd    │
+                    │  POST /api/gsm/send-dtmf    → send SEND_DTMF over /ws/cmd     │
+                    │  GET  /api/gsm/status       → { isAuthorized, deviceToken,    │
+                    │                                  sims[], isServiceActive,      │
+                    │                                  isTestActive }                │
+                    └────────────────────────────────────────────────────────────────
+                                         ↕ WS /ws/cmd  (persistent)
+                                 ┌──────────────────────┐
+                                 │   Android App        │
+                                 │                      │
+                                 │  GsmService          │
+                                 │  GsmDialer           │
+                                 │  CommandWebSocketClient
+                                 │  AudioWebSocketHandler
+                                 └──────────────────────┘
 ```
 
 ### Android components
 
 ```
 GsmService              Foreground service; owns all state, dispatches commands.
-                        Auto-starts SERVICE mode on launch after permissions.
+                        Starts on launch for /ws/cmd connectivity only.
+                        SERVICE/TEST audio modes require explicit frontend commands.
                         Does NOT use PusherClient — all backend comms via WS.
 
 CommandWebSocketClient  Persistent WS to /ws/cmd. Stays connected always.
-                        Receives CALL_STARTED/CALL_ENDED/SEND_DTMF commands.
-                        Sends CONNECTED heartbeats every 15s (no Pusher cost).
-                        Sends CALL_CONNECTED/CALL_ENDED/SIM_LIST events to backend.
+                        Receives CALL_STARTED/CALL_ENDED/START_SERVICE/STOP_SERVICE/
+                          START_TEST/STOP_TEST/SET_GAIN commands.
+                        Sends CONNECTED heartbeats every 15s with isServiceActive +
+                          isTestActive state (no Pusher cost).
+                        Sends SERVICE_STARTED/STOPPED/CALL_CONNECTED/CALL_ENDED events.
                         Auto-reconnects on failure.
+                        stateProvider lambda: injected by GsmService so heartbeats
+                          always carry current audio mode state.
 
 GsmDialer               Registers TelephonyCallback (API 31+) or PhoneStateListener.
                         Places calls via TelecomManager.placeCall() with PhoneAccountHandle
@@ -233,9 +255,21 @@ nextPlayTime += chunkDuration
 ## Call flow (SERVICE mode)
 
 ```
-1. Phone opens app → auto-starts SERVICE → CommandWebSocketClient connects to /ws/cmd
+1. Phone opens app → GsmService starts for WS connectivity → CommandWebSocketClient connects to /ws/cmd
+   Phone UI shows "Status: Not Active"
 
-2. Frontend call() → POST /api/gsm/call-started { num, deviceToken, simAccountId, simComponentName }
+2. Frontend clicks START SERVICE:
+   → POST /api/gsm/commands { type: "START_SERVICE" }
+   → server sends { type:"command", cmdType:"START_SERVICE" } over /ws/cmd
+   → GsmService.handleWsCommand("START_SERVICE")
+   → startServiceDuplexOutputToServerAndServerToInput()
+   → isServiceAudioActive = true
+   → Phone UI shows "Status: Service Active" (green)
+   → retry loop sends SERVICE_STARTED event until WS confirms isConnected
+   → server updates connectedDevices.isServiceActive = true
+   → status poll returns isServiceActive: true → frontend updates UI
+
+3. Frontend call() → POST /api/gsm/call-started { num, deviceToken, simAccountId, simComponentName }
    → server sends { type:"command", cmdType:"CALL_STARTED", data:{number, simAccountId} } over /ws/cmd
    → GsmService.handleCommand("CALL_STARTED")
    → RootUtils.enableIncallMusicCapture()  (opens VOC_REC_DL mixer)
@@ -243,7 +277,7 @@ nextPlayTime += chunkDuration
    → TelecomManager.placeCall() with correct PhoneAccountHandle (dual-SIM aware)
    → Pusher: gsm:call-started → browser (shows "dialing" state)
 
-3. Carrier connects → TelephonyCallback fires OFFHOOK
+4. Carrier connects → TelephonyCallback fires OFFHOOK
    → GsmService sets MODE_IN_CALL + speakerphoneOn=true + STREAM_VOICE_CALL=max
    → AudioWebSocketHandler.connect() → /ws/audio
    → startAudioCapture() → launches tinycap subprocess as root
@@ -251,11 +285,11 @@ nextPlayTime += chunkDuration
    → CommandWebSocketClient.sendEvent("CALL_CONNECTED")
    → server: Pusher gsm:call-connected → browser (starts audio playout)
 
-4. Audio flows:
+5. Audio flows:
    tinycap → raw PCM16 → base64 → /ws/audio → server → browser AudioContext
    Browser mic → PCM16 → /ws/audio → server → Android AudioTrack
 
-5. Call ends (either side):
+6. Call ends (either side):
    → TelephonyCallback fires IDLE
    → RootUtils.disableIncallMusicCapture()
    → AudioWebSocketHandler stops + disconnects
@@ -266,13 +300,48 @@ nextPlayTime += chunkDuration
 ## TEST mode flow
 
 ```
-User taps TEST AUDIO (or website triggers it):
+Frontend clicks START TEST:
+  → POST /api/gsm/commands { type: "START_TEST" }
+  → server sends { type:"command", cmdType:"START_TEST" } over /ws/cmd
+  → GsmService.handleWsCommand("START_TEST")
   → AudioWebSocketHandler (callActive=false) → /ws/audio
   → startAudioPlayback() + startAudioCapture() (uses mic, not tinycap)
   → CommandWebSocketClient.sendEvent("TEST_AUDIO_STARTED")
     → server: Pusher gsm:test-audio-started → browser
       → browser starts mic capture + audio playout
         → bidirectional PCM16 audio over /ws/audio
+
+Frontend clicks STOP TEST:
+  → POST /api/gsm/commands { type: "STOP_TEST" }
+  → GsmService stops test audio, sends TEST_AUDIO_STOPPED
+  → server: Pusher gsm:test-audio-stopped → browser
+```
+
+---
+
+## Gain control
+
+Mic gain and playback volume are controlled from the frontend — no phone UI sliders.
+
+```
+Frontend setMicGain(value) / setPlaybackGain(value):
+  → POST /api/gsm/commands { type: "SET_GAIN", data: { micGain: value } }
+  → server sends SET_GAIN command over /ws/cmd
+  → GsmService.handleWsCommand("SET_GAIN")
+  → AudioWebSocketHandler applies gain to capture/playback path
+```
+
+---
+
+## Server logs
+
+Server keeps a circular buffer of the last 200 log lines (meaningful events only, not audio chunks).
+
+```
+Frontend fetchLogs():
+  → GET /api/gsm/logs
+  → server: GET /api/logs?n=50
+  → returns { logs: string[] }  (last 50 lines)
 ```
 
 ---
@@ -341,6 +410,25 @@ self-closing tags in `AndroidManifest.xml` — breaks Android 10 manifest parser
 Never call `MainActivity.log()` from the capture/playback loop. Use `Log.d()` only.
 `MainActivity.log()` posts to UI thread at 50/sec which locks the ScrollView.
 
+**Phone showing wrong status (fixed)**
+`requestPermissionsOnLaunchIfNeeded` was auto-dispatching SERVICE start on every launch,
+causing phone to always show "Service Active" regardless of frontend state.
+Fixed: removed auto-dispatch. GsmService process starts (for WS cmd) but no audio mode
+is activated until frontend sends START_SERVICE.
+
+**SERVICE_STARTED event dropped silently (fixed)**
+`cmdWsClient?.sendEvent()` returns early when `!isConnected`. WS not yet open when
+service starts. Fixed: retry loop (10s deadline, 300ms poll) waits for `isConnected`.
+
+**connectedDevices dropping isServiceActive on reconnect (fixed)**
+Device entry was reconstructed with only `{ deviceToken, lastSeen, sims }` on reconnect,
+dropping `isServiceActive`/`isTestActive`. Fixed: spread existing entry first.
+
+**Kotlin trailing lambda bug (fixed)**
+`WebSocketAudioClient(... , { packet -> handleAudioPacket(packet) })` — trailing lambda
+attaches to the LAST parameter, which was `onCommand`, not `onAudioPacket`.
+Fixed: use named argument: `onAudioPacket = { packet -> handleAudioPacket(packet) }`.
+
 ---
 
 ## WebSocket message schemas
@@ -363,12 +451,12 @@ Never call `MainActivity.log()` from the capture/playback loop. Use `Log.d()` on
 
 Android → server:
 ```json
-{ "type": "event", "eventType": "CONNECTED|CALL_CONNECTED|CALL_ENDED|...", "deviceToken": "...", "data": {} }
+{ "type": "event", "eventType": "CONNECTED|SERVICE_STARTED|SERVICE_STOPPED|CALL_CONNECTED|CALL_ENDED|...", "deviceToken": "...", "data": { "isServiceActive": true, "isTestActive": false } }
 ```
 
 Server → Android:
 ```json
-{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF", "data": { "number": "...", "simAccountId": "..." } }
+{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN", "data": { "number": "...", "simAccountId": "...", "micGain": 1.0 } }
 ```
 
 ## Audio format
@@ -388,12 +476,16 @@ Chunk size : 320 samples (20ms)
 ```
 docs/realtime-audio/
   server.ts              Express + WebSocket server (VPS). Handles /ws/audio, /ws/cmd, Pusher triggers.
-  useInitGSM.ts          React hook: device discovery, Pusher events, WebSocket audio, call/hangup/DTMF, SIM picker
+                         Circular log buffer (200 lines). GET /api/logs, POST /api/commands.
+  useInitGSM.ts          React hook: device discovery, Pusher events, WebSocket audio,
+                         call/hangup/DTMF, SIM picker, service/test control, gain, logs.
   nextjs-api-routes/
     call-started.ts      POST /api/gsm/call-started → sends CALL_STARTED command over /ws/cmd
     call-ended.ts        POST /api/gsm/call-ended   → sends CALL_ENDED command over /ws/cmd
     send-dtmf.ts         POST /api/gsm/send-dtmf    → sends SEND_DTMF command over /ws/cmd
-    status.ts            GET  /api/gsm/status        → polls device liveness + returns sims[]
+    status.ts            GET  /api/gsm/status        → polls device liveness, sims[], isServiceActive, isTestActive
+    commands.ts          POST /api/gsm/commands      → proxies START_SERVICE/STOP_SERVICE/START_TEST/STOP_TEST/SET_GAIN
+    logs.ts              GET  /api/gsm/logs           → proxies last 50 server log lines
 ```
 
 ---
@@ -412,3 +504,7 @@ docs/realtime-audio/
 - Playback channel (`Channel<ShortArray>`) must remain single-consumer — no `scope.launch` per chunk
 - AudioManager mode changes in `AudioWebSocketHandler` must be gated on `!isCallActive`
 - tinycap WAV header is 44 bytes — always skip before reading PCM
+- SERVICE/TEST audio modes are started only by frontend commands — never auto-start on launch
+- `SERVICE_STARTED` event uses retry loop (10s, 300ms poll) — do not remove it
+- `stateProvider` lambda in `CommandWebSocketClient` carries live `isServiceActive`/`isTestActive`
+- Trailing lambda in Kotlin attaches to the LAST parameter — always use named args for non-last lambdas
