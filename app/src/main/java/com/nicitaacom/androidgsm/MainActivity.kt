@@ -71,7 +71,7 @@ class MainActivity : AppCompatActivity() {
                 activity.statusTextView.setTextColor(
                     ContextCompat.getColor(
                         activity,
-                        if (active) R.color.brand_green else R.color.error_red
+                        if (active) R.color.brand_green else R.color.text_secondary
                     )
                 )
             }
@@ -172,7 +172,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateStatus() {
-        val active = isServiceAudioActive || isTestAudioActive
+        val isError = !meetsMinAndroid || !hasInternetConnection || !hasRequiredPermissions || !hasSimAvailable
+        val isActive = isServiceAudioActive || isTestAudioActive
         val text = when {
             !meetsMinAndroid -> "Status: Android 10+ required"
             !hasInternetConnection -> "Status: No Internet"
@@ -180,12 +181,15 @@ class MainActivity : AppCompatActivity() {
             isTestAudioActive -> "Status: Test Audio Active"
             isServiceAudioActive -> "Status: Service Active"
             !hasSimAvailable -> "Status: No SIM"
-            else -> "Status: Ready"
+            else -> "Status: Not Active"
+        }
+        val color = when {
+            isError -> R.color.error_red
+            isActive -> R.color.brand_green
+            else -> R.color.text_secondary
         }
         statusTextView.text = text
-        statusTextView.setTextColor(
-            ContextCompat.getColor(this, if (active) R.color.brand_green else R.color.error_red)
-        )
+        statusTextView.setTextColor(ContextCompat.getColor(this, color))
     }
 
     private fun requestPermissionsAndStart(allowWithoutSim: Boolean = false) {
@@ -296,8 +300,6 @@ class MainActivity : AppCompatActivity() {
                 requestBatteryOptimizationExemption()
                 try { loadSimSelection() } catch (error: Exception) { addLog("SIM load error: ${error.message}") }
                 startService(pendingAllowStartWithoutSim)
-                if (pendingStartAudioTest) dispatchTestAudioRequest()
-                else if (hasSimAvailable || pendingAllowStartWithoutSim) dispatchServiceAudioInputRequest()
                 pendingAllowStartWithoutSim = false
             } else {
                 hasRequiredPermissions = false
@@ -433,13 +435,8 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
         } else {
             if (hasPhoneStatePermission()) loadSimSelection()
-            // Auto-start SERVICE — phone only needs to show status, frontend controls the rest
-            if (!isServiceAudioActive && !isTestAudioActive && hasSimAvailable) {
-                addLog("✅ Permissions ready — auto-starting SERVICE")
-                pendingStartAudioTest = false
-                startService()
-                dispatchServiceAudioInputRequest()
-            }
+            // Start the service process so WS cmd connects — SERVICE/TEST controlled by frontend
+            startService()
         }
     }
 
