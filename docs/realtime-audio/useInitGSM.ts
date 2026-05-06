@@ -16,6 +16,13 @@ type AudioPacket = {
   audio: string
 }
 
+type SimAccount = {
+  id: string
+  componentName: string
+  label: string
+  simSlotIndex: number
+}
+
 type GsmCallsEvent = {
   deviceToken?: string
   audio?: string
@@ -107,6 +114,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
   const duplexValidationModeRef = useRef(false)
   const isTestAudioActiveRef = useRef(false)
   const isCallActiveRef = useRef(false) // true between call() and hungUp()/CALL_ENDED
+  const simsRef = useRef<SimAccount[]>([])
+  const selectedSimRef = useRef<SimAccount | null>(null)
 
   const shouldStreamMic = () => isConnected || isTestAudioActiveRef.current || duplexValidationModeRef.current
 
@@ -354,6 +363,12 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
               suggested: nextDeviceToken,
             })
           }
+        }
+
+        // Update SIM list whenever status returns it; auto-select first SIM if none selected
+        if (Array.isArray(data?.sims) && data.sims.length > 0) {
+          simsRef.current = data.sims as SimAccount[]
+          if (!selectedSimRef.current) selectedSimRef.current = data.sims[0]
         }
 
         statusFailureCountRef.current = 0
@@ -727,10 +742,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     try {
       isCallActiveRef.current = true
       setIsCalling(true)
+      const sim = selectedSimRef.current
       const res = await fetch("/api/gsm/call-started", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ num, deviceToken }),
+        body: JSON.stringify({
+          num,
+          deviceToken,
+          ...(sim ? { simAccountId: sim.id, simComponentName: sim.componentName } : {}),
+        }),
       })
 
       if (!res.ok) {
@@ -810,5 +830,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
     }
   }, [])
 
-  return { call, hungUp, sendDTMF, stopTestAudio, isTestAudioActiveRef }
+  const selectSim = (sim: SimAccount) => { selectedSimRef.current = sim }
+
+  return { call, hungUp, sendDTMF, stopTestAudio, isTestAudioActiveRef, simsRef, selectedSimRef, selectSim }
 }

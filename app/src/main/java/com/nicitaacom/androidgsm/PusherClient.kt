@@ -177,8 +177,14 @@ class PusherClient(
                 "CALL_STARTED" -> {
                     val number = dataMap["number"]?.toString() ?: dataObj.optString("number")
                     if (!number.isNullOrEmpty()) {
-                        MainActivity.log("📞 CALL_STARTED → $number")
-                        service.handleCommand("CALL_STARTED", mapOf("number" to number))
+                        val simAccountId = dataMap["simAccountId"]?.toString()
+                        val simComponentName = dataMap["simComponentName"]?.toString()
+                        MainActivity.log("📞 CALL_STARTED → $number (sim=$simAccountId)")
+                        service.handleCommand("CALL_STARTED", buildMap {
+                            put("number", number)
+                            if (!simAccountId.isNullOrBlank()) put("simAccountId", simAccountId)
+                            if (!simComponentName.isNullOrBlank()) put("simComponentName", simComponentName)
+                        })
                     } else MainActivity.log("CALL_STARTED missing number")
                 }
                 "CALL_ENDED" -> {

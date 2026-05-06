@@ -170,6 +170,20 @@ class GsmService : Service() {
 
                 // init dialer
                 gsmDialer = GsmDialer(this)
+                // Send SIM list to backend so frontend can show a SIM picker
+                Thread {
+                    try {
+                        Thread.sleep(2000) // wait for Pusher to connect first
+                        val sims = gsmDialer?.getSimAccounts() ?: emptyList()
+                        if (sims.isNotEmpty()) {
+                            val simData = mapOf("sims" to sims.toString())
+                            pusherClient?.sendEvent("SIM_LIST", simData)
+                            MainActivity.log("GsmService: SIM_LIST sent: ${sims.size} accounts")
+                        }
+                    } catch (e: Exception) {
+                        MainActivity.log("WARNING: Failed to send SIM_LIST: ${e.message}")
+                    }
+                }.start()
                 MainActivity.log("GsmService: GsmDialer initialized")
 
                 // Set callbacks once at init — these fire on ANY call state change,
@@ -557,7 +571,9 @@ class GsmService : Service() {
                 MainActivity.log("CALL_STARTED ignored: missing number")
                 return
             }
-            MainActivity.log("Starting call to: $number")
+            val simAccountId = data["simAccountId"] as? String
+            val simComponentName = data["simComponentName"] as? String
+            MainActivity.log("Starting call to: $number (sim=$simAccountId)")
 
             // Override onCallConnected for this call — sets up WS audio for SERVICE mode
             gsmDialer?.setCallConnectedCallback {
@@ -603,7 +619,7 @@ class GsmService : Service() {
 
             // 2. start call with error handling
             try {
-                val started = gsmDialer?.startCall(number) ?: false
+                val started = gsmDialer?.startCall(number, simAccountId, simComponentName) ?: false
                 if (started) {
                     MainActivity.log("Call started via GsmDialer to $number")
                 } else {

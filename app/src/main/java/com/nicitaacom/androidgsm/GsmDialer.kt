@@ -79,12 +79,35 @@ class GsmDialer(private val context: Context) {
     }
 
 
+    // Returns a list of call-capable SIM accounts: [{id, label, simSlotIndex}]
+    @Suppress("MissingPermission")
+    fun getSimAccounts(): List<Map<String, Any>> {
+        if (!hasPermission(Manifest.permission.READ_PHONE_STATE)) return emptyList()
+        return try {
+            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            telecomManager.callCapablePhoneAccounts.mapIndexedNotNull { idx, handle ->
+                try {
+                    val account = telecomManager.getPhoneAccount(handle)
+                    val label = account?.label?.toString() ?: "SIM ${idx + 1}"
+                    val simSlot = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        account?.extras?.getInt("simSlotIndex", idx) ?: idx
+                    } else idx
+                    mapOf("id" to handle.id, "componentName" to handle.componentName.flattenToString(), "label" to label, "simSlotIndex" to simSlot)
+                } catch (e: Exception) { null }
+            }
+        } catch (e: Exception) {
+            MainActivity.log("WARNING: Could not read SIM accounts: ${e.message}")
+            emptyList()
+        }
+    }
+
     // 5. initiate GSM call
     // called when handling CALL_STARTED command (from backend via Pusher) in GsmService.handleCommand.
+    // simAccountId: the PhoneAccount id string from getSimAccounts(); null = system default.
     @Suppress("unused", "MissingPermission")
-    fun startCall(number: String): Boolean {
+    fun startCall(number: String, simAccountId: String? = null, simComponentName: String? = null): Boolean {
         try {
-            MainActivity.log("GsmDialer: Initiating call to $number")
+            MainActivity.log("GsmDialer: Initiating call to $number (simAccountId=$simAccountId)")
 
             if (!hasPermission(Manifest.permission.CALL_PHONE)) {
                 MainActivity.log("ERROR: CALL_PHONE permission not granted")
@@ -113,10 +136,23 @@ class GsmDialer(private val context: Context) {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             val uri = Uri.parse("tel:$number")
 
-            // Route through the default SIM PhoneAccount so the real GSM modem dials.
-            // Do NOT pass our GsmConnectionService handle — that makes Telecom treat us as a
-            // VoIP provider and never touches the actual radio.
-            telecomManager.placeCall(uri, Bundle())
+            val extras = Bundle()
+            // If a specific SIM was requested, pass its PhoneAccountHandle so Telecom routes
+            // through that SIM's modem instead of showing a system chooser or defaulting to SIM 1.
+            if (!simAccountId.isNullOrBlank() && !simComponentName.isNullOrBlank()) {
+                try {
+                    val componentName = android.content.ComponentName.unflattenFromString(simComponentName)
+                    if (componentName != null) {
+                        val handle = android.telecom.PhoneAccountHandle(componentName, simAccountId)
+                        extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
+                        MainActivity.log("GsmDialer: routing via PhoneAccount id=$simAccountId component=$simComponentName")
+                    }
+                } catch (e: Exception) {
+                    MainActivity.log("WARNING: Could not build PhoneAccountHandle: ${e.message}")
+                }
+            }
+
+            telecomManager.placeCall(uri, extras)
             MainActivity.log("GsmDialer: placeCall() dispatched to GSM modem for $number")
             return true
         } catch (exception: Exception) {

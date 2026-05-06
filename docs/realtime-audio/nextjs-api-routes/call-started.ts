@@ -6,7 +6,7 @@ const BACKEND_URL = "https://gsm.nexgem.studio"
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { num, deviceToken } = body
+    const { num, deviceToken, simAccountId, simComponentName } = body
 
     if (!num || !deviceToken) {
       return new Response(JSON.stringify({ error: "Missing num or deviceToken" }), { status: 400 })
@@ -22,7 +22,7 @@ export async function POST(request: NextRequest) {
         deviceToken,
         commands: {
           type: "CALL_STARTED",
-          data: { number: num },
+          data: { number: num, simAccountId, simComponentName },
         },
       }),
     })

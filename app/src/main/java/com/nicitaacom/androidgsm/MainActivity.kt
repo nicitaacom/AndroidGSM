@@ -7,8 +7,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
-import android.app.Activity
-import android.app.role.RoleManager
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
@@ -24,7 +22,6 @@ import android.widget.RadioGroup
 import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
-import android.telecom.TelecomManager
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -40,7 +37,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var scrollView: ScrollView
     private lateinit var toggleButton: Button
     private lateinit var testAudioButton: Button
-    private lateinit var defaultDialerButton: Button
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private lateinit var versionTextView: TextView
@@ -67,7 +63,6 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
-        private const val REQUEST_ROLE_DIALER = 200
         private const val TAG = "GSM"
         private var instance: WeakReference<MainActivity>? = null
 
@@ -100,7 +95,6 @@ class MainActivity : AppCompatActivity() {
         scrollView = findViewById(R.id.scrollView)
         toggleButton = findViewById(R.id.toggleButton)
         testAudioButton = findViewById(R.id.testAudioButton)
-        defaultDialerButton = findViewById(R.id.defaultDialerButton)
         copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
         versionTextView = findViewById(R.id.versionTextView)
@@ -141,6 +135,7 @@ class MainActivity : AppCompatActivity() {
         AudioWebSocketHandler.micGain = micGainSeekBar.progress / 100f
         AudioWebSocketHandler.playbackGain = playbackVolSeekBar.progress / 100f
 
+        // SERVICE starts automatically — toggle is just a manual emergency stop/restart
         toggleButton.setOnClickListener {
             when {
                 isServiceAudioActive -> stopServiceAudioInput()
@@ -164,17 +159,13 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        defaultDialerButton.setOnClickListener {
-            requestDefaultDialer()
-        }
-
         copyLogsButton.setOnClickListener {
             copyLastLogsToClipboard()
         }
 
         checkNetworkAvailability()
         registerNetworkCallback()
-        requestPermissionsOnLaunchIfNeeded()
+        requestPermissionsOnLaunchIfNeeded() // auto-starts SERVICE inside once granted
         updateButtonState()
 
         addLog("App started")
@@ -244,8 +235,6 @@ class MainActivity : AppCompatActivity() {
             testAudioButton.text = "TEST AUDIO"
             testAudioButton.isEnabled = false
             testAudioButton.alpha = 0.5f
-            defaultDialerButton.isEnabled = false
-            defaultDialerButton.alpha = 0.5f
             copyLogsButton.isEnabled = true
             copyLogsButton.alpha = 1f
             statusTextView.text = when {
@@ -256,8 +245,6 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        defaultDialerButton.isEnabled = true
-        defaultDialerButton.alpha = 1f
         copyLogsButton.isEnabled = true
         copyLogsButton.alpha = 1f
 
@@ -343,39 +330,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun requestDefaultDialer() {
-        try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val roleManager = getSystemService(RoleManager::class.java)
-                if (roleManager != null && !roleManager.isRoleHeld(RoleManager.ROLE_DIALER)) {
-                    val intent = roleManager.createRequestRoleIntent(RoleManager.ROLE_DIALER)
-                    startActivityForResult(intent, REQUEST_ROLE_DIALER)
-                    addLog("Requesting dialer role via RoleManager")
-                    return
-                } else if (roleManager?.isRoleHeld(RoleManager.ROLE_DIALER) == true) {
-                    addLog("✅ Already default dialer")
-                    return
-                }
-            }
-            // 1. Direct TelecomManager fallback — no custom activity needed
-            val intent = Intent(TelecomManager.ACTION_CHANGE_DEFAULT_DIALER).apply {
-                putExtra(TelecomManager.EXTRA_CHANGE_DEFAULT_DIALER_PACKAGE_NAME, packageName)
-            }
-            startActivity(intent)
-            addLog("Opening system default dialer prompt")
-        } catch (error: Exception) {
-            addLog("Error requesting default dialer: ${error.message}")
-        }
-    }
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQUEST_ROLE_DIALER) {
-            if (resultCode == Activity.RESULT_OK) addLog("✅ App set as default dialer")
-            else addLog("❌ Default dialer request declined or failed")
-        }
-    }
-
     private fun requestBatteryOptimizationExemption() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
@@ -454,7 +408,6 @@ class MainActivity : AppCompatActivity() {
                 requestBatteryOptimizationExemption()
                 try { loadSimSelection() } catch (error: Exception) { addLog("SIM load error: ${error.message}") }
                 startService(pendingAllowStartWithoutSim)
-                // 1. Dispatch after service starts
                 if (pendingStartAudioTest) dispatchTestAudioRequest()
                 else if (hasSimAvailable || pendingAllowStartWithoutSim) dispatchServiceAudioInputRequest()
                 pendingAllowStartWithoutSim = false
@@ -590,13 +543,20 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.MODIFY_AUDIO_SETTINGS
         )
         val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-            hasRequiredPermissions = missing.isEmpty()
-            hasCallPermissions = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+        hasRequiredPermissions = missing.isEmpty()
+        hasCallPermissions = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         if (missing.isNotEmpty()) {
-            addLog("Permissions required before using controls: ${missing.joinToString()}")
+            addLog("Requesting permissions...")
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
-        } else if (hasPhoneStatePermission()) {
-            loadSimSelection()
+        } else {
+            if (hasPhoneStatePermission()) loadSimSelection()
+            // Auto-start SERVICE — phone only needs to show status, frontend controls the rest
+            if (!isServiceAudioActive && !isTestAudioActive && hasSimAvailable) {
+                addLog("✅ Permissions ready — auto-starting SERVICE")
+                pendingStartAudioTest = false
+                startService()
+                dispatchServiceAudioInputRequest()
+            }
         }
     }
 

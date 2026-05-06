@@ -43,7 +43,7 @@ export async function GET(request: NextRequest) {
     const lastSeen = data.lastSeen ? new Date(data.lastSeen) : null
     const isRecent = lastSeen && Date.now() - lastSeen.getTime() < 30000 // 2. 30s timeout
 
-    return NextResponse.json({ isAuthorized: isRecent, lastSeen: data.lastSeen, deviceToken })
+    return NextResponse.json({ isAuthorized: isRecent, lastSeen: data.lastSeen, deviceToken, sims: data.sims ?? [] })
   } catch (error) {
     return NextResponse.json(
       { isAuthorized: false, error: error instanceof Error ? error.message : String(error) },

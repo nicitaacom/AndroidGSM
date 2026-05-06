@@ -24,9 +24,17 @@ const pusher = new Pusher({
   useTLS: true,
 })
 
+interface SimAccount {
+  id: string
+  componentName: string
+  label: string
+  simSlotIndex: number
+}
+
 interface DeviceInfo {
   deviceToken: string
   lastSeen: Date
+  sims?: SimAccount[]
 }
 
 const connectedDevices = new Map<string, DeviceInfo>()
@@ -169,6 +177,7 @@ app.get('/api/device-status/:deviceToken', (req, res) => {
     isAuthorized: true,
     lastSeen: device.lastSeen.toISOString(),
     deviceToken: device.deviceToken,
+    sims: device.sims ?? [],
   })
 })
 
@@ -214,6 +223,34 @@ app.post('/api/events', async (req, res) => {
       connectedDevices.delete(deviceToken)
       console.log(`📴 [api/events] DISCONNECTED ${deviceToken}`)
       break
+    case 'SIM_LIST': {
+      // Android sends its available SIM accounts at startup so the frontend can offer a picker
+      const simsRaw: string = data?.sims ?? ''
+      try {
+        // Android serializes the list as Kotlin's List.toString() — parse it manually
+        // Format: [{id=xxx, componentName=yyy, label=zzz, simSlotIndex=0}, ...]
+        const matches = [...simsRaw.matchAll(/\{([^}]+)\}/g)]
+        const sims: SimAccount[] = matches.map(m => {
+          const pairs: Record<string, string> = {}
+          m[1].split(', ').forEach(p => {
+            const eq = p.indexOf('=')
+            if (eq > 0) pairs[p.slice(0, eq).trim()] = p.slice(eq + 1).trim()
+          })
+          return {
+            id: pairs.id ?? '',
+            componentName: pairs.componentName ?? '',
+            label: pairs.label ?? `SIM ${(Number(pairs.simSlotIndex) ?? 0) + 1}`,
+            simSlotIndex: Number(pairs.simSlotIndex ?? 0),
+          }
+        })
+        const device = connectedDevices.get(deviceToken)
+        if (device) device.sims = sims
+        console.log(`📱 [api/events] SIM_LIST for ${deviceToken}: ${sims.length} accounts`, sims.map(s => s.label))
+      } catch (e) {
+        console.error(`❌ [api/events] SIM_LIST parse error: ${e}`)
+      }
+      break
+    }
     case 'CALL_STARTED':
       console.log(`📞 [api/events] CALL_STARTED to ${data?.number}`)
       await safeTrigger('gsm-calls', 'gsm:call-started', { deviceToken, number: data?.number, timestamp: new Date().toISOString() })
