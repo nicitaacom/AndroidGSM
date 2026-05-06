@@ -567,9 +567,11 @@ class GsmService : Service() {
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                 audioManager.mode = AudioManager.MODE_IN_CALL
                 audioManager.isSpeakerphoneOn = true
-                // Mute the speaker so audio only streams to website, not played on phone
-                audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
-                MainActivity.log("📞 Speakerphone ON + voice stream muted (capture-only mode)")
+                // STREAM_VOICE_CALL volume must be > 0 — REMOTE_SUBMIX taps the post-volume
+                // mixer output, so volume=0 yields silence in capture even though the path is open.
+                val maxVoiceVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+                audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoiceVol, 0)
+                MainActivity.log("📞 Speakerphone ON + STREAM_VOICE_CALL set to max=$maxVoiceVol (REMOTE_SUBMIX needs audible signal to tap)")
 
                 Thread {
                     try {

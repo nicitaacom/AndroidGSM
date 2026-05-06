@@ -34,6 +34,7 @@ class AudioWebSocketHandler(
     private val onAudioReceived: (ShortArray) -> Unit
 ) {
     private var audioRecord: AudioRecord? = null
+    private var tinycapProcess: Process? = null
     @Volatile private var audioTrack: AudioTrack? = null
     @Volatile private var isPlaying = false
     private var isRecording = false
@@ -107,104 +108,132 @@ class AudioWebSocketHandler(
 
     fun startAudioCapture() {
         if (isRecording) return
-        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            MainActivity.log("❌ ERROR: RECORD_AUDIO permission not granted")
+
+        scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        playbackChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        hpfPrev = 0f
+        hpfPrevIn = 0f
+        isRecording = true
+
+        if (isCallActive) {
+            // GSM call mode: Java AudioRecord cannot access VOICE_CALL audio without
+            // CAPTURE_AUDIO_OUTPUT (signature permission, ungratable at runtime).
+            // Run tinycap as root — reads directly from ALSA MultiMedia1 kernel device,
+            // bypassing all Java permission checks. VOC_REC_DL mixer must already be open.
+            scope.launch { captureViaTinycap() }
+            MainActivity.log("✅ Capture started (tinycap/root) — GSM call downlink")
             return
         }
 
-        // 2. Explicitly start RECORD_AUDIO app op before capturing — required on Android 12+ or system kills the process
-        try {
-            val packageName = context.packageName
-            val uid = context.applicationInfo.uid
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                val result = appOpsManager.unsafeCheckOpNoThrow(
-                    android.app.AppOpsManager.OPSTR_RECORD_AUDIO, uid, packageName
-                )
-                if (result != android.app.AppOpsManager.MODE_ALLOWED) {
-                    MainActivity.log("❌ RECORD_AUDIO app op not allowed (result=$result) - mic blocked by system")
-                    return
-                }
-            }
-            MainActivity.log("✅ RECORD_AUDIO app op allowed by system")
-        } catch (exception: Exception) {
-            MainActivity.log("⚠️ AppOps check warning: ${exception.message}")
+        // TEST mode: use standard AudioRecord with mic
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            MainActivity.log("❌ ERROR: RECORD_AUDIO permission not granted")
+            isRecording = false
+            return
         }
-
         try {
-            MainActivity.log("🎤 WebSocket: Starting capture...")
-            // Always use MODE_IN_COMMUNICATION + earpiece so hardware AEC suppresses feedback.
-            // Speakerphone causes a mic→speaker→mic loop regardless of mode.
+            MainActivity.log("🎤 WebSocket: Starting mic capture...")
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             audioManager.isSpeakerphoneOn = false
 
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
-            if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid buffer size"); return }
+            if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid buffer size"); isRecording = false; return }
 
-            // Always attempt REMOTE_SUBMIX path first.
-            // Root detection can be false-negative on some devices/ROMs.
-            audioRecord = buildRootedAudioRecord(bufferSize)
-
+            audioRecord = buildMicAudioRecord(bufferSize)
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 MainActivity.log("❌ ERROR: AudioRecord not initialized")
+                isRecording = false
                 return
             }
 
-            // 3. Recreate scope and channel if previous session was cancelled
-            scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            playbackChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-            hpfPrev = 0f
-            hpfPrevIn = 0f
-
-            isRecording = true
             audioRecord?.startRecording()
             scope.launch { captureAndStreamAudio(bufferSize) }
             MainActivity.log("✅ Capture started (WS) - source: ${resolveCaptureSourceLabel()}")
         } catch (exception: SecurityException) {
             MainActivity.log("❌ ERROR: Permission rejected: ${exception.message}")
+            isRecording = false
         } catch (exception: Exception) {
             MainActivity.log("❌ ERROR starting capture: ${exception.message}")
+            isRecording = false
         }
     }
 
     fun stopAudioCapture() {
         try {
             isRecording = false
+            tinycapProcess?.destroy()
+            tinycapProcess = null
             audioRecord?.stop()
             audioRecord?.release()
             audioRecord = null
-            audioManager.mode = AudioManager.MODE_NORMAL
-            audioManager.isSpeakerphoneOn = false
-
+            if (!isCallActive) {
+                audioManager.mode = AudioManager.MODE_NORMAL
+                audioManager.isSpeakerphoneOn = false
+            }
             MainActivity.log("🎤 Capture stopped")
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error stopping capture", exception)
         }
     }
 
-    // 6. Build AudioRecord using REMOTE_SUBMIX when a GSM call is active.
-    // GsmService forces speakerphone + MODE_IN_CALL before capture starts, which routes
-    // GSM telephony audio through the media HAL mixer. REMOTE_SUBMIX taps that mixer
-    // output without needing CAPTURE_AUDIO_OUTPUT (which cannot be pm-granted at runtime).
-    private fun buildRootedAudioRecord(bufferSize: Int): AudioRecord? {
-        if (isCallActive) {
-            return try {
-                val record = AudioRecord(MediaRecorder.AudioSource.REMOTE_SUBMIX, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
-                if (record.state == AudioRecord.STATE_INITIALIZED) {
-                    MainActivity.log("✅ REMOTE_SUBMIX initialized (GSM call via speakerphone path)")
-                    record
-                } else {
-                    record.release()
-                    MainActivity.log("❌ REMOTE_SUBMIX failed — falling back to mic")
-                    buildMicAudioRecord(bufferSize)
-                }
-            } catch (exception: Exception) {
-                MainActivity.log("❌ REMOTE_SUBMIX exception: ${exception.message} — falling back to mic")
-                buildMicAudioRecord(bufferSize)
-            }
-        }
+    // Capture GSM call downlink via tinycap as root.
+    // tinycap reads from ALSA MultiMedia1 (card 0 device 0) at kernel level — no Java
+    // permission check applies. VOC_REC_DL mixer must be open before this is called.
+    private suspend fun captureViaTinycap() = withContext(Dispatchers.IO) {
+        val chunkSamples = 320 // 20ms at 16kHz
+        val chunkBytes = chunkSamples * 2 // PCM16 = 2 bytes/sample
+        // tinycap writes a 44-byte WAV header before PCM data — skip it
+        val WAV_HEADER_BYTES = 44
 
-        // Non-call capture (TEST mode): use mic
-        return buildMicAudioRecord(bufferSize)
+        try {
+            val proc = Runtime.getRuntime().exec(arrayOf(
+                "su", "-c",
+                "/system/bin/tinycap /proc/self/fd/1 -D 0 -d 0 -c 1 -r 16000 -b 16"
+            ))
+            tinycapProcess = proc
+
+            val input = proc.inputStream
+            val headerBuf = ByteArray(WAV_HEADER_BYTES)
+            var headerRead = 0
+            while (headerRead < WAV_HEADER_BYTES && isRecording) {
+                val n = input.read(headerBuf, headerRead, WAV_HEADER_BYTES - headerRead)
+                if (n < 0) break
+                headerRead += n
+            }
+            MainActivity.log("✅ tinycap: WAV header consumed ($headerRead bytes), streaming PCM...")
+
+            val buffer = ByteArray(chunkBytes)
+            var seq = seqTx
+            var chunkCount = 0
+
+            while (isRecording) {
+                var offset = 0
+                while (offset < chunkBytes && isRecording) {
+                    val n = input.read(buffer, offset, chunkBytes - offset)
+                    if (n < 0) { isRecording = false; break }
+                    offset += n
+                }
+                if (offset == 0) continue
+
+                // Send raw PCM bytes — no HPF/gain processing for downlink voice
+                val base64Audio = Base64.encodeToString(buffer, 0, offset, Base64.NO_WRAP)
+                wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
+                if (seq % 50L == 0L) {
+                    val shorts = ShortArray(offset / 2)
+                    ByteBuffer.wrap(buffer, 0, offset).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
+                    Log.d(TAG, "tinycap-SEND seq=$seq rms=${String.format("%.4f", rms(shorts, shorts.size))}")
+                }
+                seq++
+                chunkCount++
+            }
+            seqTx = seq
+            MainActivity.log("✅ tinycap capture ended: $chunkCount chunks sent")
+        } catch (e: Exception) {
+            MainActivity.log("❌ tinycap capture error: ${e.message}")
+        } finally {
+            tinycapProcess?.destroy()
+            tinycapProcess = null
+        }
     }
 
     private fun resolveCaptureSourceLabel(): String {
@@ -299,7 +328,7 @@ class AudioWebSocketHandler(
                     val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
                     val seq = seqTx++
                     wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-                    if (seq % 50L == 0L) Log.d(TAG, "WS-SEND audio chunk seq=$seq")
+                    if (seq % 50L == 0L) Log.d(TAG, "WS-SEND audio chunk seq=$seq rms=${String.format("%.6f", rms(buffer, read))}")
                     chunkCount++
                 } else if (read < 0) {
                     Log.e(TAG, "❌ Read error: $read")
@@ -318,10 +347,12 @@ class AudioWebSocketHandler(
         try {
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
-            // Earpiece in all modes — speakerphone causes mic→speaker→mic feedback loop.
-            // Hardware AEC on VOICE_COMMUNICATION stream handles echo suppression.
-            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-            audioManager.isSpeakerphoneOn = false
+            if (!isCallActive) {
+                // TEST mode: earpiece prevents mic→speaker→mic feedback loop; AEC handles echo
+                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+                audioManager.isSpeakerphoneOn = false
+            }
+            // Call mode: keep GsmService-set MODE_IN_CALL + speakerphone=true intact for REMOTE_SUBMIX
 
             val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }

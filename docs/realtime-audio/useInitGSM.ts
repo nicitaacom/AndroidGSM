@@ -346,7 +346,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
 
     fetchDeviceToken()
     const id = setInterval(fetchDeviceToken, 2000) // Poll every 2s for near real-time readiness
-    return () => clearInterval(id)
+
+    // Re-fetch immediately when tab regains focus — Pusher may have dropped while hidden
+    const onVisible = () => { if (document.visibilityState === "visible") fetchDeviceToken() }
+    document.addEventListener("visibilitychange", onVisible)
+
+    return () => {
+      clearInterval(id)
+      document.removeEventListener("visibilitychange", onVisible)
+    }
   }, [deviceToken, setDeviceToken, setError, setIsReady])
 
   /**
@@ -404,8 +412,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>) => 
       isCallActiveRef.current = false
       setIsConnected(false)
       setIsCalling(false)
-      // Stop audio streams and clear queues when call ends
       stopMicCapture()
+      stopPlayoutLoop()
       rxQueueRef.current.clear()
       nextRxSeqRef.current = 0
       rxEnqueueSeqRef.current = 0

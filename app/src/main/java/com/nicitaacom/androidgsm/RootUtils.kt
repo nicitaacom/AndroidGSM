@@ -81,22 +81,28 @@ object RootUtils {
     fun grantAudioOutputCapture(context: Context): Boolean =
         grantPermission(context.packageName, "android.permission.CAPTURE_AUDIO_OUTPUT")
 
-    // Route in-call audio into the MultiMedia1 capture path via tinymix so REMOTE_SUBMIX
-    // can tap it. The 'Incall_Music Audio Mixer MultiMedia1' control (index 1689 on sdm660)
-    // is the standard Qualcomm path for in-call audio recording.
+    // Tap GSM call downlink (the audio you hear from the other party) into MultiMedia1's
+    // capture stream via tinymix. 'MultiMedia1 Mixer VOC_REC_DL' (index 1190 on sdm660) is
+    // the Qualcomm Voice-Call-Record DownLink mixer — once enabled, AudioRecord on
+    // REMOTE_SUBMIX (which taps MultiMedia1) sees the GSM downlink PCM.
+    //
+    // NOTE: The previously used 'Incall_Music Audio Mixer MultiMedia1' is the OPPOSITE
+    // direction — it injects MultiMedia1 playback INTO the call uplink. Wrong control.
     fun enableIncallMusicCapture(): Boolean {
-        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 1")
+        // Enable downlink (what we hear from other party). Could also enable VOC_REC_UL
+        // for our own mic side, but for now we only want to hear the remote party.
+        val (exit, output) = runSuCommand("tinymix 'MultiMedia1 Mixer VOC_REC_DL' 1")
         return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 enabled (GSM audio capture path open)")
-            else Log.e(TAG, "❌ tinymix incall enable failed (exit=$exit): $output")
+            if (ok) Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 enabled (GSM downlink capture open)")
+            else Log.e(TAG, "❌ tinymix VOC_REC_DL enable failed (exit=$exit): $output")
         }
     }
 
     fun disableIncallMusicCapture(): Boolean {
-        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 0")
+        val (exit, output) = runSuCommand("tinymix 'MultiMedia1 Mixer VOC_REC_DL' 0")
         return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 disabled")
-            else Log.e(TAG, "❌ tinymix incall disable failed (exit=$exit): $output")
+            if (ok) Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 disabled")
+            else Log.e(TAG, "❌ tinymix VOC_REC_DL disable failed (exit=$exit): $output")
         }
     }
 }
