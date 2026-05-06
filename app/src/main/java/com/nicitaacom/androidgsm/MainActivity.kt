@@ -171,17 +171,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkActualServiceState() {
-        val manager = getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-        @Suppress("DEPRECATION")
-        val isActuallyRunning = manager.getRunningServices(Int.MAX_VALUE)
-            .any { it.service.className == GsmService::class.java.name }
-
-        if (!isActuallyRunning && (isTestAudioActive || isServiceAudioActive)) {
-            addLog("⚠️ Service not running - resetting state")
-            isTestAudioActive = false
-            isServiceAudioActive = false
-            pendingStartAudioTest = false
-        }
+        // getRunningServices() is deprecated on Android 8+ and always returns empty for
+        // other apps — do not use it to infer service state. State is tracked via
+        // notifyServiceActive / notifyTestActive called from GsmService directly.
         updateStatus()
     }
 
