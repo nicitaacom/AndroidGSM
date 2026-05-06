@@ -23,7 +23,8 @@ class CommandWebSocketClient(
     private val bearerToken: String,
     private val deviceToken: String,
     private val onCommand: (type: String, data: JSONObject) -> Unit,
-    private val stateProvider: (() -> Map<String, Any>)? = null
+    private val stateProvider: (() -> Map<String, Any>)? = null,
+    private val onConnected: (() -> Unit)? = null
 ) : WebSocketListener() {
 
     private val httpClient = OkHttpClient.Builder()
@@ -42,7 +43,7 @@ class CommandWebSocketClient(
     companion object {
         private const val TAG = "CmdWS"
         private const val RECONNECT_DELAY_MS = 5000L
-        private const val HEARTBEAT_INTERVAL_MS = 15000L
+        private const val HEARTBEAT_INTERVAL_MS = 8000L
     }
 
     fun connect() {
@@ -56,7 +57,7 @@ class CommandWebSocketClient(
             val url = "$wsUrl?token=${java.net.URLEncoder.encode(bearerToken, "UTF-8")}&role=android-cmd&deviceToken=${java.net.URLEncoder.encode(deviceToken, "UTF-8")}"
             val request = Request.Builder().url(url).build()
             ws = httpClient.newWebSocket(request, this)
-            Log.d(TAG, "Connecting...")
+            Log.d(TAG, "Connecting to: $wsUrl | deviceToken empty=${deviceToken.isBlank()} | token empty=${bearerToken.isBlank()}")
         } catch (e: Exception) {
             Log.e(TAG, "Connect error: ${e.message}")
             scheduleReconnect()
@@ -66,9 +67,9 @@ class CommandWebSocketClient(
     override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
         isConnected = true
         Log.d(TAG, "✅ Connected")
-        // Register immediately so server knows this is a command channel
         sendEvent("CONNECTED_EXPLICIT", stateProvider?.invoke() ?: emptyMap())
         startHeartbeat()
+        onConnected?.invoke()
     }
 
     override fun onMessage(webSocket: WebSocket, text: String) {

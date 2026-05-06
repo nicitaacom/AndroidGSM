@@ -23,6 +23,7 @@ export async function GET(request: NextRequest) {
     }
 
     const { devices } = await devicesRes.json()
+    console.log("[gsm/status] /api/devices response", { count: devices?.length, devices })
     if (!devices?.length) {
       // Keep response shape stable for frontend polling logic: "not ready" is not a hard error.
       return NextResponse.json({ isAuthorized: false, lastSeen: null, deviceToken: null, error: "No devices connected" }, { status: 200 })

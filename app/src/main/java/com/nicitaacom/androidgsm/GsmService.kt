@@ -170,20 +170,6 @@ class GsmService : Service() {
 
                 // init dialer
                 gsmDialer = GsmDialer(this)
-                // Send SIM list to backend so frontend can show a SIM picker
-                Thread {
-                    try {
-                        Thread.sleep(2000) // wait for Pusher to connect first
-                        val sims = gsmDialer?.getSimAccounts() ?: emptyList()
-                        if (sims.isNotEmpty()) {
-                            val simData = mapOf("sims" to sims.toString())
-                            cmdWsClient?.sendEvent("SIM_LIST", simData)
-                            MainActivity.log("GsmService: SIM_LIST sent: ${sims.size} accounts")
-                        }
-                    } catch (e: Exception) {
-                        MainActivity.log("WARNING: Failed to send SIM_LIST: ${e.message}")
-                    }
-                }.start()
                 MainActivity.log("GsmService: GsmDialer initialized")
 
                 // Set callbacks once at init — these fire on ANY call state change,
@@ -326,15 +312,22 @@ class GsmService : Service() {
                         val wsUrl = safeConfig.BACKEND_URL
                             .replace("http://", "ws://")
                             .replace("https://", "wss://")
-                            .removeSuffix("/") + "/ws/cmd"
+                            .removeSuffix("/") + "/ws/audio"
                         cmdWsClient = CommandWebSocketClient(wsUrl, safeConfig.BACKEND_BEARER, safeConfig.DEVICE_TOKEN,
                             onCommand = { type, data -> handleWsCommand(type, data) },
-                            stateProvider = { mapOf("isServiceActive" to isServiceAudioActive, "isTestActive" to isTestAudioActive) }
+                            stateProvider = { mapOf("isServiceActive" to isServiceAudioActive, "isTestActive" to isTestAudioActive) },
+                            onConnected = {
+                                // Send SIM list immediately on connect so frontend can show SIM picker
+                                val sims = gsmDialer?.getSimAccounts() ?: emptyList()
+                                if (sims.isNotEmpty()) {
+                                    cmdWsClient?.sendEvent("SIM_LIST", mapOf("sims" to sims.toString()))
+                                    MainActivity.log("GsmService: SIM_LIST sent: ${sims.size} accounts")
+                                }
+                                startServiceDuplexOutputToServerAndServerToInput()
+                            }
                         )
                         cmdWsClient?.connect()
                         MainActivity.log("GsmService: CommandWS connecting...")
-                        // Auto-enter SERVICE mode — phone is always ready to handle calls once connected
-                        startServiceDuplexOutputToServerAndServerToInput()
                     }
                 }
 
@@ -676,7 +669,6 @@ class GsmService : Service() {
     private fun handleCallEnded() {
         try {
             MainActivity.log("Ending call")
-            isServiceAudioActive = false
             Thread {
                 try {
                     gsmDialer?.endCall()

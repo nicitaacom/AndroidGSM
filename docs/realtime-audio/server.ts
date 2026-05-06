@@ -142,7 +142,7 @@ app.get('/api/devices', (_req, res) => {
   const now = Date.now()
 
   for (const [token, info] of [...connectedDevices.entries()]) {
-    if (now - info.lastSeen.getTime() > 10000) {
+    if (now - info.lastSeen.getTime() > 30000) {
       connectedDevices.delete(token)
       console.log('ℹ️ [api/devices] removed stale device', { token })
     }
@@ -177,7 +177,7 @@ app.get('/api/device-status/:deviceToken', (req, res) => {
   const now = Date.now()
   const device = connectedDevices.get(deviceToken)
 
-  if (!device || now - device.lastSeen.getTime() > 10000) {
+  if (!device || now - device.lastSeen.getTime() > 30000) {
     if (device) {
       connectedDevices.delete(deviceToken)
       console.log('ℹ️ [api/device-status] removed stale device', { deviceToken })
@@ -403,11 +403,25 @@ async function sendCommand(deviceToken: string, type: string, data: any = {}) {
 }
 
 const server = http.createServer(app)
-const wss = new WebSocketServer({ server, path: '/ws/audio' })
 
-// Persistent command channel: Android connects once at startup, stays connected.
-// Handles heartbeats (updates lastSeen), receives commands with zero Pusher cost.
-const wsCmd = new WebSocketServer({ server, path: '/ws/cmd' })
+// Single WebSocket server on /ws — reverse proxy only needs to forward one path.
+// role=android-cmd → command channel; everything else → audio channel.
+const wss = new WebSocketServer({ noServer: true })
+const wsCmd = new WebSocketServer({ noServer: true })
+
+server.on('upgrade', (req: http.IncomingMessage, socket: any, head: any) => {
+  const url = new URL(req.url || '', `http://${req.headers.host}`)
+  if (!url.pathname.startsWith('/ws/')) {
+    socket.destroy()
+    return
+  }
+  const role = url.searchParams.get('role')
+  if (role === 'android-cmd') {
+    wsCmd.handleUpgrade(req, socket, head, (ws: WebSocket) => wsCmd.emit('connection', ws, req))
+  } else {
+    wss.handleUpgrade(req, socket, head, (ws: WebSocket) => wss.emit('connection', ws, req))
+  }
+})
 
 /**
  * Message schema (JSON text frame):
@@ -597,6 +611,7 @@ wsCmd.on('connection', (ws, req) => {
   ws.on('close', () => {
     console.log(`ℹ️ [ws/cmd] android disconnected: ${deviceToken}`)
     androidCmdByDevice.delete(deviceToken)
+    connectedDevices.delete(deviceToken)
   })
 })
 
