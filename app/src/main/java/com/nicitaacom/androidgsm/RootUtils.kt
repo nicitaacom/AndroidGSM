@@ -81,25 +81,22 @@ object RootUtils {
     fun grantAudioOutputCapture(context: Context): Boolean =
         grantPermission(context.packageName, "android.permission.CAPTURE_AUDIO_OUTPUT")
 
-    // Force audio routing to speaker at the AudioFlinger/HAL level via root.
-    // AudioManager.setSpeakerphoneOn() is overridden by the system dialer when it owns the call;
-    // this binder call bypasses that by setting FORCE_SPEAKER on FORCE_FOR_COMMUNICATION directly.
-    // Equivalent to: AudioSystem.setForceUse(FOR_COMMUNICATION, FORCE_SPEAKER)
-    fun forceSpeakerForCapture(): Boolean {
-        // service call audio 102 i32 <usage=2=FOR_COMMUNICATION> i32 <config=1=FORCE_SPEAKER>
-        val (exit, output) = runSuCommand("service call audio 102 i32 2 i32 1")
+    // Route in-call audio into the MultiMedia1 capture path via tinymix so REMOTE_SUBMIX
+    // can tap it. The 'Incall_Music Audio Mixer MultiMedia1' control (index 1689 on sdm660)
+    // is the standard Qualcomm path for in-call audio recording.
+    fun enableIncallMusicCapture(): Boolean {
+        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 1")
         return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ Root force-speaker: FOR_COMMUNICATION -> FORCE_SPEAKER")
-            else Log.e(TAG, "❌ Root force-speaker failed (exit=$exit): $output")
+            if (ok) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 enabled (GSM audio capture path open)")
+            else Log.e(TAG, "❌ tinymix incall enable failed (exit=$exit): $output")
         }
     }
 
-    // Restore to default routing (FORCE_NONE) after call ends
-    fun restoreAudioRouting(): Boolean {
-        val (exit, output) = runSuCommand("service call audio 102 i32 2 i32 0")
+    fun disableIncallMusicCapture(): Boolean {
+        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 0")
         return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ Root restore audio routing: FOR_COMMUNICATION -> FORCE_NONE")
-            else Log.e(TAG, "❌ Root restore routing failed (exit=$exit): $output")
+            if (ok) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 disabled")
+            else Log.e(TAG, "❌ tinymix incall disable failed (exit=$exit): $output")
         }
     }
 }

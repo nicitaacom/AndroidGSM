@@ -178,9 +178,9 @@ class GsmService : Service() {
                     if (!isCallActive) return@setCallEndedCallback  // ignore IDLE fired on boot/init
                     isCallActive = false
                     MainActivity.log("📴 Call ended (IDLE) — stopping audio, notifying backend")
-                    // Restore audio routing
+                    // Close incall capture path
                     try {
-                        RootUtils.restoreAudioRouting()
+                        RootUtils.disableIncallMusicCapture()
                         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
                         am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0)
@@ -573,11 +573,11 @@ class GsmService : Service() {
 
                 Thread {
                     try {
-                        // Force speaker at HAL level via root — system dialer overrides setSpeakerphoneOn()
-                        // so we bypass it with a direct AudioFlinger binder call.
-                        val speakerForced = RootUtils.forceSpeakerForCapture()
-                        MainActivity.log("📞 Root force-speaker: $speakerForced")
-                        Thread.sleep(300) // let HAL routing settle before opening AudioRecord
+                        // Open the Qualcomm incall audio capture path via tinymix so REMOTE_SUBMIX
+                        // can tap GSM call audio without needing CAPTURE_AUDIO_OUTPUT.
+                        val captureEnabled = RootUtils.enableIncallMusicCapture()
+                        MainActivity.log("📞 Incall capture path: $captureEnabled")
+                        Thread.sleep(300) // let mixer settle before opening AudioRecord
 
                         val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")
                             ?.replace("https://", "wss://")?.removeSuffix("/") + "/ws/audio"
