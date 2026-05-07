@@ -356,13 +356,17 @@ class AudioWebSocketHandler(
             // Call mode: keep GsmService-set MODE_IN_CALL + speakerphone=true intact for REMOTE_SUBMIX
 
             val playRate = if (isCallActive) PLAYBACK_SAMPLE_RATE else SAMPLE_RATE
-            val bufferSize = AudioTrack.getMinBufferSize(playRate, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
+            // 8kHz call mode needs a deeper buffer (8x min) to absorb WS jitter without underrun.
+            val bufferSize = AudioTrack.getMinBufferSize(playRate, CHANNEL_OUT, AUDIO_FORMAT) * (if (isCallActive) BUFFER_SIZE_FACTOR * 2 else BUFFER_SIZE_FACTOR)
             if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
 
-            // Both modes use VOICE_COMMUNICATION so hardware AEC activates
+            // SERVICE mode: USAGE_MEDIA routes through MultiMedia1 which tinymix bridges
+            // into the GSM voice uplink (Incall_Music Audio Mixer MultiMedia1).
+            // TEST mode: USAGE_VOICE_COMMUNICATION for AEC on the mic loopback test.
+            val audioUsage = if (isCallActive) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_VOICE_COMMUNICATION
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                    .setUsage(audioUsage)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build())
                 .setAudioFormat(AudioFormat.Builder()

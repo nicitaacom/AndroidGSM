@@ -719,7 +719,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       // Defensive tear-down — protects against a race where two callers (status poll +
       // ws.onmessage + useEffect) all enter startMicCapture concurrently and leak processors.
       stopMicCapture()
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false } })
       // After the await, the call may have ended — bail out instead of leaking the stream.
       if (
         isCleaningUpRef.current ||
@@ -730,9 +730,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       }
       mediaStreamRef.current = stream
       const source = audioContextRef.current.createMediaStreamSource(stream)
-      // 4096 samples = ~85ms chunks at 48kHz — larger buffer means fewer packets and
-      // smoother delivery over the WS→Android→GSM uplink path.
-      const processor = audioContextRef.current.createScriptProcessor(4096, 1, 1)
+      // 512 samples = ~32ms chunks at 16kHz → 256 samples at 8kHz after downsample.
+      // 4096 was 256ms bursts causing audible cut-off gaps at the remote GSM end.
+      const processor = audioContextRef.current.createScriptProcessor(512, 1, 1)
       processorRef.current = processor
 
       processor.onaudioprocess = e => {

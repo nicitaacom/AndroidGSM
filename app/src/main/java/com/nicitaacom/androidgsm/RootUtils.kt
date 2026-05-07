@@ -111,6 +111,23 @@ object RootUtils {
         return output
     }
 
+    // Route MultiMedia1 AudioTrack playback into the GSM voice uplink (TX path).
+    // This is the kernel-level bridge: browser mic audio played via USAGE_MEDIA on
+    // MultiMedia1 gets injected into the call uplink so the remote party hears it.
+    fun enableIncallMusicInjection(): Boolean {
+        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 1 0")
+        return (exit == 0).also { ok ->
+            if (ok) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 enabled (browser mic → GSM uplink)")
+            else Log.e(TAG, "❌ Incall_Music injection failed (exit=$exit): $output")
+        }
+    }
+
+    fun disableIncallMusicInjection() {
+        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 0 0")
+        if (exit == 0) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 disabled")
+        else Log.e(TAG, "❌ Incall_Music disable failed (exit=$exit): $output")
+    }
+
     // Mute earpiece + speaker output controls so call audio is inaudible on the phone.
     // VOC_REC_DL capture path remains open — REMOTE_SUBMIX still taps the mixer.
     fun mutePhoneSpeaker(): Boolean {

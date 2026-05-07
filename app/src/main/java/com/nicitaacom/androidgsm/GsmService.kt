@@ -189,6 +189,7 @@ class GsmService : Service() {
                     // Close incall capture path
                     try {
                         RootUtils.disableIncallMusicCapture()
+                        RootUtils.disableIncallMusicInjection()
                         RootUtils.unmutePhoneSpeaker()
                         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
@@ -657,17 +658,16 @@ class GsmService : Service() {
                         isCallActive = true
                         audioWsHandler?.setCallActive(true)
                         audioWsHandler?.startAudioCapture()
-                        // SERVICE mode: mute phone speaker via tinymix so GSM audio is only
-                        // audible on the frontend. REMOTE_SUBMIX capture path stays open.
+                        // Mute EAR_S/SPK so GSM audio is only audible on the frontend.
                         val amMute = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
-                        val speakerMuted = RootUtils.mutePhoneSpeaker()
-                        MainActivity.log("📞 Phone speaker muted via tinymix=$speakerMuted (audio to frontend only)")
-                        if (!speakerMuted) {
-                            // Log mixer controls so we can identify the correct control names
-                            val dump = RootUtils.dumpMixerControls()
-                            MainActivity.log("tinymix dump (find speaker control):\n$dump")
-                        }
+                        RootUtils.mutePhoneSpeaker()
+                        // Kernel-level uplink injection: route MultiMedia1 into GSM TX path.
+                        // AudioTrack (USAGE_MEDIA) plays browser mic on MultiMedia1; tinymix
+                        // bridges MultiMedia1 → voice uplink so remote party hears browser mic.
+                        val injectionOk = RootUtils.enableIncallMusicInjection()
+                        MainActivity.log("📞 Incall uplink injection enabled=$injectionOk")
+                        audioWsHandler?.startAudioPlayback()
                         MainActivity.log("📞 WS audio started, cmdWsClient=${if (cmdWsClient != null) "alive" else "NULL"}")
                         cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
                         MainActivity.log("📞 CALL_CONNECTED sent to backend")
