@@ -171,8 +171,15 @@ WebSocketAudioClient    OkHttp WS; sends registration packet on open; routes com
                         messages (type="command") to onCommand callback.
 
 RootUtils               su -c with 3s timeout + stream-draining threads.
-                        enableIncallMusicCapture(): tinymix 'MultiMedia1 Mixer VOC_REC_DL' 1
-                        disableIncallMusicCapture(): resets to 0.
+                        Uses set_mixer_ctl native binary (assets/set_mixer_ctl, arm64 ELF)
+                          to write individual BOOL element indices via SNDRV_CTL_IOCTL_ELEM_WRITE,
+                          bypassing broken mixer_ctl_get_array in MIUI's tinyalsa.
+                        enableIncallMusicCapture(): sets MultiMedia1 Mixer VOC_REC_DL slots 0+1
+                        disableIncallMusicCapture(): clears both slots.
+                        enableIncallMusicInjection(): sets Incall_Music Audio Mixer MM1/MM5
+                          slots 0+1 (VoiceMMode1+VoiceMMode2), mutes hardware mic TX.
+                        disableIncallMusicInjection(): clears above, restores mic TX.
+                        nativeBinDir: set by GsmService.onCreate() after unpacking asset.
 
 AudioStreamHandler      LEGACY — not used in call path. Kept for reference.
 ```
@@ -192,24 +199,38 @@ Android's AudioFlinger (the normal Java audio system). This means:
 - `AudioRecord(REMOTE_SUBMIX)` — taps AudioFlinger output, but GSM audio never goes through AudioFlinger during a call → pure silence (RMS 0.00004)
 - `AudioManager.setSpeakerphoneOn(true)` during a call — Telecom overrides it back to earpiece
 
-### The solution: tinycap as root subprocess
+### The solution: tinycap + set_mixer_ctl as root subprocesses
 
 The GSM downlink audio IS available at the ALSA kernel level via a Qualcomm mixer route.
+The uplink (browser mic → remote party) requires enabling a second mixer route.
 
-**Step 1 — Open the mixer route:**
-```
-tinymix 'MultiMedia1 Mixer VOC_REC_DL' 1
-```
-`VOC_REC_DL` = Voice Call Record DownLink. This taps the GSM call's receive path
-into MultiMedia1's ALSA capture device at the kernel level.
+Both routes have **2-slot BOOL controls** (slot 0 = VoiceMMode1, slot 1 = VoiceMMode2).
+The device's `tinymix` binary cannot set slot 1 due to a broken `mixer_ctl_get_array` in
+MIUI's tinyalsa build. We ship a native `set_mixer_ctl` binary (compiled with NDK r27 against
+the kernel's `sound/asound.h`) that calls `SNDRV_CTL_IOCTL_ELEM_WRITE` directly per element index.
 
-**Step 2 — Capture raw PCM:**
+**Downlink (remote party → browser):**
 ```
+set_mixer_ctl 0 'MultiMedia1 Mixer VOC_REC_DL' 0 1   # VoiceMMode1
+set_mixer_ctl 0 'MultiMedia1 Mixer VOC_REC_DL' 1 1   # VoiceMMode2
 tinycap /proc/self/fd/1 -D 0 -d 0 -c 1 -r 16000 -b 16
 ```
-Runs as a root subprocess. Reads from ALSA card 0 device 0 (MultiMedia1).
-Writes a 44-byte WAV header then raw PCM16 mono 16kHz to stdout.
+`VOC_REC_DL` taps the GSM call's receive path into MultiMedia1's ALSA capture device.
+tinycap writes a 44-byte WAV header then raw PCM16 mono 16kHz to stdout.
 The app reads stdout, skips the WAV header, and streams 320-sample (20ms) chunks.
+
+**Uplink (browser mic → remote party):**
+```
+set_mixer_ctl 0 'Incall_Music Audio Mixer MultiMedia1' 0 1   # VoiceMMode1
+set_mixer_ctl 0 'Incall_Music Audio Mixer MultiMedia1' 1 1   # VoiceMMode2
+set_mixer_ctl 0 'Incall_Music Audio Mixer MultiMedia5' 0 1   # (MIUI may route to MM5)
+set_mixer_ctl 0 'Incall_Music Audio Mixer MultiMedia5' 1 1
+# also Incall_Music_2 variants for both MMode slots
+```
+`Incall_Music Audio Mixer` routes MultiMedia1/5 AudioTrack playback into the GSM TX uplink.
+Browser mic PCM arrives via WebSocket → Android `AudioTrack` (USAGE_MEDIA) → MultiMedia1 →
+voice DSP TX path → remote party.
+Hardware mic TX is muted while injection is active.
 
 **Step 3 — Stream to browser:**
 ```
@@ -227,6 +248,12 @@ It never enters AudioFlinger, so REMOTE_SUBMIX sees nothing. Confirmed via RMS l
 **Why not speakerphone?**
 `AudioManager.setSpeakerphoneOn(true)` sets route momentarily, but `TelephonyManager`
 immediately overrides it back to earpiece during an active call. Not reliable.
+
+**Why not standard tinymix?**
+The 2-slot BOOL controls (`Incall_Music Audio Mixer`, `VOC_REC_DL`) require writing each
+element index separately. MIUI's tinyalsa `tinymix` calls `mixer_ctl_get_array` which fails
+on this device with "Failed to mixer_ctl_get_array" — slot 1 (VoiceMMode2) is always left Off.
+The `set_mixer_ctl` binary bypasses this by using the raw `SNDRV_CTL_IOCTL_ELEM_WRITE` ioctl.
 
 ### Browser playback quality fix
 
@@ -281,17 +308,23 @@ nextPlayTime += chunkDuration
    → GsmService sets MODE_IN_CALL + speakerphoneOn=true + STREAM_VOICE_CALL=max
    → AudioWebSocketHandler.connect() → /ws/audio
    → startAudioCapture() → launches tinycap subprocess as root
-   → startAudioPlayback() → AudioTrack ready
+   → startAudioPlayback() → AudioTrack (USAGE_MEDIA) ready on MultiMedia1
+   → Thread.sleep(200) → RootUtils.enableIncallMusicInjection()
+        set_mixer_ctl: Incall_Music Audio Mixer MM1/MM5 slots 0+1 = On
+        mute hardware mic TX (VoiceMMode1_Tx/VoiceMMode2_Tx)
    → CommandWebSocketClient.sendEvent("CALL_CONNECTED")
    → server: Pusher gsm:call-connected → browser (starts audio playout)
 
 5. Audio flows:
-   tinycap → raw PCM16 → base64 → /ws/audio → server → browser AudioContext
-   Browser mic → PCM16 → /ws/audio → server → Android AudioTrack
+   DOWNLINK: tinycap → raw PCM16 → base64 → /ws/audio → server → browser AudioContext
+   UPLINK:   Browser mic → PCM16 → /ws/audio → server → Android AudioTrack → MultiMedia1
+             → Incall_Music mixer → voice DSP TX → remote party
 
 6. Call ends (either side):
-   → TelephonyCallback fires IDLE
-   → RootUtils.disableIncallMusicCapture()
+   → TelephonyCallback fires IDLE (via GsmDialer.setCallEndedCallback)
+   → RootUtils.disableIncallMusicCapture()  (VOC_REC_DL slots → Off)
+   → RootUtils.disableIncallMusicInjection() (Incall_Music slots → Off, mic TX restored)
+   → RootUtils.unmutePhoneSpeaker()
    → AudioWebSocketHandler stops + disconnects
    → CommandWebSocketClient.sendEvent("CALL_ENDED")
    → server: Pusher gsm:call-ended → browser (stops playout)
@@ -367,8 +400,18 @@ GSM audio on sdm660 never enters AudioFlinger during a call. REMOTE_SUBMIX consi
 returns RMS ~0.000044 (silence). Only tinycap via ALSA MultiMedia1 works.
 
 **Wrong tinymix control (fixed)**
-`Incall_Music Audio Mixer MultiMedia1` was tried first — it injects MM1 playback INTO the
-call uplink, not the reverse. The correct control is `MultiMedia1 Mixer VOC_REC_DL`.
+`Incall_Music Audio Mixer MultiMedia1` was tried first for downlink — it injects MM1 playback
+INTO the call uplink TX, not the reverse. The correct downlink control is `MultiMedia1 Mixer VOC_REC_DL`.
+`Incall_Music Audio Mixer` IS the correct uplink injection control (browser mic → remote party).
+
+**tinymix broken on MIUI sdm660 for 2-slot BOOL controls (fixed)**
+`Incall_Music Audio Mixer` and `VOC_REC_DL` are 2-slot controls (slot0=VoiceMMode1, slot1=VoiceMMode2).
+MIUI's tinyalsa `tinymix` calls `mixer_ctl_get_array` before writing, which fails on these controls
+with "Failed to mixer_ctl_get_array". Result: slot 1 (VoiceMMode2) is never set — always stays Off.
+Since the active call uses VoiceMMode2, neither capture nor injection worked.
+Fixed: native `set_mixer_ctl` binary in `assets/` uses `SNDRV_CTL_IOCTL_ELEM_WRITE` directly,
+setting each slot by element index without any read-first step. Compiled with NDK r27 against
+`sound/asound.h` from NDK sysroot. GsmService unpacks it to `filesDir` on first run.
 
 **AudioManager mode conflict (fixed)**
 `startAudioCapture()` was setting `MODE_IN_COMMUNICATION + speakerphoneOn=false`,
@@ -471,6 +514,26 @@ Chunk size : 320 samples (20ms)
 
 ---
 
+## Native binaries
+
+```
+native/set_mixer_ctl/
+  set_mixer_ctl.c      Source. Uses sound/asound.h SNDRV_CTL_IOCTL_ELEM_WRITE directly.
+  build_arm64.sh       NDK r27 build script. Output → app/src/main/assets/set_mixer_ctl.
+                       Run: NDK=/path/to/ndk ./native/set_mixer_ctl/build_arm64.sh
+app/src/main/assets/
+  set_mixer_ctl        Pre-built arm64 PIE ELF. Bundled in APK. GsmService unpacks to
+                       filesDir on first run and sets RootUtils.nativeBinDir.
+```
+
+Usage (manual test):
+```bash
+adb shell "su -c '/data/data/com.nicitaacom.androidgsm/files/set_mixer_ctl 0 \"Incall_Music Audio Mixer MultiMedia1\" 1 1'"
+# Expected: OK: 'Incall_Music Audio Mixer MultiMedia1'[1] = 1  (numid=1690 count=2)
+```
+
+---
+
 ## Docs (frontend integration)
 
 ```
@@ -504,6 +567,9 @@ docs/realtime-audio/
 - Playback channel (`Channel<ShortArray>`) must remain single-consumer — no `scope.launch` per chunk
 - AudioManager mode changes in `AudioWebSocketHandler` must be gated on `!isCallActive`
 - tinycap WAV header is 44 bytes — always skip before reading PCM
+- Never call `tinymix` for 2-slot BOOL controls — use `RootUtils.setMixerElem()` (calls set_mixer_ctl)
+- To rebuild set_mixer_ctl: `NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh`
+- set_mixer_ctl is unpacked from assets by GsmService.onCreate() — do not hardcode /data/local/tmp paths
 - SERVICE/TEST audio modes are started only by frontend commands — never auto-start on launch
 - `SERVICE_STARTED` event uses retry loop (10s, 300ms poll) — do not remove it
 - `stateProvider` lambda in `CommandWebSocketClient` carries live `isServiceActive`/`isTestActive`
