@@ -446,6 +446,7 @@ class MainActivity : AppCompatActivity() {
             addLog("Requesting permissions...")
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
         } else {
+            requestBatteryOptimizationExemption()
             if (hasPhoneStatePermission()) loadSimSelection()
             // Start the service process so WS cmd connects — SERVICE/TEST controlled by frontend
             startService()

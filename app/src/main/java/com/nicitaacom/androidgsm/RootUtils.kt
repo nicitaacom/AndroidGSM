@@ -8,6 +8,23 @@ import java.io.File
 object RootUtils {
     private const val TAG = "RootUtils"
 
+    // Path where GsmService unpacks set_mixer_ctl from assets at startup.
+    var nativeBinDir: String = "/data/local/tmp"
+
+    private fun setMixerCtlBin() = "$nativeBinDir/set_mixer_ctl"
+
+    // Set one element of a multi-element ALSA BOOL/INTEGER control by index.
+    // Uses the native set_mixer_ctl binary to bypass broken mixer_ctl_get_array
+    // in this device's tinyalsa build.
+    private fun setMixerElem(controlName: String, elemIdx: Int, value: Int): Boolean {
+        val bin = setMixerCtlBin()
+        val (exit, output) = runSuCommand("$bin 0 '$controlName' $elemIdx $value")
+        return (exit == 0).also { ok ->
+            if (ok) Log.d(TAG, "✅ setMixerElem '$controlName'[$elemIdx]=$value")
+            else Log.w(TAG, "⚠️ setMixerElem '$controlName'[$elemIdx]=$value failed (exit=$exit): $output")
+        }
+    }
+
     private val suPaths = listOf(
         "/system/bin/su",
         "/system/xbin/su",
@@ -89,21 +106,20 @@ object RootUtils {
     // NOTE: The previously used 'Incall_Music Audio Mixer MultiMedia1' is the OPPOSITE
     // direction — it injects MultiMedia1 playback INTO the call uplink. Wrong control.
     fun enableIncallMusicCapture(): Boolean {
-        // Enable downlink (what we hear from other party). Could also enable VOC_REC_UL
-        // for our own mic side, but for now we only want to hear the remote party.
-        val (exit, output) = runSuCommand("tinymix 'MultiMedia1 Mixer VOC_REC_DL' 1")
-        return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 enabled (GSM downlink capture open)")
-            else Log.e(TAG, "❌ tinymix VOC_REC_DL enable failed (exit=$exit): $output")
+        // slot 0 = VoiceMMode1, slot 1 = VoiceMMode2 — set both via native binary
+        val ok0 = setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 0, 1)
+        val ok1 = setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 1, 1)
+        return (ok0 || ok1).also { ok ->
+            if (ok) Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 enabled (slot0=$ok0 slot1=$ok1)")
+            else Log.e(TAG, "❌ VOC_REC_DL enable failed both slots")
         }
     }
 
     fun disableIncallMusicCapture(): Boolean {
-        val (exit, output) = runSuCommand("tinymix 'MultiMedia1 Mixer VOC_REC_DL' 0")
-        return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 disabled")
-            else Log.e(TAG, "❌ tinymix VOC_REC_DL disable failed (exit=$exit): $output")
-        }
+        setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 0, 0)
+        setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 1, 0)
+        Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 disabled")
+        return true
     }
 
     fun dumpMixerControls(): String {
@@ -112,20 +128,42 @@ object RootUtils {
     }
 
     // Route MultiMedia1 AudioTrack playback into the GSM voice uplink (TX path).
-    // This is the kernel-level bridge: browser mic audio played via USAGE_MEDIA on
-    // MultiMedia1 gets injected into the call uplink so the remote party hears it.
+    // tinymix on this device cannot set slot 1 (VoiceMMode2) of these BOOL controls
+    // due to a broken mixer_ctl_get_array. We use set_mixer_ctl (native ioctl binary)
+    // to write each element index individually via SNDRV_CTL_IOCTL_ELEM_WRITE.
     fun enableIncallMusicInjection(): Boolean {
-        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 1 0")
-        return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 enabled (browser mic → GSM uplink)")
-            else Log.e(TAG, "❌ Incall_Music injection failed (exit=$exit): $output")
+        var any = false
+        for (mm in listOf("MultiMedia1", "MultiMedia2", "MultiMedia5")) {
+            for (slot in 0..1) {
+                if (setMixerElem("Incall_Music Audio Mixer $mm", slot, 1)) any = true
+                setMixerElem("Incall_Music_2 Audio Mixer $mm", slot, 1)
+            }
         }
+        return any
     }
 
     fun disableIncallMusicInjection() {
-        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 0 0")
-        if (exit == 0) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 disabled")
-        else Log.e(TAG, "❌ Incall_Music disable failed (exit=$exit): $output")
+        for (mm in listOf("MultiMedia1", "MultiMedia2", "MultiMedia5")) {
+            for (slot in 0..1) {
+                setMixerElem("Incall_Music Audio Mixer $mm", slot, 0)
+                setMixerElem("Incall_Music_2 Audio Mixer $mm", slot, 0)
+            }
+        }
+        Log.d(TAG, "✅ Incall_Music injection disabled")
+    }
+
+    // Route AFE-PROXY RX (pcmC0D6p) into VoiceMMode2 TX uplink.
+    // This is the confirmed working injection path on sdm660/MIUI — slot 0 sticks
+    // unlike Incall_Music slot 1 (VoiceMMode2) which the HAL immediately resets.
+    fun enableAfeProxyInjection(): Boolean {
+        val ok = setMixerElem("VoiceMMode2_Tx Mixer AFE_PCM_TX_MMode2", 0, 1)
+        Log.d(TAG, if (ok) "✅ AFE-PROXY injection enabled" else "❌ AFE-PROXY injection failed")
+        return ok
+    }
+
+    fun disableAfeProxyInjection() {
+        setMixerElem("VoiceMMode2_Tx Mixer AFE_PCM_TX_MMode2", 0, 0)
+        Log.d(TAG, "✅ AFE-PROXY injection disabled")
     }
 
     // Mute earpiece + speaker output controls so call audio is inaudible on the phone.

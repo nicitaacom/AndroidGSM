@@ -37,41 +37,9 @@ class GsmService : Service() {
                 val action = intent?.action
                 when (action) {
                     ACTION_CALL_CONNECTED_BROADCAST -> {
-                        MainActivity.log("callStateReceiver: CALL_CONNECTED received")
-                        try {
-                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                            audioManager.isSpeakerphoneOn = false
-
-                            Thread {
-                                try {
-                                    // 1. Re-init WS handler if null — call can arrive without SERVICE mode active
-                                    if (audioWsHandler == null) {
-                                        config?.let { safeConfig ->
-                                            audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
-                                        }
-                                        val wsUrl = config?.BACKEND_URL
-                                            ?.replace("http://", "ws://")
-                                            ?.replace("https://", "wss://")
-                                            ?.removeSuffix("/") + "/ws/audio"
-                                        audioWsHandler?.connect(wsUrl, config?.BACKEND_BEARER ?: "", config?.DEVICE_TOKEN ?: "")
-                                        Thread.sleep(500)
-                                    }
-                                    audioWsHandler?.stopAudioCapture()
-                                    audioWsHandler?.stopAudioPlayback()
-                                    Thread.sleep(200)
-                                    audioWsHandler?.setCallActive(true)
-                                    audioWsHandler?.startAudioCapture()
-                                    audioWsHandler?.startAudioPlayback()
-                                    cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                                    MainActivity.log("callStateReceiver: WS audio started (call mode)")
-                                } catch (error: Exception) {
-                                    MainActivity.log("callStateReceiver error: ${error.message}")
-                                }
-                            }.start()
-                        } catch (error: Exception) {
-                            MainActivity.log("callStateReceiver outer error: ${error.message}")
-                        }
+                        // Audio setup is handled entirely by setCallConnectedCallback in handleCallStarted.
+                        // This broadcast is sent by that callback — do NOT start audio here again.
+                        MainActivity.log("callStateReceiver: CALL_CONNECTED broadcast received (no-op)")
                     }
                     ACTION_CALL_DISCONNECTED_BROADCAST -> {
                         MainActivity.log("callStateReceiver: CALL_DISCONNECTED received")
@@ -161,7 +129,23 @@ class GsmService : Service() {
                 MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
             }
 
-            // 3. load config
+            // 3. unpack native binaries from assets
+            try {
+                val binDir = filesDir  // /data/data/<pkg>/files — always writable
+                for (name in listOf("set_mixer_ctl", "pcm_play")) {
+                    val bin = java.io.File(binDir, name)
+                    assets.open(name).use { input ->
+                        bin.outputStream().use { output -> input.copyTo(output) }
+                    }
+                    if (!bin.canExecute()) bin.setExecutable(true, false)
+                    MainActivity.log("GsmService: $name unpacked to ${bin.absolutePath}")
+                }
+                RootUtils.nativeBinDir = binDir.absolutePath
+            } catch (e: Exception) {
+                MainActivity.log("WARNING: could not unpack native binaries: ${e.message}")
+            }
+
+            // 4. load config
             try {
                 config = ConfigReader.readConfig(this)
                 if (config == null) {
@@ -190,6 +174,7 @@ class GsmService : Service() {
                     try {
                         RootUtils.disableIncallMusicCapture()
                         RootUtils.disableIncallMusicInjection()
+                        RootUtils.disableAfeProxyInjection()
                         RootUtils.unmutePhoneSpeaker()
                         val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
@@ -222,8 +207,7 @@ class GsmService : Service() {
                 }
                 gsmDialer?.setCallConnectedCallback {
                     isCallActive = true
-                    MainActivity.log("📞 Call connected (OFFHOOK)")
-                    // Force speakerphone so GSM audio routes through media mixer (REMOTE_SUBMIX can tap it)
+                    MainActivity.log("📞 Call connected (OFFHOOK) — default callback, handleCallStarted will override")
                     val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                     am.mode = AudioManager.MODE_IN_CALL
                     am.isSpeakerphoneOn = true
@@ -568,6 +552,7 @@ class GsmService : Service() {
 
             when (normalizedType) {
                 "CALL_STARTED" -> handleCallStarted(data)
+                "START_AUDIO" -> handleStartAudio()
                 "CALL_ENDED" -> handleCallEnded()
                 "SEND_DTMF" -> handleSendDtmf(data)
                 "AUDIO_CHUNK" -> handleAudioChunk(data)
@@ -621,8 +606,6 @@ class GsmService : Service() {
             val simAccountId = data["simAccountId"] as? String
             val simComponentName = data["simComponentName"] as? String
             MainActivity.log("Starting call to: $number (sim=$simAccountId)")
-            // Mute earpiece/speaker immediately — dialing tones would otherwise be audible.
-            RootUtils.mutePhoneSpeaker()
             // Mark call active immediately — MIUI may not fire OFFHOOK callback via GsmDialer
             isCallActive = true
 
@@ -642,12 +625,6 @@ class GsmService : Service() {
 
                 Thread {
                     try {
-                        // Open the Qualcomm incall audio capture path via tinymix so REMOTE_SUBMIX
-                        // can tap GSM call audio without needing CAPTURE_AUDIO_OUTPUT.
-                        val captureEnabled = RootUtils.enableIncallMusicCapture()
-                        MainActivity.log("📞 Incall capture path: $captureEnabled")
-                        Thread.sleep(300) // let mixer settle before opening AudioRecord
-
                         val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")
                             ?.replace("https://", "wss://")?.removeSuffix("/") + "/ws/audio"
                         if (audioWsHandler == null) {
@@ -657,18 +634,22 @@ class GsmService : Service() {
                         Thread.sleep(300)
                         isCallActive = true
                         audioWsHandler?.setCallActive(true)
-                        audioWsHandler?.startAudioCapture()
-                        // Mute EAR_S/SPK so GSM audio is only audible on the frontend.
                         val amMute = getSystemService(Context.AUDIO_SERVICE) as AudioManager
                         amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
                         RootUtils.mutePhoneSpeaker()
-                        // Kernel-level uplink injection: route MultiMedia1 into GSM TX path.
-                        // AudioTrack (USAGE_MEDIA) plays browser mic on MultiMedia1; tinymix
-                        // bridges MultiMedia1 → voice uplink so remote party hears browser mic.
-                        val injectionOk = RootUtils.enableIncallMusicInjection()
-                        MainActivity.log("📞 Incall uplink injection enabled=$injectionOk")
+                        // Enable downlink capture path
+                        val captureEnabled = RootUtils.enableIncallMusicCapture()
+                        MainActivity.log("📞 Incall capture path: $captureEnabled")
+                        Thread.sleep(200)
+                        audioWsHandler?.stopAudioPlayback()
+                        audioWsHandler?.startAudioCapture()
+                        // Enable AFE-PROXY injection (pcmC0D6p → VoiceMMode2_Tx) before opening pcm_play
+                        val afeOk = RootUtils.enableAfeProxyInjection()
+                        MainActivity.log("📞 AFE-PROXY injection enabled=$afeOk")
                         audioWsHandler?.startAudioPlayback()
-                        MainActivity.log("📞 WS audio started, cmdWsClient=${if (cmdWsClient != null) "alive" else "NULL"}")
+                        // Re-mute in case HAL re-enabled speaker when pcm0p opened
+                        amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
+                        RootUtils.mutePhoneSpeaker()
                         cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
                         MainActivity.log("📞 CALL_CONNECTED sent to backend")
                     } catch (error: Exception) {
@@ -701,6 +682,30 @@ class GsmService : Service() {
             MainActivity.log("FATAL ERROR in handleCallStarted: ${e.message}")
             e.printStackTrace()
         }
+    }
+
+    private fun handleStartAudio() {
+        MainActivity.log("📞 START_AUDIO received — starting tinycap + pcm_play")
+        Thread {
+            try {
+                val captureEnabled = RootUtils.enableIncallMusicCapture()
+                MainActivity.log("📞 Incall capture path: $captureEnabled")
+                // Enable AFE-PROXY injection before starting pcm_play so the mixer
+                // route is live when pcmC0D6p opens.
+                val afeOk = RootUtils.enableAfeProxyInjection()
+                MainActivity.log("📞 AFE-PROXY injection enabled=$afeOk")
+                Thread.sleep(200)
+                audioWsHandler?.stopAudioPlayback()
+                audioWsHandler?.startAudioCapture()
+                audioWsHandler?.startAudioPlayback()
+                // Re-mute in case HAL re-enabled speaker when pcm0p opened
+                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
+                RootUtils.mutePhoneSpeaker()
+            } catch (e: Exception) {
+                MainActivity.log("ERROR in handleStartAudio: ${e.message}")
+            }
+        }.start()
     }
 
     private fun handleCallEnded() {
@@ -747,31 +752,14 @@ class GsmService : Service() {
                 override fun onCallStateChanged(state: Int, phoneNumber: String?) {
                     when (state) {
                         TelephonyManager.CALL_STATE_OFFHOOK -> {
-                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                            audioManager.isSpeakerphoneOn = false
-                            MainActivity.log("PhoneStateListener: OFFHOOK - set MODE_IN_COMMUNICATION + earpiece")
+                            // Audio mode is set by GsmDialer OFFHOOK callback (MODE_IN_CALL + speakerphone).
+                            // Do NOT override it here — MODE_IN_COMMUNICATION routes to earpiece and breaks MultiMedia1.
+                            MainActivity.log("PhoneStateListener: OFFHOOK - audio mode managed by GsmDialer callback")
                         }
                         TelephonyManager.CALL_STATE_IDLE -> {
-                            val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                            audioManager.mode = AudioManager.MODE_NORMAL
-                            MainActivity.log("PhoneStateListener: IDLE - reset audio mode")
-                            if (isCallActive || audioWsHandler != null) {
-                                isCallActive = false
-                                MainActivity.log("PhoneStateListener: IDLE while call active — sending CALL_ENDED")
-                                try { audioWsHandler?.setCallActive(false); audioWsHandler?.stopAudioCapture(); audioWsHandler?.stopAudioPlayback(); audioWsHandler?.disconnect(); audioWsHandler = null } catch (_: Exception) {}
-                                Thread {
-                                    repeat(3) { attempt ->
-                                        if (cmdWsClient?.isConnected == true) {
-                                            cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
-                                            MainActivity.log("PhoneStateListener: CALL_ENDED sent (attempt ${attempt + 1})")
-                                            return@Thread
-                                        }
-                                        Thread.sleep(500)
-                                    }
-                                    cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
-                                }.start()
-                            }
+                            // Audio teardown is owned by GsmDialer.setCallEndedCallback — do NOT touch audio here.
+                            // MIUI fires IDLE spuriously ~10s into active calls which would kill the AudioTrack mid-call.
+                            MainActivity.log("PhoneStateListener: IDLE - audio teardown delegated to GsmDialer callback")
                         }
                         TelephonyManager.CALL_STATE_RINGING -> {
                             MainActivity.log("PhoneStateListener: RINGING")

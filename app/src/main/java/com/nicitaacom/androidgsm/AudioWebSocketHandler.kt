@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRecord
@@ -36,6 +37,8 @@ class AudioWebSocketHandler(
     private var audioRecord: AudioRecord? = null
     private var tinycapProcess: Process? = null
     @Volatile private var audioTrack: AudioTrack? = null
+    @Volatile private var tinyplayProcess: Process? = null
+    @Volatile private var lastDestroyedTinyplay: Process? = null
     @Volatile private var isPlaying = false
     private var isRecording = false
     private var isCallActive = false
@@ -49,14 +52,15 @@ class AudioWebSocketHandler(
     private var seqRx = -1L
 
     // Single consumer drains this channel — prevents flooding DefaultDispatcher with 50 coroutines/sec
-    private var playbackChannel = Channel<ShortArray>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    // Call mode: 8 chunks × 32ms = 256ms max queue before dropping oldest (keeps lag bounded).
+    // Non-call: 64 chunks for smooth playback over variable network.
+    private var playbackChannel = Channel<ShortArray>(capacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
     private val isRooted: Boolean by lazy { RootUtils.isRooted() }
 
     companion object {
         private const val TAG = "AudioWebSocket"
         private const val SAMPLE_RATE = 16000
-        private const val PLAYBACK_SAMPLE_RATE = 8000 // browser sends 8kHz for GSM uplink
         @Volatile var micGain: Float = 1.0f
         @Volatile var playbackGain: Float = 0.7f
         private const val CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
@@ -100,7 +104,7 @@ class AudioWebSocketHandler(
                 seqRx = seq
             }
 
-            if (seq % 50L == 0L) Log.d(TAG, "WS-RX audio chunk seq=$seq")
+            if (seq % 500L == 0L) Log.d(TAG, "WS-RX audio chunk seq=$seq")
             playAudioChunk(audio, seq)
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error handling audio packet: ${exception.message}")
@@ -111,7 +115,7 @@ class AudioWebSocketHandler(
         if (isRecording) return
 
         scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        playbackChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        playbackChannel = Channel(capacity = if (isCallActive) 8 else 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
         hpfPrev = 0f
         hpfPrevIn = 0f
         isRecording = true
@@ -219,7 +223,7 @@ class AudioWebSocketHandler(
                 // Send raw PCM bytes — no HPF/gain processing for downlink voice
                 val base64Audio = Base64.encodeToString(buffer, 0, offset, Base64.NO_WRAP)
                 wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-                if (seq % 50L == 0L) {
+                if (seq % 500L == 0L) {
                     val shorts = ShortArray(offset / 2)
                     ByteBuffer.wrap(buffer, 0, offset).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
                     Log.d(TAG, "tinycap-SEND seq=$seq rms=${String.format("%.4f", rms(shorts, shorts.size))}")
@@ -349,49 +353,151 @@ class AudioWebSocketHandler(
             MainActivity.log("🔊 WebSocket: Starting playback...")
 
             if (!isCallActive) {
-                // TEST mode: earpiece prevents mic→speaker→mic feedback loop; AEC handles echo
                 audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
                 audioManager.isSpeakerphoneOn = false
             }
-            // Call mode: keep GsmService-set MODE_IN_CALL + speakerphone=true intact for REMOTE_SUBMIX
-
-            val playRate = if (isCallActive) PLAYBACK_SAMPLE_RATE else SAMPLE_RATE
-            // 8kHz call mode needs a deeper buffer (8x min) to absorb WS jitter without underrun.
-            val bufferSize = AudioTrack.getMinBufferSize(playRate, CHANNEL_OUT, AUDIO_FORMAT) * (if (isCallActive) BUFFER_SIZE_FACTOR * 2 else BUFFER_SIZE_FACTOR)
-            if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
-
-            // SERVICE mode: USAGE_MEDIA routes through MultiMedia1 which tinymix bridges
-            // into the GSM voice uplink (Incall_Music Audio Mixer MultiMedia1).
-            // TEST mode: USAGE_VOICE_COMMUNICATION for AEC on the mic loopback test.
-            val audioUsage = if (isCallActive) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_VOICE_COMMUNICATION
-            audioTrack = AudioTrack.Builder()
-                .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(audioUsage)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                    .build())
-                .setAudioFormat(AudioFormat.Builder()
-                    .setEncoding(AUDIO_FORMAT)
-                    .setSampleRate(playRate)
-                    .setChannelMask(CHANNEL_OUT)
-                    .build())
-                .setBufferSizeInBytes(bufferSize)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-
-            if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) { MainActivity.log("❌ ERROR: AudioTrack not initialized"); return }
 
             isPlaying = true
-            audioTrack?.play()
-            startPlaybackConsumer()
-            MainActivity.log("✅ Playback started - earpiece/AEC mode")
+
+            if (isCallActive) {
+                // GSM call mode: write PCM directly to pcmC0D0p (MultiMedia1) via native binary
+                // so the Incall_Music DSP mixer can route it into the GSM voice TX uplink.
+                // AudioTrack cannot open this path — AudioFlinger keeps pcm0p in standby during calls.
+                startPcmPlayProcess()
+                startPlaybackConsumerPcmPlay()
+            } else {
+                val playRate = SAMPLE_RATE
+                val channelOut = CHANNEL_OUT
+                val bufferSize = AudioTrack.getMinBufferSize(playRate, channelOut, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
+                if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); isPlaying = false; return }
+
+                audioTrack = AudioTrack.Builder()
+                    .setAudioAttributes(AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build())
+                    .setAudioFormat(AudioFormat.Builder()
+                        .setEncoding(AUDIO_FORMAT)
+                        .setSampleRate(playRate)
+                        .setChannelMask(channelOut)
+                        .build())
+                    .setBufferSizeInBytes(bufferSize)
+                    .setTransferMode(AudioTrack.MODE_STREAM)
+                    .build()
+
+                if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) {
+                    MainActivity.log("❌ ERROR: AudioTrack not initialized"); isPlaying = false; return
+                }
+                audioTrack?.play()
+                startPlaybackConsumer()
+            }
+
+            MainActivity.log("✅ Playback started (isCallActive=$isCallActive)")
         } catch (exception: Exception) {
             MainActivity.log("❌ ERROR starting playback: ${exception.message}")
         }
     }
 
+    private fun startPcmPlayProcess() {
+        // Wait for the previous pcm_play to release /dev/snd/pcmC0D0p before opening it again.
+        // stopAudioPlayback() destroys the process and records it in lastDestroyedTinyplay.
+        lastDestroyedTinyplay?.let { old ->
+            try { old.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
+        }
+        lastDestroyedTinyplay = null
+        tinyplayProcess = null
+
+        val binPath = "${RootUtils.nativeBinDir}/pcm_play"
+        // Open pcmC0D6p (AFE-PROXY RX) at 8kHz — feeds into VoiceMMode2_Tx via
+        // "VoiceMMode2_Tx Mixer AFE_PCM_TX_MMode2" which sticks (HAL doesn't reset it).
+        // pcmC0D0p (MultiMedia1) Incall_Music slot 1 (VoiceMMode2) reverts immediately.
+        val cmd = "$binPath -D 0 -d 6 -r 8000 -c 1 -p 160 -n 4"
+        try {
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
+            tinyplayProcess = proc
+            // Drain stderr in background so it doesn't block the pipe
+            Thread {
+                try { proc.errorStream.bufferedReader().forEachLine { line ->
+                    if (line.isNotBlank()) Log.d(TAG, "pcm_play: $line")
+                }} catch (_: Exception) {}
+            }.also { it.isDaemon = true; it.start() }
+            MainActivity.log("📞 pcm_play started: $cmd")
+        } catch (e: Exception) {
+            tinyplayProcess = null
+            MainActivity.log("❌ pcm_play launch failed: ${e.message}")
+        }
+    }
+
+    private fun startPlaybackConsumerPcmPlay() {
+        scope.launch(Dispatchers.IO) {
+            var chunks = 0L
+            // PREPARE failed means the voice DSP path isn't live yet (call still ringing/dialing).
+            // Retry launching pcm_play every 600ms for up to 20 seconds until it stays alive.
+            val deadline = System.currentTimeMillis() + 20_000L
+            var proc = tinyplayProcess
+            while (isPlaying && proc != null) {
+                // Wait for pcm_play to either succeed (start writing) or fail fast (PREPARE failed).
+                // If it exits within 400ms it failed — don't consume audio yet.
+                val exited = proc.waitFor(400, java.util.concurrent.TimeUnit.MILLISECONDS)
+                if (exited) {
+                    val exitCode = try { proc.exitValue() } catch (_: Exception) { -1 }
+                    Log.d(TAG, "pcm_play: PREPARE failed (exit=$exitCode) — flushing queue, retrying in 600ms")
+                    // Discard queued audio — it's stale (from before voice path was live)
+                    while (playbackChannel.tryReceive().isSuccess) {}
+                    if (!isPlaying) break
+                    if (System.currentTimeMillis() > deadline) { Log.e(TAG, "pcm_play: deadline exceeded"); break }
+                    Thread.sleep(600)
+                    startPcmPlayProcess()
+                    proc = tinyplayProcess
+                    continue
+                }
+
+                // pcm_play is alive — flush stale audio queued during retry wait, then start piping
+                while (playbackChannel.tryReceive().isSuccess) {}
+                val out = proc.outputStream.buffered(4096)
+                try {
+                    for (samples in playbackChannel) {
+                        if (!isPlaying) break
+                        // Browser sends 16kHz; pcm_play opens pcm0p at 8kHz (voice HAL rate).
+                        // Downsample 2:1 by averaging pairs of samples.
+                        val outSamples = ShortArray(samples.size / 2)
+                        for (i in outSamples.indices) {
+                            outSamples[i] = ((samples[i * 2].toInt() + samples[i * 2 + 1].toInt()) / 2).toShort()
+                        }
+                        val bytes = ByteArray(outSamples.size * 2)
+                        java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(outSamples)
+                        out.write(bytes)
+                        chunks++
+                        if (chunks % 500L == 0L) { out.flush(); Log.d(TAG, "pcm_play: piped $chunks chunks") }
+                    }
+                    break // channel closed cleanly — we're done
+                } catch (_: Exception) {
+                    // pipe broke — pcm_play died mid-call (xrun or call ended)
+                }
+                try { out.close() } catch (_: Exception) {}
+                if (!isPlaying) break
+                Log.d(TAG, "pcm_play: pipe broke after $chunks chunks — retrying")
+                if (System.currentTimeMillis() > deadline) { Log.e(TAG, "pcm_play: deadline exceeded"); break }
+                Thread.sleep(600)
+                startPcmPlayProcess()
+                proc = tinyplayProcess
+            }
+            Log.d(TAG, "pcm_play consumer exited after $chunks chunks")
+        }
+    }
+
+    private fun describeAudioDevice(device: AudioDeviceInfo): String =
+        "id=${device.id},type=${device.type},product=${device.productName}"
+
     fun setCallActive(active: Boolean) {
         isCallActive = active
         Log.d(TAG, "WebSocket call state: $active")
+    }
+
+    fun flushPlaybackQueue() {
+        var dropped = 0
+        while (playbackChannel.tryReceive().isSuccess) { dropped++ }
+        Log.d(TAG, "Playback queue flushed: dropped $dropped chunks")
     }
 
     private fun playAudioChunk(base64Audio: String, seq: Long = -1) {
@@ -406,7 +512,7 @@ class AudioWebSocketHandler(
         }
         if (audioBytes.isEmpty() || audioBytes.size % 2 != 0) return
 
-        val shortBuffer = ShortArray(audioBytes.size / 2)
+        var shortBuffer = ShortArray(audioBytes.size / 2)
         ByteBuffer.wrap(audioBytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shortBuffer)
 
         val gain = playbackGain
@@ -416,6 +522,8 @@ class AudioWebSocketHandler(
                     .coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
             }
         }
+
+        // Browser sends 16kHz mono — AudioTrack in call mode is also 16kHz mono. No conversion needed.
 
         // Non-blocking offer — channel drops oldest if full (brief network burst), no coroutine launched
         playbackChannel.trySend(shortBuffer)
@@ -445,13 +553,19 @@ class AudioWebSocketHandler(
             isPlaying = false
             val track = audioTrack
             audioTrack = null
+            val tinyplay = tinyplayProcess
+            tinyplayProcess = null
             // Close channel to unblock consumer coroutine, then recreate for next session
             playbackChannel.close()
-            playbackChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+            playbackChannel = Channel(capacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST)
             track?.stop()
             track?.release()
             scope.cancel()
             scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+            if (tinyplay != null) {
+                tinyplay.destroyForcibly()
+                lastDestroyedTinyplay = tinyplay
+            }
             MainActivity.log("🔊 Playback stopped")
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error stopping playback", exception)

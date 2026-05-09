@@ -57,7 +57,7 @@ android {
         minSdk = 23
         targetSdk = 36
 
-        versionCode = todayCommitCount
+        versionCode = todayCommitCount + 300
         versionName = versionNameComputed
 
         buildConfigField("String", "VERSION_NAME", "\"$versionNameComputed\"")
