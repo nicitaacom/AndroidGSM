@@ -9,7 +9,7 @@ object RootUtils {
     private const val TAG = "RootUtils"
 
     // Path to the unpacked set_mixer_ctl binary. Set by GsmService.onCreate() after unpacking asset.
-    var nativeBinDir: String = ""
+    @Volatile var nativeBinDir: String = ""
 
     private val suPaths = listOf(
         "/system/bin/su",
@@ -48,17 +48,32 @@ object RootUtils {
         return process.exitValue() to (out + "\n" + err).trim()
     }
 
-    // Sets a single BOOL element by index on a mixer control using set_mixer_ctl.
-    // Bypasses tinymix's broken mixer_ctl_get_array on MIUI sdm660 for 2-slot controls.
-    // control: ALSA mixer control name (e.g. 'MultiMedia1 Mixer VOC_REC_DL')
-    // slot: element index (0 = VoiceMMode1, 1 = VoiceMMode2)
-    // value: 0 or 1
+    // WARNING: set_mixer_ctl binary is NOT in assets — it has never been built.
+    // The tinymix fallback below (slot 0 only) is what keeps audio working.
+    // DO NOT remove the fallback until the binary is built and placed in assets:
+    //   NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh
+    //   cp <output> app/src/main/assets/set_mixer_ctl
+    // Removing the fallback without the binary = VOC_REC_DL never opens = tinycap silence = no audio.
     private fun setMixerElem(control: String, slot: Int, value: Int): Boolean {
-        val bin = if (nativeBinDir.isNotEmpty()) "$nativeBinDir/set_mixer_ctl" else "set_mixer_ctl"
-        val (exit, output) = runSuCommand("$bin 0 '$control' $slot $value")
-        return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ set_mixer_ctl '$control'[$slot]=$value")
-            else Log.e(TAG, "❌ set_mixer_ctl '$control'[$slot]=$value failed (exit=$exit): $output")
+        return if (nativeBinDir.isNotEmpty()) {
+            val bin = "$nativeBinDir/set_mixer_ctl"
+            val (exit, output) = runSuCommand("$bin 0 '$control' $slot $value")
+            (exit == 0).also { ok ->
+                if (ok) Log.d(TAG, "✅ set_mixer_ctl '$control'[$slot]=$value")
+                else Log.e(TAG, "❌ set_mixer_ctl '$control'[$slot]=$value failed (exit=$exit): $output")
+            }
+        } else {
+            // Fallback: tinymix sets only slot 0, slot 1 (VoiceMMode2) may be missed on MIUI sdm660.
+            // Build set_mixer_ctl to fix: NDK=/path/to/ndk ./native/set_mixer_ctl/build_arm64.sh
+            if (slot > 0) {
+                Log.w(TAG, "⚠️ set_mixer_ctl not available — skipping slot $slot for '$control' (tinymix fallback only handles slot 0)")
+                return true // don't fail the whole operation
+            }
+            val (exit, output) = runSuCommand("tinymix '$control' $value")
+            (exit == 0).also { ok ->
+                if (ok) Log.d(TAG, "✅ tinymix '$control'=$value (slot 0 only)")
+                else Log.e(TAG, "❌ tinymix '$control'=$value failed (exit=$exit): $output")
+            }
         }
     }
 
@@ -67,7 +82,11 @@ object RootUtils {
         return rooted
     }
 
-    fun isRooted(): Boolean {
+    // Cached — only runs the su subprocess once per process lifetime.
+    // isRooted() was being called on every onCreate, triggering a Magisk grant dialog each time.
+    val isRooted: Boolean by lazy { detectRooted() }
+
+    private fun detectRooted(): Boolean {
         // 1) su execution test (most reliable for this app use-case)
         runCatching {
             val (exit, output) = runSuCommand("id")
@@ -139,8 +158,8 @@ object RootUtils {
             "Incall_Music Audio Mixer MultiMedia1",
             "Incall_Music Audio Mixer MultiMedia5"
         )) {
-            ok = setMixerElem(ctl, 0, 1) && ok
-            ok = setMixerElem(ctl, 1, 1) && ok
+            if (!setMixerElem(ctl, 0, 1)) ok = false
+            if (!setMixerElem(ctl, 1, 1)) ok = false
         }
         // Mute hardware mic TX so phone mic doesn't bleed into the uplink
         setMixerElem("VoiceMMode1_Tx Mute", 0, 1)

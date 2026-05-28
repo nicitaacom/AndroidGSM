@@ -68,23 +68,33 @@ class CallController(
                         ?.replace("http://", "ws://")
                         ?.replace("https://", "wss://")
                         ?.removeSuffix("/") + "/ws/audio"
-                    if (audioWsHandlerRef.handler == null) {
-                        audioWsHandlerRef.handler = AudioWebSocketHandler(context, config, log = log) { }
-                    }
+
+                    // Always create a fresh handler for calls — the pre-init handler from
+                    // ensureRealtimeClientsInitialized has no active WS and wrong callActive state.
+                    audioWsHandlerRef.handler?.disconnect()
+                    audioWsHandlerRef.handler = AudioWebSocketHandler(context, config, log = log) { }
                     audioWsHandlerRef.handler?.connect(wsUrl, config.BACKEND_BEARER ?: "", config.DEVICE_TOKEN ?: "")
-                    Thread.sleep(300)
+
+                    // Wait for WS to actually open before starting capture — blind sleep(300) was
+                    // not enough on slow networks and caused all tinycap chunks to be silently dropped.
+                    val wsDeadline = System.currentTimeMillis() + 5000
+                    while (audioWsHandlerRef.handler?.isWsConnected != true && System.currentTimeMillis() < wsDeadline) {
+                        Thread.sleep(100)
+                    }
+                    if (audioWsHandlerRef.handler?.isWsConnected != true) {
+                        log("❌ Audio WS failed to connect after 5s — call audio will not work")
+                    } else {
+                        log("✅ Audio WS connected")
+                    }
+
                     audioWsHandlerRef.handler?.setCallActive(true)
                     audioWsHandlerRef.handler?.startAudioCapture()
                     val amMute = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
                     amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
                     RootUtils.mutePhoneSpeaker()
-                    // Only enable injection if browser mic is the selected uplink source
-                    if (AudioWebSocketHandler.useBrowserMicUplink) {
-                        val injectionOk = RootUtils.enableIncallMusicInjection()
-                        log("📞 Incall uplink injection enabled=$injectionOk")
-                    } else {
-                        log("📞 Phone mic selected — skipping uplink injection")
-                    }
+                    // Uplink injection via Incall_Music mixer is NOT used — MIUI CAF kernel
+                    // blocks slot 1 (VoiceMMode2) ELEM_WRITE silently. Instead, startAudioPlayback()
+                    // writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX PCM device).
                     audioWsHandlerRef.handler?.startAudioPlayback()
                     cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
                     log("📞 CALL_CONNECTED sent to backend")

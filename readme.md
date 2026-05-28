@@ -38,6 +38,8 @@ Edit `app/src/main/assets/androidgsm.config.json`:
 ```bash
 adb devices   # must show device, not unauthorized
 
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
 # Always clean to avoid INSTALL_PARSE_FAILED
 adb shell am force-stop com.nicitaacom.androidgsm \
   ; ./gradlew clean assembleDebug \
@@ -574,6 +576,15 @@ Root cause of the symptom ("I press 2, nothing happens"): the frontend numpad co
 wired to call `sendDTMF(digit)`. Fix was purely in the frontend — Android side was correct once
 the default dialer role was granted.
 
+**set_mixer_ctl binary not in assets — tinymix fallback active (known state)**
+`app/src/main/assets/set_mixer_ctl` has never been built. `RootUtils.setMixerElem()` falls back to
+`tinymix` for slot 0 only. This means VOC_REC_DL slot 1 (VoiceMMode2) is not set.
+Audio still works if the active call uses VoiceMMode1 (slot 0). Do NOT remove the tinymix fallback
+in `RootUtils` — doing so silently breaks all call audio (tested: broke it once already).
+To get full 2-slot support: `NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh`
+then copy the output binary to `app/src/main/assets/set_mixer_ctl` and rebuild.
+`GsmService.onCreate` will unpack it automatically on first run.
+
 **INSTALL_FAILED_VERSION_DOWNGRADE**
 Use `adb install -r -d` (the `-d` flag allows version downgrade for debug builds).
 
@@ -638,6 +649,83 @@ Channels   : Mono
 Transport  : Base64 inside WebSocket JSON frames
 Chunk size : 320 samples (20ms)
 ```
+
+---
+
+## Iterations to use website's mic (browser mic → remote party uplink)
+
+This is the hardest unsolved problem. Summary of every approach tried.
+
+### What we know for certain (from live `tinymix` dump during an active call)
+
+```
+1689  BOOL 2  Incall_Music Audio Mixer MultiMedia1   On  Off   ← slot 0 = VoiceMMode1 (ON), slot 1 = VoiceMMode2 (OFF)
+1691  BOOL 2  Incall_Music Audio Mixer MultiMedia5   On  Off   ← same
+1877  BOOL 2  INT0_MI2S_RX_Voice Mixer VoiceMMode2   Off On    ← this device's call is on VoiceMMode2 (slot 1)
+2021  BOOL 2  VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2  On Off ← TX mic path is INT3_MI2S_TX
+```
+
+**The call always uses VoiceMMode2 (slot 1) on this device.**
+`Incall_Music Audio Mixer` slot 0 routes to VoiceMMode1 — which is **not the active call**.
+Slot 1 routes to VoiceMMode2 — which IS the active call. Slot 1 is what we need to set ON.
+
+### Why tinymix can't set slot 1
+
+`tinymix` calls `mixer_ctl_get_array()` before writing. MIUI's tinyalsa build has a broken
+`mixer_ctl_get_array` that fails on 2-slot BOOL controls — returns error, leaves slot 1 Off.
+Confirmed: `tinymix 1689 1 1`, `tinymix 1689 On On`, `tinymix 'Incall_Music...' 1 1` — all fail.
+
+### The only real fix: set_mixer_ctl binary
+
+Must use `SNDRV_CTL_IOCTL_ELEM_WRITE` directly via ioctl — reads current value, sets target slot,
+writes back. Bypasses `mixer_ctl_get_array` entirely. Source: `native/set_mixer_ctl/set_mixer_ctl.c`.
+
+**Current status: binary NOT built.** `nativeBinDir` is empty → `RootUtils.setMixerElem()` falls
+back to tinymix slot 0 only → slot 1 (VoiceMMode2) never set → injection goes to wrong voice session
+→ remote party hears nothing from browser mic.
+
+To fix permanently:
+```bash
+NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh
+# then rebuild APK
+```
+
+### Approaches tried and failed
+
+1. **`AudioTrack(USAGE_MEDIA)` + tinymix slot 0** — routes to VoiceMMode1, call is on VoiceMMode2.
+   Injection is active but goes to the wrong voice session. Remote party hears nothing.
+
+2. **`VoiceMMode1_Tx Mute` / `VoiceMMode2_Tx Mute` via tinymix** — these control names don't exist
+   on this device. `Voice Tx Mute` and `Voice Tx Device Mute` exist but are INT type, not BOOL.
+   Hardware mic muting was failing silently — phone mic may still bleed.
+
+3. **tinymix with multiple value syntax** — `tinymix 1689 1 1`, `tinymix 1689 On On` — all rejected.
+   The broken `mixer_ctl_get_array` is called before any write attempt regardless of syntax.
+
+4. **Objective-C / low-level binary patching** — explored writing raw ARM64 shellcode to call ioctl
+   directly. Rejected: no compiler available on device, no NDK installed at the time, no busybox.
+
+5. **Building set_mixer_ctl + using ioctl directly** — NDK built successfully. Binary works for
+   slot 0 but slot 1 writes are silently ignored by the kernel. Confirmed: the MIUI CAF kernel
+   prevents ELEM_WRITE for slot 1 on VoiceMMode2 controls while VoiceMMode2 is an active call
+   session. This is a hard kernel restriction, not a userspace bug.
+
+6. **Direct PCM write to /dev/snd/pcmC0D19p (VoiceMMode2) — CURRENT APPROACH** ✓
+   `cat /proc/asound/pcm` revealed PCM device 19 = `VoiceMMode2 playback`.
+   Format confirmed via `hw_params`: S16_LE, mono, 8000 Hz (matches browser mic sample rate).
+   `tinyplay /file -D 0 -d 19` successfully injects audio into the active call uplink.
+   No mixer control needed — writes directly to the voice DSP TX path.
+   **Implemented**: `AudioWebSocketHandler.startCallUplinkPcmWriter()` spawns:
+   `su -c 'tinyplay /proc/self/fd/0 -D 0 -d 19 -c 1 -r 8000 -b 16'`
+   Browser mic PCM from the playback channel is piped to stdin of this subprocess.
+
+### Correct TX mute control names (confirmed from live dump)
+
+```
+Voice Tx Mute      (numid 2)   INT, 3 values  — use: tinymix 'Voice Tx Mute' 1 1 1
+Voice Tx Device Mute (numid 1) INT, 3 values  — device-level mute
+```
+NOT: `VoiceMMode1_Tx Mute` / `VoiceMMode2_Tx Mute` — these don't exist on sdm660.
 
 ---
 

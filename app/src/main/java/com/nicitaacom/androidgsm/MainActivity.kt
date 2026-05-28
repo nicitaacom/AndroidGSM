@@ -168,8 +168,7 @@ class MainActivity : AppCompatActivity() {
         if (!meetsMinAndroid) addLog("❌ Android ${Build.VERSION.RELEASE} unsupported - SERVICE mode requires Android 10+ (API 29)")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         Thread {
-            val isRooted = RootUtils.isRooted()
-            addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
+            addLog(if (RootUtils.isRooted) "✅ Root access detected" else "⚠️ Root not detected — fallback to mic capture")
         }.start()
 
         if (hasPhoneStatePermission()) {
@@ -240,7 +239,6 @@ class MainActivity : AppCompatActivity() {
         if (hasPhoneStatePermission()) {
             try { loadSimSelection() } catch (_: Exception) {}
         }
-        updateStatus()
         updateStatus()
         // Backup trigger — guarded by defaultDialerPromptShown, won't re-show after grant/deny
         window.decorView.post { promptDefaultDialerIfNeeded() }

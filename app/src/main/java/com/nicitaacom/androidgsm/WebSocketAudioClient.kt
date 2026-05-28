@@ -30,7 +30,8 @@ class WebSocketAudioClient(
     }
 
     private var ws: WebSocket? = null
-    @Volatile private var isConnected = false
+    @Volatile var isConnected = false
+        private set
     private val isClosed = AtomicBoolean(false)
 
     init {

@@ -81,8 +81,9 @@ class GsmService : Service() {
             }
 
             // Unpack set_mixer_ctl native binary from assets on first run.
-            // Required by RootUtils to write 2-slot BOOL mixer controls that tinymix
-            // cannot set on MIUI sdm660 (broken mixer_ctl_get_array).
+            // Enables full 2-slot BOOL mixer control on MIUI sdm660 (tinymix only handles slot 0).
+            // If binary is missing from assets, RootUtils falls back to tinymix (slot 0 only).
+            // To build: NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh
             try {
                 val dest = java.io.File(filesDir, "set_mixer_ctl")
                 if (!dest.exists()) {
@@ -90,11 +91,11 @@ class GsmService : Service() {
                         dest.outputStream().use { output -> input.copyTo(output) }
                     }
                     dest.setExecutable(true, false)
-                    log("✅ set_mixer_ctl unpacked to ${dest.absolutePath}")
                 }
                 RootUtils.nativeBinDir = filesDir.absolutePath
-            } catch (e: Exception) {
-                log("WARNING: Failed to unpack set_mixer_ctl: ${e.message}")
+                log("✅ set_mixer_ctl ready (full 2-slot mixer control)")
+            } catch (_: Exception) {
+                log("⚠️ set_mixer_ctl not in assets — using tinymix fallback (slot 0 only)")
             }
 
             try {
@@ -109,7 +110,12 @@ class GsmService : Service() {
                 log("GsmService: GsmDialer initialized")
 
                 // Wire call lifecycle callbacks into CallController (once, in onCreate).
-                callController.wireDialerCallbacks(gsmDialer!!)
+                // config must be non-null here — callController lazy init reads config!!
+                if (config != null) {
+                    callController.wireDialerCallbacks(gsmDialer!!)
+                } else {
+                    log("❌ Cannot wire call callbacks — config is null")
+                }
 
                 ensureRealtimeClientsInitialized()
             } catch (error: Exception) {
@@ -175,10 +181,14 @@ class GsmService : Service() {
                     val source = intent.getStringExtra(EXTRA_MIC_SOURCE) ?: "browser"
                     val useBrowser = source != "phone"
                     AudioWebSocketHandler.useBrowserMicUplink = useBrowser
+                    // Uplink is now pcmC0D19p direct write — stop/restart playback to toggle source
                     if (callController.isCallActive) {
                         Thread {
-                            if (useBrowser) RootUtils.enableIncallMusicInjection()
-                            else RootUtils.disableIncallMusicInjection()
+                            if (useBrowser) {
+                                audioWsHandlerRef.handler?.startAudioPlayback() // restart PCM writer
+                            } else {
+                                audioWsHandlerRef.handler?.stopAudioPlayback() // stop PCM writer, phone mic takes over
+                            }
                         }.start()
                     }
                     cmdWsClient?.sendEvent("MIC_SOURCE_CHANGED", mapOf("source" to source))
@@ -228,9 +238,9 @@ class GsmService : Service() {
                     }
                 }
 
-                if (audioWsHandlerRef.handler == null) {
-                    audioWsHandlerRef.handler = AudioWebSocketHandler(this@GsmService, safeConfig, log = log) { _: ShortArray -> }
-                }
+                // Do NOT pre-create the audio handler here — calls create a fresh one in CallController.
+                // Pre-creating it caused the OFFHOOK path to reuse a stale unconnected handler,
+                // so all tinycap chunks were silently dropped (isConnected=false → sendAudioChunk no-op).
                 log("GsmService: realtime clients initialized")
             } catch (error: Exception) {
                 log("WARNING: realtime init failed: ${error.message}")
@@ -309,16 +319,16 @@ class GsmService : Service() {
                     return@Thread
                 }
 
-                if (audioWsHandlerRef.handler == null) {
-                    config?.let { safeConfig ->
-                        audioWsHandlerRef.handler = AudioWebSocketHandler(this@GsmService, safeConfig, log = log) { _: ShortArray -> }
-                    }
-                }
-                val ws = audioWsHandlerRef.handler ?: run { isTestAudioActive = false; return@Thread }
+                val safeConfig = config ?: run { isTestAudioActive = false; return@Thread }
+                audioWsHandlerRef.handler?.disconnect()
+                audioWsHandlerRef.handler = AudioWebSocketHandler(this@GsmService, safeConfig, log = log) { _: ShortArray -> }
+                val ws = audioWsHandlerRef.handler!!
                 val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
                 ws.setCallActive(false)
                 ws.connect(wsUrl, bearerToken, deviceToken)
-                Thread.sleep(500)
+                val wsDeadline = System.currentTimeMillis() + 5000
+                while (!ws.isWsConnected && System.currentTimeMillis() < wsDeadline) Thread.sleep(100)
+                if (!ws.isWsConnected) { log("❌ Audio WS failed to connect — TEST aborted"); isTestAudioActive = false; return@Thread }
                 ws.startAudioPlayback()
                 ws.startAudioCapture()
                 cmdWsClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
@@ -417,8 +427,8 @@ class GsmService : Service() {
                     log("🎤 Mic source: ${if (useBrowser) "browser" else "phone"}")
                     if (callController.isCallActive) {
                         Thread {
-                            if (useBrowser) RootUtils.enableIncallMusicInjection()
-                            else RootUtils.disableIncallMusicInjection()
+                            if (useBrowser) audioWsHandlerRef.handler?.startAudioPlayback()
+                            else audioWsHandlerRef.handler?.stopAudioPlayback()
                         }.start()
                     }
                     cmdWsClient?.sendEvent("MIC_SOURCE_CHANGED", mapOf("source" to if (useBrowser) "browser" else "phone"))

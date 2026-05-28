@@ -36,6 +36,7 @@ class AudioWebSocketHandler(
 ) {
     private var audioRecord: AudioRecord? = null
     private var tinycapProcess: Process? = null
+    private var uplinkPcmProcess: Process? = null
     @Volatile private var audioTrack: AudioTrack? = null
     @Volatile private var isPlaying = false
     private var isRecording = false
@@ -52,7 +53,7 @@ class AudioWebSocketHandler(
     // Single consumer drains this channel — prevents flooding DefaultDispatcher with 50 coroutines/sec
     private var playbackChannel = Channel<ShortArray>(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
 
-    private val isRooted: Boolean by lazy { RootUtils.isRooted() }
+    private val isRooted: Boolean get() = RootUtils.isRooted
 
     companion object {
         private const val TAG = "AudioWebSocket"
@@ -72,9 +73,12 @@ class AudioWebSocketHandler(
         )
     }
 
+    val isWsConnected: Boolean get() = wsConnection?.isConnected ?: false
+
     fun connect(wsUrl: String, bearerToken: String, deviceToken: String) {
         log("🔌 WebSocket Audio: Connecting to $wsUrl")
         seqRx = -1L
+        wsConnection?.close()
         wsConnection = WebSocketAudioClient(wsUrl, bearerToken, deviceToken, onAudioPacket = { packet -> handleAudioPacket(packet) })
     }
 
@@ -351,30 +355,31 @@ class AudioWebSocketHandler(
         try {
             log("🔊 WebSocket: Starting playback...")
 
-            if (!isCallActive) {
-                // TEST mode: earpiece prevents mic→speaker→mic feedback loop; AEC handles echo
-                audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                audioManager.isSpeakerphoneOn = false
+            if (isCallActive) {
+                // Call mode: write browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2).
+                // The Incall_Music Audio Mixer injection (MultiMedia1 → voice TX) is blocked by
+                // the MIUI CAF kernel — slot 1 (VoiceMMode2) ELEM_WRITE is silently ignored.
+                // Direct PCM write to pcmC0D19p bypasses the mixer entirely and injects audio
+                // straight into the active VoiceMMode2 TX uplink. Confirmed working via tinyplay.
+                startCallUplinkPcmWriter()
+                return
             }
-            // Call mode: keep GsmService-set MODE_IN_CALL + speakerphone=true intact for REMOTE_SUBMIX
 
-            val playRate = if (isCallActive) PLAYBACK_SAMPLE_RATE else SAMPLE_RATE
-            // 8kHz call mode needs a deeper buffer (8x min) to absorb WS jitter without underrun.
-            val bufferSize = AudioTrack.getMinBufferSize(playRate, CHANNEL_OUT, AUDIO_FORMAT) * (if (isCallActive) BUFFER_SIZE_FACTOR * 2 else BUFFER_SIZE_FACTOR)
+            // TEST mode: standard AudioTrack to earpiece/AEC
+            audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
+            audioManager.isSpeakerphoneOn = false
+
+            val bufferSize = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_OUT, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
             if (bufferSize <= 0) { log("❌ ERROR: Invalid playback buffer size"); return }
 
-            // SERVICE mode: USAGE_MEDIA routes through MultiMedia1 which tinymix bridges
-            // into the GSM voice uplink (Incall_Music Audio Mixer MultiMedia1).
-            // TEST mode: USAGE_VOICE_COMMUNICATION for AEC on the mic loopback test.
-            val audioUsage = if (isCallActive) AudioAttributes.USAGE_MEDIA else AudioAttributes.USAGE_VOICE_COMMUNICATION
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder()
-                    .setUsage(audioUsage)
+                    .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build())
                 .setAudioFormat(AudioFormat.Builder()
                     .setEncoding(AUDIO_FORMAT)
-                    .setSampleRate(playRate)
+                    .setSampleRate(SAMPLE_RATE)
                     .setChannelMask(CHANNEL_OUT)
                     .build())
                 .setBufferSizeInBytes(bufferSize)
@@ -386,10 +391,81 @@ class AudioWebSocketHandler(
             isPlaying = true
             audioTrack?.play()
             startPlaybackConsumer()
-            log("✅ Playback started - earpiece/AEC mode")
+            log("✅ Playback started (TEST mode, earpiece/AEC)")
         } catch (exception: Exception) {
             log("❌ ERROR starting playback: ${exception.message}")
         }
+    }
+
+    // Writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX uplink).
+    // Spawns a root subprocess that reads from stdin and writes to the PCM device.
+    // VoiceMMode2 format: S16_LE, mono, 8000 Hz, period=1024 samples.
+    // Browser sends 8kHz PCM (PLAYBACK_SAMPLE_RATE=8000) which matches exactly.
+    private fun startCallUplinkPcmWriter() {
+        try {
+            val proc = Runtime.getRuntime().exec(arrayOf(
+                "su", "-c",
+                "tinyplay /proc/self/fd/0 -D 0 -d 19 -c 1 -r 8000 -b 16 2>/dev/null"
+            ))
+            uplinkPcmProcess = proc
+            isPlaying = true
+            log("✅ Uplink PCM writer started (VoiceMMode2 pcmC0D19p, 8kHz mono S16_LE)")
+            // startPlaybackConsumer will drain the channel and write to proc.outputStream
+            startCallUplinkConsumer(proc)
+        } catch (e: Exception) {
+            log("❌ ERROR starting uplink PCM writer: ${e.message}")
+        }
+    }
+
+    private fun startCallUplinkConsumer(proc: Process) {
+        scope.launch(Dispatchers.IO) {
+            val out = proc.outputStream
+            try {
+                // tinyplay requires a WAV header — send a streaming WAV header with max size fields
+                // so it doesn't try to seek. sampleRate=8000, mono, 16-bit PCM.
+                val sr = PLAYBACK_SAMPLE_RATE
+                val header = buildWavHeader(sr)
+                out.write(header)
+                out.flush()
+                log("📤 WAV header sent to tinyplay stdin")
+            } catch (t: Throwable) {
+                Log.e(TAG, "❌ Failed to write WAV header: ${t.message}")
+                return@launch
+            }
+            for (samples in playbackChannel) {
+                if (!isPlaying) break
+                try {
+                    val bytes = ByteArray(samples.size * 2)
+                    java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(samples)
+                    out.write(bytes)
+                    out.flush()
+                } catch (t: Throwable) {
+                    if (t !is kotlinx.coroutines.CancellationException) Log.e(TAG, "❌ Uplink PCM write error: ${t.message}")
+                    break
+                }
+            }
+            Log.d(TAG, "Uplink PCM consumer exited")
+        }
+    }
+
+    // Streaming WAV header: size fields set to 0xFFFFFFFF so tinyplay doesn't seek.
+    private fun buildWavHeader(sampleRate: Int): ByteArray {
+        val buf = java.nio.ByteBuffer.allocate(44).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        val byteRate = sampleRate * 2 // mono 16-bit
+        buf.put("RIFF".toByteArray())
+        buf.putInt(0x7FFFFFFF)           // chunk size — max for streaming
+        buf.put("WAVE".toByteArray())
+        buf.put("fmt ".toByteArray())
+        buf.putInt(16)                   // PCM subchunk size
+        buf.putShort(1)                  // PCM format
+        buf.putShort(1)                  // mono
+        buf.putInt(sampleRate)
+        buf.putInt(byteRate)
+        buf.putShort(2)                  // block align
+        buf.putShort(16)                 // bits per sample
+        buf.put("data".toByteArray())
+        buf.putInt(0x7FFFFFFF)           // data size — max for streaming
+        return buf.array()
     }
 
     fun setCallActive(active: Boolean) {
@@ -450,6 +526,8 @@ class AudioWebSocketHandler(
             isPlaying = false
             val track = audioTrack
             audioTrack = null
+            uplinkPcmProcess?.destroy()
+            uplinkPcmProcess = null
             // Close channel to unblock consumer coroutine, then recreate for next session
             playbackChannel.close()
             playbackChannel = Channel(capacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
