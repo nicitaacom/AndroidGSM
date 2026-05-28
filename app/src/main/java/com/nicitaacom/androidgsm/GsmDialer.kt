@@ -100,7 +100,7 @@ class GsmDialer(private val context: Context) {
     }
 
     // 5. initiate GSM call
-    // called when handling CALL_STARTED command (from backend via Pusher) in GsmService.handleCommand.
+    // called when handling CALL_STARTED command (from backend via /ws/cmd) in GsmService.handleCommand.
     // simAccountId: the PhoneAccount id string from getSimAccounts(); null = system default.
     @Suppress("unused", "MissingPermission")
     fun startCall(number: String, simAccountId: String? = null, simComponentName: String? = null): Boolean {

@@ -9,11 +9,7 @@ import java.net.URL
 data class Config(
     val BACKEND_URL: String,
     val DEVICE_TOKEN: String,
-    val BACKEND_BEARER: String,
-    val PUSHER_APP_ID: String,
-    val PUSHER_KEY: String,
-    val PUSHER_SECRET: String,
-    val PUSHER_CLUSTER: String
+    val BACKEND_BEARER: String
 )
 
 class ConfigReader {
@@ -31,7 +27,7 @@ class ConfigReader {
             val jsonString = inputStream.bufferedReader().use { it.readText() }
             val json = JSONObject(jsonString)
 
-            val missing = listOf("BACKEND_URL", "BACKEND_BEARER", "PUSHER_APP_ID", "PUSHER_KEY", "PUSHER_SECRET", "PUSHER_CLUSTER")
+            val missing = listOf("BACKEND_URL", "BACKEND_BEARER")
                 .filter { key -> json.optString(key).isBlank() || json.optString(key).startsWith("your-") || json.optString(key) == "xxxx" }
 
             if (missing.isNotEmpty()) {
@@ -47,11 +43,7 @@ class ConfigReader {
             val config = Config(
                 BACKEND_URL = json.getString("BACKEND_URL").trimEnd('/'),
                 DEVICE_TOKEN = deviceName,
-                BACKEND_BEARER = json.getString("BACKEND_BEARER"),
-                PUSHER_APP_ID = json.getString("PUSHER_APP_ID"),
-                PUSHER_KEY = json.getString("PUSHER_KEY"),
-                PUSHER_SECRET = json.getString("PUSHER_SECRET"),
-                PUSHER_CLUSTER = json.getString("PUSHER_CLUSTER")
+                BACKEND_BEARER = json.getString("BACKEND_BEARER")
             )
 
             // Ping backend once to verify URL is reachable

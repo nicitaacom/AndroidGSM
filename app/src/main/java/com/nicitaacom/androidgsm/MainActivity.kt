@@ -47,7 +47,6 @@ class MainActivity : AppCompatActivity() {
     private var hasInternetConnection = true
     private var hasRequiredPermissions = false
     private var pendingAllowStartWithoutSim = false
-    private var pendingStartAudioTest = false
     private var isTestAudioActive = false
     private val meetsMinAndroid = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q // API 29
     private var isServiceAudioActive = false
@@ -309,9 +308,7 @@ class MainActivity : AppCompatActivity() {
         } else {
             hasRequiredPermissions = true
             startService(allowWithoutSim)
-            // 1. Dispatch audio action AFTER service is started
-            if (pendingStartAudioTest) dispatchTestAudioRequest()
-            else dispatchServiceAudioInputRequest()
+            dispatchServiceAudioInputRequest()
             pendingAllowStartWithoutSim = false
         }
     }
@@ -352,7 +349,6 @@ class MainActivity : AppCompatActivity() {
             stopService(intent)
 
             isTestAudioActive = false
-            pendingStartAudioTest = false
             updateStatus()
             addLog("Service stopped successfully!")
 
@@ -398,7 +394,6 @@ class MainActivity : AppCompatActivity() {
             } else {
                 hasRequiredPermissions = false
                 pendingAllowStartWithoutSim = false
-                pendingStartAudioTest = false
                 addLog("ERROR: Some permissions were denied")
                 val deniedPermissions = permissions.filterIndexed { index, _ ->
                     grantResults[index] != PackageManager.PERMISSION_GRANTED
@@ -408,19 +403,6 @@ class MainActivity : AppCompatActivity() {
             updateStatus()
         }
     }
-
-    private fun dispatchTestAudioRequest() {
-        val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
-        }
-        if (!startGsmServiceSafely(intent)) return
-        isTestAudioActive = true
-        isServiceAudioActive = false
-        pendingStartAudioTest = false
-        updateStatus()
-        addLog("🎧 TEST audio started")
-    }
-
 
     private fun dispatchServiceAudioInputRequest() {
         val intent = Intent(this, GsmService::class.java).apply {
@@ -440,7 +422,6 @@ class MainActivity : AppCompatActivity() {
         startGsmServiceSafely(intent)
         isTestAudioActive = false
         isServiceAudioActive = false
-        pendingStartAudioTest = false
         updateStatus()
         addLog("🛑 Test audio stopped")
     }

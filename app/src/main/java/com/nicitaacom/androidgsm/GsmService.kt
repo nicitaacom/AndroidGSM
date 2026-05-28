@@ -21,7 +21,6 @@ class GsmService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var cmdWsClient: CommandWebSocketClient? = null
     private var gsmDialer: GsmDialer? = null
-    private var audioStreamHandler: AudioStreamHandler? = null
     private var audioWsHandler: AudioWebSocketHandler? = null
     private var config: Config? = null
     private var isTestAudioActive = false
@@ -86,11 +85,6 @@ class GsmService : Service() {
 
             try {
                 config = ConfigReader.readConfig(this)
-                if (config == null) {
-                    MainActivity.log("ERROR: ConfigReader returned null - service will run in degraded mode")
-                    return
-                }
-
                 MainActivity.log("GsmService: Config loaded — ${config?.BACKEND_URL} device=${config?.DEVICE_TOKEN}")
 
                 // PhoneStateListener: safety net for IDLE only (no audio-mode changes — those are
@@ -307,7 +301,6 @@ class GsmService : Service() {
                     }
                 }
 
-                if (audioStreamHandler == null) audioStreamHandler = AudioStreamHandler(this, null)
                 if (audioWsHandler == null) {
                     audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
                 }
@@ -326,17 +319,12 @@ class GsmService : Service() {
             audioWsHandler?.disconnect()
             audioWsHandler = null
         } catch (_: Exception) {}
-        try {
-            audioStreamHandler?.stopAudioCapture()
-            audioStreamHandler?.stopAudioPlayback()
-        } catch (_: Exception) {}
         Thread {
             try { cmdWsClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
             try { cmdWsClient?.disconnect() } catch (_: Exception) {}
         }.apply { isDaemon = true; start() }.join(1000)
         unregisterPhoneStateListener()
         wakeLock?.let { if (it.isHeld) it.release() }
-        audioStreamHandler?.cleanup()
         gsmDialer?.cleanup()
         gsmDialer = null
         isServiceAudioActive = false
@@ -486,7 +474,7 @@ class GsmService : Service() {
                 "CALL_STARTED" -> handleCallStarted(data)
                 "CALL_ENDED" -> handleCallEnded()
                 "SEND_DTMF" -> handleSendDtmf(data)
-                "AUDIO_CHUNK" -> handleAudioChunk(data)
+                "AUDIO_CHUNK" -> { /* legacy path — audio flows over /ws/audio, not /ws/cmd */ }
                 "SET_GAIN" -> {
                     val mic = (data["micGain"] as? Number)?.toFloat()
                     val playback = (data["playbackGain"] as? Number)?.toFloat()
@@ -579,18 +567,17 @@ class GsmService : Service() {
     }
 
     private fun handleCallEnded() {
+        // Frontend requested hang-up. Call gsmDialer.endCall() to dismiss the call, then
+        // let teardownCall() handle all audio/WS/event cleanup — same path as telephony IDLE.
+        // Do NOT send CALL_ENDED here directly; teardownCall() does it, preventing double-send.
         try {
             MainActivity.log("Ending call (frontend request)")
-            isCallActive = false
             Thread {
                 try {
                     gsmDialer?.endCall()
-                    Thread.sleep(300)
-                    audioWsHandler?.stopAudioCapture()
-                    audioWsHandler?.stopAudioPlayback()
-                    audioStreamHandler?.stopAudioCapture()
-                    audioStreamHandler?.stopAudioPlayback()
-                    cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
+                    // teardownCall fires via GsmDialer's IDLE callback once the modem confirms.
+                    // If for some reason the callback doesn't fire within 3s, the PhoneStateListener
+                    // safety net will invoke teardownCall anyway.
                 } catch (error: Exception) {
                     MainActivity.log("ERROR in handleCallEnded thread: ${error.message}")
                 }
@@ -659,13 +646,4 @@ class GsmService : Service() {
         } catch (_: Exception) {}
     }
 
-    private fun handleAudioChunk(data: Map<String, Any>) {
-        try {
-            val audioData = data["audio"] as? String
-            if (audioData.isNullOrBlank()) return
-            audioStreamHandler?.playAudioChunk(audioData)
-        } catch (e: Exception) {
-            MainActivity.log("ERROR playing audio chunk: ${e.message}")
-        }
-    }
 }

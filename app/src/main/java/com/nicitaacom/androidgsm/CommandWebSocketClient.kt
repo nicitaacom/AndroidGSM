@@ -9,15 +9,9 @@ import org.json.JSONObject
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-/**
- * Persistent WebSocket connection used for command delivery and heartbeats.
- * Replaces PusherClient on Android — zero Pusher message cost.
- *
- * Server sends: { type:"command", cmdType:"CALL_STARTED"|"CALL_ENDED"|..., data:{...} }
- * Android sends: { type:"event", eventType:"CONNECTED"|"CALL_CONNECTED"|..., deviceToken, data:{...} }
- *
- * Heartbeat: sendEvent("CONNECTED") every 10s — server updates lastSeen, no Pusher triggered.
- */
+// WebSocket is used instead of Pusher for Android commands (CALL_STARTED, CALL_ENDED, DTMF, etc.)
+// because Android already holds a persistent outbound WS — no Pusher auth endpoint, no quota cost,
+// lower latency, and reconnect is self-managed. Pusher is only used for browser-side call state events.
 class CommandWebSocketClient(
     private val wsUrl: String,
     private val bearerToken: String,

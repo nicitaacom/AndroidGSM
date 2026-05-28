@@ -1,9 +1,4 @@
 {
   "BACKEND_URL": "https://your-backend.com/",
-  "BACKEND_BEARER": "your-secret-bearer-token",
-
-  "PUSHER_APP_ID": "123456",
-  "PUSHER_KEY": "*************14f",
-  "PUSHER_SECRET": "************14bae",
-  "PUSHER_CLUSTER": "eu"
+  "BACKEND_BEARER": "your-secret-bearer-token"
 }
