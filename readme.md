@@ -44,7 +44,7 @@ adb devices   # must show device, not unauthorized
 # Always clean to avoid INSTALL_PARSE_FAILED
 adb shell am force-stop com.nicitaacom.androidgsm \
   ; ./gradlew clean assembleDebug \
-  && adb install -r $(ls -t app/build/outputs/apk/debug/*.apk | head -n1) \
+  && adb install -r -d $(ls -t app/build/outputs/apk/debug/*.apk | head -n1) \
   && adb shell am start -n com.nicitaacom.androidgsm/.MainActivity
 
 # Live logs

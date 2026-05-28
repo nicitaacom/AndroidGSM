@@ -731,12 +731,46 @@ class GsmService : Service() {
                 MainActivity.log("SEND_DTMF ignored: missing digit")
                 return
             }
-            MainActivity.log("Sending DTMF: $digit")
-            gsmDialer?.sendDtmf(digit[0])
+            val handler = audioWsHandler
+            if (handler == null) {
+                MainActivity.log("SEND_DTMF ignored: no active audio session")
+                return
+            }
+            MainActivity.log("Sending DTMF: ${digit[0]}")
+            val pcm = generateDtmfPcm(digit[0], handler.getPlaybackSampleRate())
+            if (pcm == null) {
+                MainActivity.log("SEND_DTMF ignored: unknown digit ${digit[0]}")
+                return
+            }
+            // Push in 320-sample chunks so the playback consumer drains it normally
+            var offset = 0
+            val chunkSize = 320
+            while (offset < pcm.size) {
+                val end = minOf(offset + chunkSize, pcm.size)
+                handler.injectPcm(pcm.copyOfRange(offset, end))
+                offset = end
+            }
             cmdWsClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
         } catch (e: Exception) {
             MainActivity.log("ERROR in handleSendDtmf: ${e.message}")
             e.printStackTrace()
+        }
+    }
+
+    private val dtmfFreqs = mapOf(
+        '1' to Pair(697.0, 1209.0), '2' to Pair(697.0, 1336.0), '3' to Pair(697.0, 1477.0),
+        '4' to Pair(770.0, 1209.0), '5' to Pair(770.0, 1336.0), '6' to Pair(770.0, 1477.0),
+        '7' to Pair(852.0, 1209.0), '8' to Pair(852.0, 1336.0), '9' to Pair(852.0, 1477.0),
+        '*' to Pair(941.0, 1209.0), '0' to Pair(941.0, 1336.0), '#' to Pair(941.0, 1477.0)
+    )
+
+    private fun generateDtmfPcm(digit: Char, sampleRate: Int): ShortArray? {
+        val (f1, f2) = dtmfFreqs[digit] ?: return null
+        val numSamples = sampleRate * 200 / 1000  // 200ms
+        return ShortArray(numSamples) { i ->
+            val t = i.toDouble() / sampleRate
+            val sample = (Math.sin(2 * Math.PI * f1 * t) + Math.sin(2 * Math.PI * f2 * t)) / 2.0
+            (sample * Short.MAX_VALUE * 0.8).toInt().toShort()
         }
     }
 

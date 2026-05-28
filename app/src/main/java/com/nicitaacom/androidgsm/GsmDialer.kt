@@ -3,8 +3,6 @@ package com.nicitaacom.androidgsm
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
-import android.media.AudioManager
-import android.media.ToneGenerator
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -208,41 +206,6 @@ class GsmDialer(private val context: Context) {
         } catch (error: Exception) {
             MainActivity.log("ERROR ending call: ${error.message}")
             Log.e("GsmDialer", "Failed to end call", error)
-        }
-    }
-
-    fun sendDtmf(digit: Char) {
-        try {
-            val toneType = when (digit) {
-                '0' -> ToneGenerator.TONE_DTMF_0
-                '1' -> ToneGenerator.TONE_DTMF_1
-                '2' -> ToneGenerator.TONE_DTMF_2
-                '3' -> ToneGenerator.TONE_DTMF_3
-                '4' -> ToneGenerator.TONE_DTMF_4
-                '5' -> ToneGenerator.TONE_DTMF_5
-                '6' -> ToneGenerator.TONE_DTMF_6
-                '7' -> ToneGenerator.TONE_DTMF_7
-                '8' -> ToneGenerator.TONE_DTMF_8
-                '9' -> ToneGenerator.TONE_DTMF_9
-                '*' -> ToneGenerator.TONE_DTMF_S
-                '#' -> ToneGenerator.TONE_DTMF_P
-                else -> return
-            }
-
-            // Prefer DTMF stream → VOICE_CALL → MUSIC
-            val stream = AudioManager.STREAM_DTMF
-
-            val toneGen = ToneGenerator(stream, 100) // max volume
-            toneGen.startTone(toneType, 200) // 200ms tone
-            MainActivity.log("DTMF sent locally: $digit (may not reach far end on all devices)")
-
-            // Release after short delay to free resources
-            android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
-                toneGen.release()
-            }, 300)
-        } catch (exception: Exception) {
-            MainActivity.log("ERROR sending DTMF: ${exception.message}")
-            Log.e("GsmDialer", "Failed to send DTMF", exception)
         }
     }
 

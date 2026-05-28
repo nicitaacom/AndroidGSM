@@ -421,6 +421,14 @@ class AudioWebSocketHandler(
         playbackChannel.trySend(shortBuffer)
     }
 
+    // Inject PCM directly into the active playback AudioTrack (MultiMedia1 → GSM uplink).
+    // Used by DTMF so the tone goes through the same path as browser mic audio.
+    fun injectPcm(samples: ShortArray) {
+        playbackChannel.trySend(samples)
+    }
+
+    fun getPlaybackSampleRate(): Int = if (isCallActive) PLAYBACK_SAMPLE_RATE else SAMPLE_RATE
+
     private fun startPlaybackConsumer() {
         scope.launch(Dispatchers.IO) {
             for (samples in playbackChannel) {
