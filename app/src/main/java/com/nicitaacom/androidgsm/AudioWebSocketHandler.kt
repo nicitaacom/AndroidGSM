@@ -59,6 +59,8 @@ class AudioWebSocketHandler(
         private const val PLAYBACK_SAMPLE_RATE = 8000 // browser sends 8kHz for GSM uplink
         @Volatile var micGain: Float = 1.0f
         @Volatile var playbackGain: Float = 0.7f
+        // true = browser mic is uplink source (default); false = phone mic handles uplink natively
+        @Volatile var useBrowserMicUplink: Boolean = true
         private const val CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
         private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
@@ -397,6 +399,8 @@ class AudioWebSocketHandler(
     private fun playAudioChunk(base64Audio: String, seq: Long = -1) {
         if (!isPlaying) return
         if (base64Audio.isBlank()) return
+        // In call mode with phone mic selected: drop browser audio — phone mic handles uplink natively
+        if (isCallActive && !useBrowserMicUplink) return
 
         val audioBytes = try {
             Base64.decode(base64Audio, Base64.NO_WRAP)
@@ -420,14 +424,6 @@ class AudioWebSocketHandler(
         // Non-blocking offer — channel drops oldest if full (brief network burst), no coroutine launched
         playbackChannel.trySend(shortBuffer)
     }
-
-    // Inject PCM directly into the active playback AudioTrack (MultiMedia1 → GSM uplink).
-    // Used by DTMF so the tone goes through the same path as browser mic audio.
-    fun injectPcm(samples: ShortArray) {
-        playbackChannel.trySend(samples)
-    }
-
-    fun getPlaybackSampleRate(): Int = if (isCallActive) PLAYBACK_SAMPLE_RATE else SAMPLE_RATE
 
     private fun startPlaybackConsumer() {
         scope.launch(Dispatchers.IO) {

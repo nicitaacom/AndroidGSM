@@ -1,10 +1,14 @@
 package com.nicitaacom.androidgsm
 
 import android.Manifest
+import android.app.AlertDialog
+import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.ClipData
 import android.content.ClipboardManager
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.content.pm.PackageManager
@@ -13,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.telecom.TelecomManager
 import android.telephony.SubscriptionManager
 import android.view.View
 import android.view.WindowManager
@@ -37,6 +42,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private lateinit var versionTextView: TextView
+    private lateinit var micSourceToggleButton: Button
     private var hasSimAvailable = true
     private var hasInternetConnection = true
     private var hasRequiredPermissions = false
@@ -53,6 +59,12 @@ class MainActivity : AppCompatActivity() {
     private var originalScreenTimeout: Long = -1
     private var hasCallPermissions = false
     private var logUpdatePending = false
+
+    private val dialerRoleLauncher: ActivityResultLauncher<Intent> =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val granted = result.resultCode == RESULT_OK
+            addLog(if (granted) "✅ Default dialer GRANTED" else "❌ Default dialer DENIED (resultCode=${result.resultCode})")
+        }
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
@@ -96,6 +108,12 @@ class MainActivity : AppCompatActivity() {
                 activity.updateStatus()
             }
         }
+
+        fun notifyMicSource(useBrowser: Boolean) {
+            instance?.get()?.runOnUiThread {
+                instance?.get()?.updateMicSourceButton(useBrowser)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -122,11 +140,25 @@ class MainActivity : AppCompatActivity() {
         copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
         versionTextView = findViewById(R.id.versionTextView)
+        micSourceToggleButton = findViewById(R.id.micSourceToggleButton)
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
         evaluateVersionFreshness()
 
         copyLogsButton.setOnClickListener {
             copyLastLogsToClipboard()
+        }
+
+        micSourceToggleButton.setOnClickListener {
+            val newUseBrowser = !AudioWebSocketHandler.useBrowserMicUplink
+            AudioWebSocketHandler.useBrowserMicUplink = newUseBrowser
+            updateMicSourceButton(newUseBrowser)
+            addLog("🎤 Mic source toggled to: ${if (newUseBrowser) "browser" else "phone"}")
+            // Notify GsmService to hot-swap injection if call is active
+            val intent = Intent(this, GsmService::class.java).apply {
+                action = GsmService.ACTION_SET_MIC_SOURCE
+                putExtra(GsmService.EXTRA_MIC_SOURCE, if (newUseBrowser) "browser" else "phone")
+            }
+            startGsmServiceSafely(intent)
         }
 
         checkNetworkAvailability()
@@ -156,6 +188,54 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         addLog("Screen will stay on while app is active")
 
+        // Defer to after window is attached — AlertDialog.show() in onCreate can silently fail.
+        window.decorView.post { promptDefaultDialerIfNeeded() }
+    }
+
+    private var defaultDialerPromptShown = false
+
+    // Prompt user to set this app as the default dialer. Required so our GsmInCallService
+    // receives the Call object — the only reliable way to send DTMF (Call.playDtmfTone).
+    private fun promptDefaultDialerIfNeeded() {
+        addLog("🔍 Checking default dialer status…")
+        if (defaultDialerPromptShown) { addLog("(prompt already shown this session)"); return }
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                addLog("Default dialer prompt skipped — pre-Android 10")
+                return
+            }
+            val rm = getSystemService(Context.ROLE_SERVICE) as? RoleManager
+            if (rm == null) { addLog("❌ RoleManager unavailable"); return }
+            if (rm.isRoleHeld(RoleManager.ROLE_DIALER)) {
+                addLog("✅ App is the default dialer — DTMF available")
+                return
+            }
+            if (!rm.isRoleAvailable(RoleManager.ROLE_DIALER)) {
+                addLog("❌ ROLE_DIALER not available on this MIUI build — set manually in Settings → Apps → Default apps → Phone")
+                return
+            }
+            defaultDialerPromptShown = true
+            addLog("⚠️ App is not default dialer — showing prompt")
+            AlertDialog.Builder(this)
+                .setTitle("Set as default Phone app")
+                .setMessage("DTMF tones (key presses during calls) require this app to be the default Phone app. Otherwise key presses won't be sent to the remote party.\n\nTap 'Set as default' to grant.")
+                .setPositiveButton("Set as default") { _, _ ->
+                    try {
+                        val intent = rm.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+                        dialerRoleLauncher.launch(intent)
+                        addLog("Default dialer role request launched")
+                    } catch (e: Exception) {
+                        addLog("❌ Failed to launch role intent: ${e.message}")
+                    }
+                }
+                .setNegativeButton("Skip (no DTMF)") { _, _ ->
+                    addLog("User skipped default dialer prompt")
+                }
+                .setCancelable(false)
+                .show()
+        } catch (e: Exception) {
+            addLog("default dialer prompt failed: ${e.message}")
+        }
     }
 
     override fun onResume() {
@@ -168,6 +248,8 @@ class MainActivity : AppCompatActivity() {
         updateStatus()
         // Re-check actual running state - handles crash/restart scenario
         checkActualServiceState()
+        // Backup trigger — guarded by defaultDialerPromptShown, won't re-show after grant/deny
+        window.decorView.post { promptDefaultDialerIfNeeded() }
     }
 
     private fun checkActualServiceState() {
@@ -551,6 +633,13 @@ class MainActivity : AppCompatActivity() {
             }
             originalScreenTimeout = -1L
         }
+    }
+
+    fun updateMicSourceButton(useBrowser: Boolean) {
+        micSourceToggleButton.text = if (useBrowser) "MIC: BROWSER" else "MIC: PHONE"
+        micSourceToggleButton.setBackgroundColor(
+            ContextCompat.getColor(this, if (useBrowser) R.color.brand_green else R.color.error_red)
+        )
     }
 
     private fun loadSimSelection() {

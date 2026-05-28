@@ -82,7 +82,7 @@
         <service android:name=".GsmService" android:enabled="true" android:exported="false"
                  android:foregroundServiceType="connectedDevice|microphone|mediaPlayback" />
 
-        <!-- ConnectionService to allow app to be set as default dialer -->
+        <!-- ConnectionService — required for default-dialer role eligibility -->
         <service
             android:name=".GsmConnectionService"
             android:exported="true"
@@ -91,6 +91,19 @@
                 <action android:name="android.telecom.ConnectionService" />
             </intent-filter>
         </service>
+
+        <!-- InCallService — bound by system when we are default dialer. Gives us the Call
+             object so we can invoke Call.playDtmfTone() for proper out-of-band DTMF. -->
+        <service
+            android:name=".GsmInCallService"
+            android:exported="true"
+            android:permission="android.permission.BIND_INCALL_SERVICE">
+            <meta-data android:name="android.telecom.IN_CALL_SERVICE_UI" android:value="true" />
+            <intent-filter>
+                <action android:name="android.telecom.InCallService" />
+            </intent-filter>
+        </service>
+
 
         <!-- Activity that requests the user to set this app as the default dialer -->
         <activity

@@ -8,6 +8,9 @@ import java.io.File
 object RootUtils {
     private const val TAG = "RootUtils"
 
+    // Path to the unpacked set_mixer_ctl binary. Set by GsmService.onCreate() after unpacking asset.
+    var nativeBinDir: String = ""
+
     private val suPaths = listOf(
         "/system/bin/su",
         "/system/xbin/su",
@@ -21,8 +24,13 @@ object RootUtils {
         "/apex/com.android.runtime/bin/su"
     )
 
+    // Resolves the `su` binary path for exec — falls back to just "su" (PATH lookup).
+    private val suBin: String by lazy {
+        suPaths.firstOrNull { File(it).exists() } ?: "su"
+    }
+
     private fun runSuCommand(command: String): Pair<Int, String> {
-        val process = Runtime.getRuntime().exec(arrayOf("su", "-c", command))
+        val process = Runtime.getRuntime().exec(arrayOf(suBin, "-c", command))
         // Drain streams on separate threads to avoid blocking waitFor()
         var out = ""
         var err = ""
@@ -38,6 +46,20 @@ object RootUtils {
         outThread.join(500)
         errThread.join(500)
         return process.exitValue() to (out + "\n" + err).trim()
+    }
+
+    // Sets a single BOOL element by index on a mixer control using set_mixer_ctl.
+    // Bypasses tinymix's broken mixer_ctl_get_array on MIUI sdm660 for 2-slot controls.
+    // control: ALSA mixer control name (e.g. 'MultiMedia1 Mixer VOC_REC_DL')
+    // slot: element index (0 = VoiceMMode1, 1 = VoiceMMode2)
+    // value: 0 or 1
+    private fun setMixerElem(control: String, slot: Int, value: Int): Boolean {
+        val bin = if (nativeBinDir.isNotEmpty()) "$nativeBinDir/set_mixer_ctl" else "set_mixer_ctl"
+        val (exit, output) = runSuCommand("$bin 0 '$control' $slot $value")
+        return (exit == 0).also { ok ->
+            if (ok) Log.d(TAG, "✅ set_mixer_ctl '$control'[$slot]=$value")
+            else Log.e(TAG, "❌ set_mixer_ctl '$control'[$slot]=$value failed (exit=$exit): $output")
+        }
     }
 
     private fun logRootState(rooted: Boolean, reason: String): Boolean {
@@ -81,28 +103,25 @@ object RootUtils {
     fun grantAudioOutputCapture(context: Context): Boolean =
         grantPermission(context.packageName, "android.permission.CAPTURE_AUDIO_OUTPUT")
 
-    // Tap GSM call downlink (the audio you hear from the other party) into MultiMedia1's
-    // capture stream via tinymix. 'MultiMedia1 Mixer VOC_REC_DL' (index 1190 on sdm660) is
-    // the Qualcomm Voice-Call-Record DownLink mixer — once enabled, AudioRecord on
-    // REMOTE_SUBMIX (which taps MultiMedia1) sees the GSM downlink PCM.
-    //
-    // NOTE: The previously used 'Incall_Music Audio Mixer MultiMedia1' is the OPPOSITE
-    // direction — it injects MultiMedia1 playback INTO the call uplink. Wrong control.
+    // Tap GSM call downlink into MultiMedia1 capture stream via set_mixer_ctl.
+    // 'MultiMedia1 Mixer VOC_REC_DL' is a 2-slot BOOL control (slot 0 = VoiceMMode1,
+    // slot 1 = VoiceMMode2). tinymix cannot set slot 1 on MIUI sdm660 due to a broken
+    // mixer_ctl_get_array — we use set_mixer_ctl (SNDRV_CTL_IOCTL_ELEM_WRITE) directly.
     fun enableIncallMusicCapture(): Boolean {
-        // Enable downlink (what we hear from other party). Could also enable VOC_REC_UL
-        // for our own mic side, but for now we only want to hear the remote party.
-        val (exit, output) = runSuCommand("tinymix 'MultiMedia1 Mixer VOC_REC_DL' 1")
-        return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 enabled (GSM downlink capture open)")
-            else Log.e(TAG, "❌ tinymix VOC_REC_DL enable failed (exit=$exit): $output")
+        val s0 = setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 0, 1)
+        val s1 = setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 1, 1)
+        return (s0 && s1).also { ok ->
+            if (ok) Log.d(TAG, "✅ VOC_REC_DL slots 0+1 enabled (GSM downlink capture open)")
+            else Log.e(TAG, "❌ VOC_REC_DL enable partial: slot0=$s0 slot1=$s1")
         }
     }
 
     fun disableIncallMusicCapture(): Boolean {
-        val (exit, output) = runSuCommand("tinymix 'MultiMedia1 Mixer VOC_REC_DL' 0")
-        return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ VOC_REC_DL -> MultiMedia1 disabled")
-            else Log.e(TAG, "❌ tinymix VOC_REC_DL disable failed (exit=$exit): $output")
+        val s0 = setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 0, 0)
+        val s1 = setMixerElem("MultiMedia1 Mixer VOC_REC_DL", 1, 0)
+        return (s0 && s1).also { ok ->
+            if (ok) Log.d(TAG, "✅ VOC_REC_DL slots 0+1 disabled")
+            else Log.e(TAG, "❌ VOC_REC_DL disable partial: slot0=$s0 slot1=$s1")
         }
     }
 
@@ -112,28 +131,39 @@ object RootUtils {
     }
 
     // Route MultiMedia1 AudioTrack playback into the GSM voice uplink (TX path).
-    // This is the kernel-level bridge: browser mic audio played via USAGE_MEDIA on
-    // MultiMedia1 gets injected into the call uplink so the remote party hears it.
+    // 'Incall_Music Audio Mixer MultiMedia1/5' are 2-slot BOOL controls. Same MIUI tinymix
+    // bug applies — must use set_mixer_ctl for each slot separately.
     fun enableIncallMusicInjection(): Boolean {
-        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 1 0")
-        return (exit == 0).also { ok ->
-            if (ok) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 enabled (browser mic → GSM uplink)")
-            else Log.e(TAG, "❌ Incall_Music injection failed (exit=$exit): $output")
+        var ok = true
+        for (ctl in listOf(
+            "Incall_Music Audio Mixer MultiMedia1",
+            "Incall_Music Audio Mixer MultiMedia5"
+        )) {
+            ok = setMixerElem(ctl, 0, 1) && ok
+            ok = setMixerElem(ctl, 1, 1) && ok
         }
+        // Mute hardware mic TX so phone mic doesn't bleed into the uplink
+        setMixerElem("VoiceMMode1_Tx Mute", 0, 1)
+        setMixerElem("VoiceMMode2_Tx Mute", 0, 1)
+        return ok.also { Log.d(TAG, if (it) "✅ Incall injection enabled" else "❌ Incall injection partial") }
     }
 
     fun disableIncallMusicInjection() {
-        val (exit, output) = runSuCommand("tinymix 'Incall_Music Audio Mixer MultiMedia1' 0 0")
-        if (exit == 0) Log.d(TAG, "✅ Incall_Music -> MultiMedia1 disabled")
-        else Log.e(TAG, "❌ Incall_Music disable failed (exit=$exit): $output")
+        for (ctl in listOf(
+            "Incall_Music Audio Mixer MultiMedia1",
+            "Incall_Music Audio Mixer MultiMedia5"
+        )) {
+            setMixerElem(ctl, 0, 0)
+            setMixerElem(ctl, 1, 0)
+        }
+        // Restore hardware mic TX
+        setMixerElem("VoiceMMode1_Tx Mute", 0, 0)
+        setMixerElem("VoiceMMode2_Tx Mute", 0, 0)
+        Log.d(TAG, "✅ Incall injection disabled")
     }
 
-    // Mute earpiece + speaker output controls so call audio is inaudible on the phone.
-    // VOC_REC_DL capture path remains open — REMOTE_SUBMIX still taps the mixer.
+    // Mute earpiece + speaker output so call audio is inaudible on the phone.
     fun mutePhoneSpeaker(): Boolean {
-        // EAR_S = earpiece output, SPK = speaker output on sdm660/Redmi Note 7.
-        // Setting to ZERO disconnects the voice-call downlink from the physical output
-        // while leaving VOC_REC_DL capture path open for REMOTE_SUBMIX.
         var ok = true
         for (ctl in listOf("EAR_S", "SPK")) {
             val (exit, output) = runSuCommand("tinymix '$ctl' ZERO")

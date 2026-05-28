@@ -16,7 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Server sends: { type:"command", cmdType:"CALL_STARTED"|"CALL_ENDED"|..., data:{...} }
  * Android sends: { type:"event", eventType:"CONNECTED"|"CALL_CONNECTED"|..., deviceToken, data:{...} }
  *
- * Heartbeat: sendEvent("CONNECTED") every 15s — server updates lastSeen, no Pusher triggered.
+ * Heartbeat: sendEvent("CONNECTED") every 10s — server updates lastSeen, no Pusher triggered.
  */
 class CommandWebSocketClient(
     private val wsUrl: String,
@@ -43,7 +43,7 @@ class CommandWebSocketClient(
     companion object {
         private const val TAG = "CmdWS"
         private const val RECONNECT_DELAY_MS = 5000L
-        private const val HEARTBEAT_INTERVAL_MS = 8000L
+        private const val HEARTBEAT_INTERVAL_MS = 10000L
     }
 
     fun connect() {
