@@ -26,10 +26,7 @@ Edit `app/src/main/assets/androidgsm.config.json`:
 ```json
 {
   "BACKEND_URL": "https://your-backend.com",
-  "BACKEND_BEARER": "your-secret-token",
-  "PUSHER_KEY": "your-pusher-key",
-  "PUSHER_CLUSTER": "eu",
-  "DEVICE_TOKEN": ""
+  "BACKEND_BEARER": "your-secret-token"
 }
 ```
 
@@ -62,10 +59,18 @@ adb logcat -s GSM:D AudioWebSocket:D WebSocketAudio:D CmdWS:D RootUtils:D
 
 ## Architecture
 
-### Pusher usage (minimal — browser only)
+### Why WebSocket for Android commands (not Pusher)
 
-Pusher is used **only** to push call state events to the browser (5–10 messages per call).
-Android does NOT subscribe to Pusher. All Android↔backend communication goes over WebSocket.
+Android uses a persistent outbound WebSocket (`/ws/cmd`) for all commands — CALL_STARTED,
+CALL_ENDED, DTMF, heartbeats, status events. Pusher is **not used on Android** because:
+- Android already holds an open WS connection — no extra channel needed
+- No Pusher auth endpoint required (no `/pusher/auth` dependency)
+- Zero Pusher quota cost — commands never count against the message limit
+- Lower latency — direct WS vs Pusher relay
+- Self-managed reconnect with no third-party failure mode
+
+Pusher is used **only** to push call state events to the browser (5–10 messages per call),
+where it provides push delivery without the browser needing a persistent connection.
 
 | What | Where | Cost |
 |------|-------|------|
@@ -75,6 +80,59 @@ Android does NOT subscribe to Pusher. All Android↔backend communication goes o
 | Android heartbeats | `/ws/cmd` WebSocket | 0 Pusher msgs |
 | Audio | `/ws/audio` WebSocket | 0 Pusher msgs |
 
+### WebSocket internals (under the hood)
+
+Two persistent WebSocket connections are maintained by the Android app at all times:
+
+/ws/cmd  — command channel (CommandWebSocketClient)
+/ws/audio — audio channel (WebSocketAudioClient, only open during calls/TEST)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Android (CommandWebSocketClient)                               │
+│                                                                 │
+│  on connect:  ──► CONNECTED_EXPLICIT { isServiceActive, ... }  │
+│  every 10s:   ──► CONNECTED          { heartbeat:true,         │
+│                                        isServiceActive,         │
+│                                        isTestActive }           │
+│  on call:     ──► CALL_CONNECTED {}                             │
+│  on end:      ──► CALL_ENDED {}                                 │
+│  on svc start:──► SERVICE_STARTED {}                            │
+│                                                                 │
+│               ◄── CALL_STARTED  { number, simAccountId }       │
+│               ◄── CALL_ENDED    {}                              │
+│               ◄── SEND_DTMF     { digit }                       │
+│               ◄── SET_GAIN      { micGain, playbackGain }       │
+│               ◄── SET_MIC_SOURCE{ source: "browser"|"phone" }  │
+│               ◄── START_SERVICE / STOP_SERVICE                  │
+│               ◄── START_TEST    / STOP_TEST                     │
+└─────────────────────────────────────────────────────────────────┘
+                         ↕ /ws/cmd (always open)
+                   ┌─────────────┐
+                   │  server.ts  │
+                   │  in-memory  │
+                   │  connectedDevices map:        │
+                   │    lastSeen (updated each HB) │
+                   │    isServiceActive            │
+                   │    isTestActive               │
+                   └─────────────┘
+                         ↕ /ws/audio (open during call/TEST only)
+┌─────────────────────────────────────────────────────────────────┐
+│  Android (WebSocketAudioClient)                                 │
+│                                                                 │
+│  on connect:  ──► { role:"android", deviceToken, dir:"toBrowser"} │
+│  streaming:   ──► { role, deviceToken, dir:"toBrowser",         │
+│                     codec:"pcm16", seq, ts, sampleRate:16000,   │
+│                     audio:<base64 PCM16> }    (50 chunks/sec)   │
+│               ◄── { dir:"toAndroid", audio:<base64 PCM16> }    │
+│                     (browser mic → AudioTrack → GSM uplink)    │
+└─────────────────────────────────────────────────────────────────┘
+
+Server staleness: device marked offline if lastSeen > 30s ago.
+Heartbeat interval: 10s  →  safe margin of 3× before timeout.
+OkHttp WS ping:     20s  →  keeps TCP alive through NAT.
+```
+
 ### Service lifecycle
 
 The phone app **never auto-starts SERVICE or TEST mode** on launch. GsmService starts as a
@@ -83,7 +141,7 @@ stopped exclusively from the frontend via commands over `/ws/cmd`.
 
 State sync is dual-path:
 1. **Immediate**: Android sends `SERVICE_STARTED`/`SERVICE_STOPPED` events over `/ws/cmd` with a retry loop (10s deadline, 300ms poll) to handle WS not yet open
-2. **Periodic fallback**: Heartbeat every 15s carries `isServiceActive` and `isTestActive` via `stateProvider` lambda
+2. **Periodic fallback**: Heartbeat every 10s carries `isServiceActive` and `isTestActive` via `stateProvider` lambda
 
 Frontend polls `/api/gsm/status` every 2s — returns `isServiceActive` and `isTestActive` so the UI reflects real phone state.
 
@@ -147,7 +205,7 @@ GsmService              Foreground service; owns all state, dispatches commands.
 CommandWebSocketClient  Persistent WS to /ws/cmd. Stays connected always.
                         Receives CALL_STARTED/CALL_ENDED/START_SERVICE/STOP_SERVICE/
                           START_TEST/STOP_TEST/SET_GAIN commands.
-                        Sends CONNECTED heartbeats every 15s with isServiceActive +
+                        Sends CONNECTED heartbeats every 10s with isServiceActive +
                           isTestActive state (no Pusher cost).
                         Sends SERVICE_STARTED/STOPPED/CALL_CONNECTED/CALL_ENDED events.
                         Auto-reconnects on failure.
@@ -352,6 +410,31 @@ Frontend clicks STOP TEST:
 
 ---
 
+## Mic source toggle
+
+During a GSM call, the uplink source (what the remote party hears) can be switched between
+**browser mic** (default) and **phone mic** (hardware mic handles uplink natively).
+
+Toggling from the phone UI (button in header) or from frontend via `SET_MIC_SOURCE` command:
+
+```
+Toggle → browser mic (default):
+  RootUtils.enableIncallMusicInjection() — MultiMedia1 → voice TX
+  AudioTrack plays browser PCM → remote party
+
+Toggle → phone mic:
+  RootUtils.disableIncallMusicInjection() — MultiMedia1 route removed
+  Hardware mic TX active — phone mic → remote party directly
+  Browser audio chunks dropped (not played to AudioTrack)
+```
+
+The button shows current state: **green = MIC: BROWSER**, **red = MIC: PHONE**.
+Downlink (tinycap → browser) is unaffected by this toggle.
+
+Android → server event: `MIC_SOURCE_CHANGED { source: "browser" | "phone" }`
+
+---
+
 ## Gain control
 
 Mic gain and playback volume are controlled from the frontend — no phone UI sliders.
@@ -472,6 +555,50 @@ dropping `isServiceActive`/`isTestActive`. Fixed: spread existing entry first.
 attaches to the LAST parameter, which was `onCommand`, not `onAudioPacket`.
 Fixed: use named argument: `onAudioPacket = { packet -> handleAudioPacket(packet) }`.
 
+**DTMF not reaching remote party (fixed)**
+Three approaches failed before finding the correct one:
+1. `ToneGenerator(STREAM_DTMF)` — plays a local beep only, never signals the GSM network.
+   `sendDtmfCode()` does not exist on `TelephonyManager`.
+2. In-band PCM via `AudioTrack(USAGE_MEDIA)` → `MultiMedia1` uplink — AMR voice codec
+   (~12kbps, speech-optimised) mangles pure DTMF tones enough that carrier detectors reject them.
+3. Non-UI `InCallService` (with `IN_CALL_SERVICE_UI=false`) — MIUI binds it but then
+   interferes with the existing call audio routing, breaking audio capture entirely.
+Fixed: app is set as default dialer (via `RoleManager.ROLE_DIALER` — `ACTION_CHANGE_DEFAULT_DIALER`
+is deprecated on Android 10+ and silently does nothing on MIUI). As default dialer, the system
+binds our `GsmInCallService` as the UI InCallService, giving us the `Call` object.
+`Call.playDtmfTone(char)` sends DTMF out-of-band via the modem (RIL), bypassing the audio codec.
+The role prompt must use `RoleManager.createRequestRoleIntent()` launched via `ActivityResultLauncher`
+— launching it directly from `onCreate` without `window.decorView.post {}` causes the dialog to
+silently not appear on MIUI.
+Root cause of the symptom ("I press 2, nothing happens"): the frontend numpad component was never
+wired to call `sendDTMF(digit)`. Fix was purely in the frontend — Android side was correct once
+the default dialer role was granted.
+
+**INSTALL_FAILED_VERSION_DOWNGRADE**
+Use `adb install -r -d` (the `-d` flag allows version downgrade for debug builds).
+
+**INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match**
+APK was previously signed with a different debug keystore (e.g. after SDK reinstall or new machine).
+Fix: `adb uninstall com.nicitaacom.androidgsm` then `adb install <apk>`.
+
+**ADB: insufficient permissions for device**
+User not in `plugdev` group, or udev rules missing. Fix:
+```bash
+sudo usermod -aG plugdev $USER   # then log out + back in
+sudo tee /etc/udev/rules.d/51-android.rules <<'EOF'
+SUBSYSTEM=="usb", ATTR{idVendor}=="2717", MODE="0666", GROUP="plugdev"  # Xiaomi
+EOF
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+Then unplug and replug phone. On MIUI also enable: Settings → Developer Options →
+USB debugging (Security settings) + Install via USB.
+
+**Version string doesn't change between local builds**
+`versionName` is derived from `git rev-list --count origin/production` and the hash of
+`origin/production`. It only changes when commits are pushed to the remote. Local uncommitted
+changes build with the same version string — use APK filename date or `lastUpdateTime` from
+`adb shell dumpsys package com.nicitaacom.androidgsm` to verify a new build is installed.
+
 ---
 
 ## WebSocket message schemas
@@ -499,7 +626,7 @@ Android → server:
 
 Server → Android:
 ```json
-{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN", "data": { "number": "...", "simAccountId": "...", "micGain": 1.0 } }
+{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN|SET_MIC_SOURCE", "data": { "number": "...", "simAccountId": "...", "micGain": 1.0, "source": "browser|phone" } }
 ```
 
 ## Audio format
@@ -574,3 +701,19 @@ docs/realtime-audio/
 - `SERVICE_STARTED` event uses retry loop (10s, 300ms poll) — do not remove it
 - `stateProvider` lambda in `CommandWebSocketClient` carries live `isServiceActive`/`isTestActive`
 - Trailing lambda in Kotlin attaches to the LAST parameter — always use named args for non-last lambdas
+- Mic source toggle: `AudioWebSocketHandler.useBrowserMicUplink` (companion `@Volatile`) controls uplink source.
+  `true` (default) = browser mic → AudioTrack → MultiMedia1 → voice TX (injection active).
+  `false` = phone mic handles uplink natively; injection disabled; browser audio chunks dropped in `playAudioChunk`.
+  Hot-swap during active call: `RootUtils.enableIncallMusicInjection()` / `disableIncallMusicInjection()`.
+  Triggered by phone UI button (`ACTION_SET_MIC_SOURCE`) or frontend `SET_MIC_SOURCE` command over `/ws/cmd`.
+- DTMF is sent via `Call.playDtmfTone()` — requires app to be default dialer (GsmInCallService bound).
+  Do NOT use `ToneGenerator`, in-band PCM via AudioTrack, or non-UI InCallService — all confirmed broken.
+  `TelephonyManager.sendDtmfCode()` does not exist. Non-UI InCallService on MIUI breaks call audio.
+- Default dialer role must be requested via `RoleManager.createRequestRoleIntent(ROLE_DIALER)` on API 29+.
+  `ACTION_CHANGE_DEFAULT_DIALER` is deprecated and silently does nothing on MIUI Android 10.
+  Launch the role intent via `ActivityResultLauncher`, deferred with `window.decorView.post {}` —
+  calling it directly in `onCreate` causes the dialog to silently not appear on MIUI.
+- `adb install` flags: use `-r -d` for debug rebuilds (allows version downgrade).
+  If signatures mismatch: `adb uninstall` first.
+- Version string is pinned to `origin/production` git hash — does not change on local rebuilds.
+  Use `adb shell dumpsys package com.nicitaacom.androidgsm | grep lastUpdateTime` to verify install.

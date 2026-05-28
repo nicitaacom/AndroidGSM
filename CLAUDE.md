@@ -25,7 +25,7 @@ Phone (Android, Kotlin)
 ## Key files
 
 - `app/src/main/java/com/nicitaacom/androidgsm/GsmService.kt` — main service, handles commands, audio
-- `app/src/main/java/com/nicitaacom/androidgsm/CommandWebSocketClient.kt` — persistent WS, heartbeat 8s
+- `app/src/main/java/com/nicitaacom/androidgsm/CommandWebSocketClient.kt` — persistent WS, heartbeat 10s
 - `app/src/main/java/com/nicitaacom/androidgsm/MainActivity.kt` — UI, status display
 - `docs/realtime-audio/server.ts` — VPS backend (context-only copy; real file lives in gsm-outreach-tool repo)
 - `docs/realtime-audio/useInitGSM.ts` — frontend hook (context-only copy)
@@ -37,7 +37,7 @@ Phone (Android, Kotlin)
 
 | Thing | Value |
 |---|---|
-| Android heartbeat | 8s |
+| Android heartbeat | 10s |
 | Server staleness timeout | 30s |
 | Frontend status poll | 2s |
 
