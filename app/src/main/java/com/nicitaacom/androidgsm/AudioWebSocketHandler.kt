@@ -31,6 +31,7 @@ import java.nio.ByteOrder
 class AudioWebSocketHandler(
     private val context: Context,
     private val config: Config,
+    private val log: GsmLogger = { MainActivity.log(it) },
     private val onAudioReceived: (ShortArray) -> Unit
 ) {
     private var audioRecord: AudioRecord? = null
@@ -72,7 +73,7 @@ class AudioWebSocketHandler(
     }
 
     fun connect(wsUrl: String, bearerToken: String, deviceToken: String) {
-        MainActivity.log("🔌 WebSocket Audio: Connecting to $wsUrl")
+        log("🔌 WebSocket Audio: Connecting to $wsUrl")
         seqRx = -1L
         wsConnection = WebSocketAudioClient(wsUrl, bearerToken, deviceToken, onAudioPacket = { packet -> handleAudioPacket(packet) })
     }
@@ -124,39 +125,39 @@ class AudioWebSocketHandler(
             // Run tinycap as root — reads directly from ALSA MultiMedia1 kernel device,
             // bypassing all Java permission checks. VOC_REC_DL mixer must already be open.
             scope.launch { captureViaTinycap() }
-            MainActivity.log("✅ Capture started (tinycap/root) — GSM call downlink")
+            log("✅ Capture started (tinycap/root) — GSM call downlink")
             return
         }
 
         // TEST mode: use standard AudioRecord with mic
         if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            MainActivity.log("❌ ERROR: RECORD_AUDIO permission not granted")
+            log("❌ ERROR: RECORD_AUDIO permission not granted")
             isRecording = false
             return
         }
         try {
-            MainActivity.log("🎤 WebSocket: Starting mic capture...")
+            log("🎤 WebSocket: Starting mic capture...")
             audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
             audioManager.isSpeakerphoneOn = false
 
             val bufferSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT) * BUFFER_SIZE_FACTOR
-            if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid buffer size"); isRecording = false; return }
+            if (bufferSize <= 0) { log("❌ ERROR: Invalid buffer size"); isRecording = false; return }
 
             audioRecord = buildMicAudioRecord(bufferSize)
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                MainActivity.log("❌ ERROR: AudioRecord not initialized")
+                log("❌ ERROR: AudioRecord not initialized")
                 isRecording = false
                 return
             }
 
             audioRecord?.startRecording()
             scope.launch { captureAndStreamAudio(bufferSize) }
-            MainActivity.log("✅ Capture started (WS) - source: ${resolveCaptureSourceLabel()}")
+            log("✅ Capture started (WS) - source: ${resolveCaptureSourceLabel()}")
         } catch (exception: SecurityException) {
-            MainActivity.log("❌ ERROR: Permission rejected: ${exception.message}")
+            log("❌ ERROR: Permission rejected: ${exception.message}")
             isRecording = false
         } catch (exception: Exception) {
-            MainActivity.log("❌ ERROR starting capture: ${exception.message}")
+            log("❌ ERROR starting capture: ${exception.message}")
             isRecording = false
         }
     }
@@ -173,7 +174,7 @@ class AudioWebSocketHandler(
                 audioManager.mode = AudioManager.MODE_NORMAL
                 audioManager.isSpeakerphoneOn = false
             }
-            MainActivity.log("🎤 Capture stopped")
+            log("🎤 Capture stopped")
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error stopping capture", exception)
         }
@@ -203,7 +204,7 @@ class AudioWebSocketHandler(
                 if (n < 0) break
                 headerRead += n
             }
-            MainActivity.log("✅ tinycap: WAV header consumed ($headerRead bytes), streaming PCM...")
+            log("✅ tinycap: WAV header consumed ($headerRead bytes), streaming PCM...")
 
             val buffer = ByteArray(chunkBytes)
             var seq = seqTx
@@ -230,9 +231,9 @@ class AudioWebSocketHandler(
                 chunkCount++
             }
             seqTx = seq
-            MainActivity.log("✅ tinycap capture ended: $chunkCount chunks sent")
+            log("✅ tinycap capture ended: $chunkCount chunks sent")
         } catch (e: Exception) {
-            MainActivity.log("❌ tinycap capture error: ${e.message}")
+            log("❌ tinycap capture error: ${e.message}")
         } finally {
             tinycapProcess?.destroy()
             tinycapProcess = null
@@ -255,17 +256,17 @@ class AudioWebSocketHandler(
             try {
                 val record = AudioRecord(source, SAMPLE_RATE, CHANNEL_IN, AUDIO_FORMAT, bufferSize)
                 if (record.state == AudioRecord.STATE_INITIALIZED) {
-                    MainActivity.log("✅ Capture source: $source (mic fallback)")
+                    log("✅ Capture source: $source (mic fallback)")
                     return record
                 }
                 record.release()
             } catch (exception: SecurityException) {
-                MainActivity.log("❌ Source $source permission denied: ${exception.message}")
+                log("❌ Source $source permission denied: ${exception.message}")
             } catch (exception: Exception) {
                 Log.w(TAG, "Failed source $source: ${exception.message}")
             }
         }
-        MainActivity.log("❌ All mic capture sources failed")
+        log("❌ All mic capture sources failed")
         return null
     }
 
@@ -348,7 +349,7 @@ class AudioWebSocketHandler(
     fun startAudioPlayback() {
         if (isPlaying) return
         try {
-            MainActivity.log("🔊 WebSocket: Starting playback...")
+            log("🔊 WebSocket: Starting playback...")
 
             if (!isCallActive) {
                 // TEST mode: earpiece prevents mic→speaker→mic feedback loop; AEC handles echo
@@ -360,7 +361,7 @@ class AudioWebSocketHandler(
             val playRate = if (isCallActive) PLAYBACK_SAMPLE_RATE else SAMPLE_RATE
             // 8kHz call mode needs a deeper buffer (8x min) to absorb WS jitter without underrun.
             val bufferSize = AudioTrack.getMinBufferSize(playRate, CHANNEL_OUT, AUDIO_FORMAT) * (if (isCallActive) BUFFER_SIZE_FACTOR * 2 else BUFFER_SIZE_FACTOR)
-            if (bufferSize <= 0) { MainActivity.log("❌ ERROR: Invalid playback buffer size"); return }
+            if (bufferSize <= 0) { log("❌ ERROR: Invalid playback buffer size"); return }
 
             // SERVICE mode: USAGE_MEDIA routes through MultiMedia1 which tinymix bridges
             // into the GSM voice uplink (Incall_Music Audio Mixer MultiMedia1).
@@ -380,14 +381,14 @@ class AudioWebSocketHandler(
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
 
-            if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) { MainActivity.log("❌ ERROR: AudioTrack not initialized"); return }
+            if (audioTrack?.state != AudioTrack.STATE_INITIALIZED) { log("❌ ERROR: AudioTrack not initialized"); return }
 
             isPlaying = true
             audioTrack?.play()
             startPlaybackConsumer()
-            MainActivity.log("✅ Playback started - earpiece/AEC mode")
+            log("✅ Playback started - earpiece/AEC mode")
         } catch (exception: Exception) {
-            MainActivity.log("❌ ERROR starting playback: ${exception.message}")
+            log("❌ ERROR starting playback: ${exception.message}")
         }
     }
 
@@ -456,7 +457,7 @@ class AudioWebSocketHandler(
             track?.release()
             scope.cancel()
             scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-            MainActivity.log("🔊 Playback stopped")
+            log("🔊 Playback stopped")
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error stopping playback", exception)
         }

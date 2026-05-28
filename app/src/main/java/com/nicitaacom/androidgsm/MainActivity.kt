@@ -54,9 +54,7 @@ class MainActivity : AppCompatActivity() {
     private val logBuffer = StringBuilder()
     private val logLock = Any()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-    private var originalBrightness = -1f
     private var originalScreenTimeout: Long = -1
-    private var hasCallPermissions = false
     private var logUpdatePending = false
 
     private val dialerRoleLauncher: ActivityResultLauncher<Intent> =
@@ -174,8 +172,6 @@ class MainActivity : AppCompatActivity() {
             addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
         }.start()
 
-        checkServiceStatus()
-
         if (hasPhoneStatePermission()) {
             try {
                 loadSimSelection()
@@ -245,23 +241,9 @@ class MainActivity : AppCompatActivity() {
             try { loadSimSelection() } catch (_: Exception) {}
         }
         updateStatus()
-        // Re-check actual running state - handles crash/restart scenario
-        checkActualServiceState()
+        updateStatus()
         // Backup trigger — guarded by defaultDialerPromptShown, won't re-show after grant/deny
         window.decorView.post { promptDefaultDialerIfNeeded() }
-    }
-
-    private fun checkActualServiceState() {
-        // getRunningServices() is deprecated on Android 8+ and always returns empty for
-        // other apps — do not use it to infer service state. State is tracked via
-        // notifyServiceActive / notifyTestActive called from GsmService directly.
-        updateStatus()
-    }
-
-
-
-    private fun checkServiceStatus() {
-        updateStatus()
     }
 
     private fun updateStatus() {
@@ -283,34 +265,6 @@ class MainActivity : AppCompatActivity() {
         }
         statusTextView.text = text
         statusTextView.setTextColor(ContextCompat.getColor(this, color))
-    }
-
-    private fun requestPermissionsAndStart(allowWithoutSim: Boolean = false) {
-        pendingAllowStartWithoutSim = allowWithoutSim
-        val permissions = mutableListOf<String>().apply {
-            if (!allowWithoutSim) {
-                add(Manifest.permission.CALL_PHONE)
-                add(Manifest.permission.READ_PHONE_NUMBERS)
-                add(Manifest.permission.READ_PHONE_STATE)
-            }
-            add(Manifest.permission.RECORD_AUDIO)
-            add(Manifest.permission.READ_PHONE_STATE)
-            add(Manifest.permission.ANSWER_PHONE_CALLS)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-        val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isNotEmpty()) {
-            addLog("Requesting ${missing.size} permissions...")
-            ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
-        } else {
-            hasRequiredPermissions = true
-            startService(allowWithoutSim)
-            dispatchServiceAudioInputRequest()
-            pendingAllowStartWithoutSim = false
-        }
     }
 
     private fun requestBatteryOptimizationExemption() {
@@ -351,16 +305,6 @@ class MainActivity : AppCompatActivity() {
             isTestAudioActive = false
             updateStatus()
             addLog("Service stopped successfully!")
-
-            if (originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
-                try {
-                    Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
-                    addLog("Restored original screen timeout")
-                } catch (e: Exception) {
-                    addLog("Error restoring screen timeout: ${e.message}")
-                }
-                originalScreenTimeout = -1L
-            }
         } catch (error: Exception) {
             addLog("ERROR stopping service: ${error.message}")
         }
@@ -368,7 +312,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopServiceAudioInput() {
         val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
+            action = GsmService.ACTION_STOP_SERVICE
         }
         startGsmServiceSafely(intent)
         isServiceAudioActive = false
@@ -386,7 +330,6 @@ class MainActivity : AppCompatActivity() {
             if (allGranted) {
                 addLog("All permissions granted!")
                 hasRequiredPermissions = true
-                hasCallPermissions = true
                 requestBatteryOptimizationExemption()
                 try { loadSimSelection() } catch (error: Exception) { addLog("SIM load error: ${error.message}") }
                 startService(pendingAllowStartWithoutSim)
@@ -406,7 +349,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun dispatchServiceAudioInputRequest() {
         val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
+            action = GsmService.ACTION_START_SERVICE
         }
         if (!startGsmServiceSafely(intent)) return
         isServiceAudioActive = true
@@ -417,7 +360,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopTestAudio() {
         val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
+            action = GsmService.ACTION_STOP_TEST
         }
         startGsmServiceSafely(intent)
         isTestAudioActive = false
@@ -504,7 +447,6 @@ class MainActivity : AppCompatActivity() {
         )
         val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         hasRequiredPermissions = missing.isEmpty()
-        hasCallPermissions = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         if (missing.isNotEmpty()) {
             addLog("Requesting permissions...")
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
@@ -602,18 +544,7 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterNetworkCallback()
-        if (instance?.get() == this) {
-            instance = null
-        }
-        if (originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
-            try {
-                Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
-                addLog("Restored timeout on destroy")
-            } catch (e: Exception) {
-                addLog("Error restoring timeout on destroy: ${e.message}")
-            }
-            originalScreenTimeout = -1L
-        }
+        if (instance?.get() == this) instance = null
     }
 
     fun updateMicSourceButton(useBrowser: Boolean) {
