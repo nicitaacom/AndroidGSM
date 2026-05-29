@@ -393,6 +393,120 @@ and forwarded to Android, which passes the correct `PhoneAccountHandle` to `plac
 
 ---
 
+## placeCall() "Mobile network not available" — iterations
+
+All failures share the same root cause: `TelephonyConnectionService.getPhoneForAccount` returns
+null → Telecom immediately disconnects the call with `DisconnectCause(ERROR, "Phone is null, OUT_OF_SERVICE")`.
+
+**Device context:** Xiaomi Redmi Note 7 (sdm660, MIUI Android 10), dual-SIM slot.
+Slot 0: ABSENT (subId=1, iccId=...674563). Slot 1: LOADED/active (subId=2, iccId=...622364).
+`gsm.sim.state = ABSENT,LOADED`. Default subId resolves to -1 (no default set).
+
+**Iteration 1 — old simState check**
+`telephonyManager.simState` checks the default subscription (slot 0 = ABSENT) → call rejected
+before `placeCall()` is even called. Fixed: replaced with `callCapablePhoneAccounts.isNotEmpty()`.
+
+**Iteration 2 — GsmConnectionService intercepting placeCall()**
+`GsmConnectionService` was registered with `BIND_TELECOM_CONNECTION_SERVICE` intent filter.
+When our app is the default dialer, Telecom routed `placeCall()` through our `ConnectionService`
+first instead of `TelephonyConnectionService`. Our `GsmConnection.setDialing()` returned a dead
+connection with no real modem. Fixed: removed `GsmConnectionService` and `GsmConnection` entirely
+from the manifest — they are not needed for the DIALER role. Only `GsmInCallService` is needed.
+
+**Iteration 3 — no PhoneAccountHandle → default subId=-1**
+Without `EXTRA_PHONE_ACCOUNT_HANDLE`, Telecom picks the default voice subscription (subId=-1 on
+this device) → `getPhoneForAccount` → `chosenPhone=null`. Fixed: always pass an explicit handle.
+
+**Iteration 4 — handle built from callCapablePhoneAccounts has id=ICCID, not subId**
+`callCapablePhoneAccounts.firstOrNull()` returns a handle with `id=89490240001956622364` (ICCID).
+`TelephonyConnectionService.getPhoneForAccount` on this MIUI build resolves Phone objects by
+subId string, not ICCID → still `chosenPhone=null`. Fix attempt: build handle manually with
+`id=activeSubId.toString()` using `TelephonyConnectionService` component.
+
+**Iteration 5 — activeSubscriptionInfoList returned wrong SIM (current)**
+`activeSubscriptionInfoList.firstOrNull { it.simSlotIndex >= 0 }` returned the absent SIM
+(subId=1, simSlotIndex from DB = -1 but list returned it with slot ≥ 0 on this MIUI build).
+Result: `handle.id="1"` → wrong SIM → `chosenPhone=null`. Fix: `maxByOrNull { it.simSlotIndex }`
+to pick the SIM in the highest slot index (slot 1 = active).
+
+**Iteration 6 — no PhoneAccountHandle at all (WORKING)**
+Passing ANY handle causes `TelephonyConnectionService.getPhoneForAccount` to fail on this MIUI
+build regardless of what id is used. Solution: pass empty `Bundle()` with no handle — MIUI
+resolves the SIM itself. Call connects. ✅
+
+**Dual-SIM caveat:** the `simAccountId`/`simComponentName` from the frontend are now ignored
+when no handle is explicitly provided. Dual-SIM SIM selection from the frontend is broken until
+a working way to pass a handle for a specific SIM is found on this MIUI build.
+
+**Current status: call connects. Dual-SIM selection disabled.**
+
+---
+
+## Browser mic uplink — why remote party hears nothing (confirmed dead end)
+
+tinyplay writing to pcmC0D19p is the VoiceMMode2 **RX** playback device — it plays audio
+to the phone's earpiece/speaker, NOT into the GSM TX uplink. The `VoiceMMode2_Tx Mixer`
+has no entry for any MM/VOIP/pcmC0D19 source — only physical mic interfaces (INT3_MI2S_TX etc.).
+
+Full mixer dump during active call confirms: all `VoiceMMode2_Tx Mixer` entries are Off.
+The only active route is `INT0_MI2S_RX_Voice Mixer VoiceMMode2 On Off` (earpiece downlink).
+
+The ONLY path into VoiceMMode2 TX from software is `Incall_Music Audio Mixer MultiMedia*/MultiMedia5`
+slot 1 (VoiceMMode2) — which the MIUI CAF kernel silently ignores on ELEM_WRITE (confirmed by
+brute-force ioctl scan). Slot 0 (VoiceMMode1) writes succeed but the active call uses VoiceMMode2.
+
+**Known dead ends for browser mic → remote party TX:**
+1. `AudioTrack(USAGE_MEDIA)` + `Incall_Music Audio Mixer` slot 0 → routes to VoiceMMode1 (wrong session)
+2. `Incall_Music Audio Mixer` slot 1 → kernel ignores ELEM_WRITE silently
+3. tinyplay to pcmC0D19p → RX playback device, not TX; remote party hears nothing
+4. `VoiceMMode2_Tx Mixer` has no MM/software source — only physical mics
+
+**Iteration 7 — Incall_Music_2 Audio Mixer + tinyplay to MultiMedia1/MultiMedia5/VoiceMMode1/VoIP devices**
+Set `Incall_Music_2 Audio Mixer MultiMedia1` slot 0 = On (succeeds, kernel does not block it).
+Played white noise and 1kHz tone via tinyplay to pcmC0D0p (MultiMedia1), pcmC0D13p (MultiMedia5),
+pcmC0D2p (VoiceMMode1), pcmC0D3p (VoIP), pcmC0D19p (VoiceMMode2). Remote party heard silence on
+all devices. Full mixer dump during active call: `VoiceMMode2_Tx Mixer` has zero active entries.
+`Incall_Music` controls are set but MultiMedia1 PCM is closed — no audio routed into TX.
+Conclusion: `Incall_Music` DSP path does not connect to VoiceMMode2 TX on this MIUI CAF build
+regardless of which PCM device or mixer control is used.
+
+**Iteration 8 — confirmed the slot-1 block is systemic (all 2-slot voice TX controls)**
+Tested `VoiceMMode2_Tx Mixer INT_BT_SCO_TX_MMode2` (numid 2014):
+- slot 0 write → `On` (kernel accepts)
+- slot 1 write → stays `Off` (kernel silently drops, same as Incall_Music)
+
+This proves the slot-1 (VoiceMMode2) block is NOT specific to Incall_Music — it affects EVERY
+2-element BOOL voice-TX kcontrol. The active call uses VoiceMMode2 = slot 1, so no userspace
+write can ever route into it. Single root cause in the kernel ASoC platform driver.
+
+**CONFIRMED DEAD END (userspace): No software TX injection path exists on this device
+(sdm660, MIUI Android 10).** Every 2-slot voice TX control has its slot-1 (VoiceMMode2) write
+silently dropped by the kernel. The only working uplink is MIC: PHONE (hardware mic via
+`INT3_MI2S_TX_MMode2`). Website mic → remote party is not achievable with userspace tools.
+
+### Kernel patch route (the real fix)
+
+The slot-1 ELEM_WRITE is dropped in the MSM ASoC routing driver
+(`sound/soc/msm/msm-pcm-routing-v2.c`, function `msm_routing_put_audio_mixer` /
+`msm_pcm_routing_process_voice` or the matrix update path). The kcontrol write returns success
+but the ADM (Audio Device Manager) matrix connection for session index 1 (VoiceMMode2) is never
+committed to the ADSP.
+
+To fix permanently:
+1. Obtain kernel source for this exact build (Xiaomi lavender / sdm660, kernel 4.x CAF).
+2. In `msm-pcm-routing-v2.c`, find where the 2-slot voice mixer writes iterate session indices
+   and locate the guard that skips/no-ops index 1 (VoiceMMode2) — likely a session-state or
+   `is_custom_stereo`/`voc_session` validity check that fails for the second mode.
+3. Force the `adm_matrix_map` / `voice_set_route` call for the VoiceMMode2 session.
+4. Build, package as a custom boot image (needs unlocked bootloader), flash.
+
+Once slot 1 commits, the existing `RootUtils.enableIncallMusicInjection()` +
+`AudioTrack(USAGE_MEDIA) → MultiMedia1` path works as originally designed — no app changes needed.
+
+**Status: userspace exhausted. Uplink requires a kernel patch + custom boot image.**
+
+---
+
 ## Known issues & decisions
 
 **REMOTE_SUBMIX silence**
@@ -511,6 +625,109 @@ Channels   : Mono
 Transport  : Base64 inside WebSocket JSON frames
 Chunk size : 320 samples (20ms)
 ```
+
+---
+
+## Iterations to use website's mic (browser mic → remote party uplink)
+
+This is the hardest unsolved problem. Summary of every approach tried.
+
+### What we know for certain (from live `tinymix` dump during an active call)
+
+```
+1689  BOOL 2  Incall_Music Audio Mixer MultiMedia1   On  Off   ← slot 0 = VoiceMMode1 (ON), slot 1 = VoiceMMode2 (OFF)
+1691  BOOL 2  Incall_Music Audio Mixer MultiMedia5   On  Off   ← same
+1877  BOOL 2  INT0_MI2S_RX_Voice Mixer VoiceMMode2   Off On    ← this device's call is on VoiceMMode2 (slot 1)
+2021  BOOL 2  VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2  On Off ← TX mic path is INT3_MI2S_TX
+```
+
+**The call always uses VoiceMMode2 (slot 1) on this device.**
+`Incall_Music Audio Mixer` slot 0 routes to VoiceMMode1 — which is **not the active call**.
+Slot 1 routes to VoiceMMode2 — which IS the active call. Slot 1 is what we need to set ON.
+
+### Why tinymix can't set slot 1
+
+`tinymix` calls `mixer_ctl_get_array()` before writing. MIUI's tinyalsa build has a broken
+`mixer_ctl_get_array` that fails on 2-slot BOOL controls — returns error, leaves slot 1 Off.
+Confirmed: `tinymix 1689 1 1`, `tinymix 1689 On On`, `tinymix 'Incall_Music...' 1 1` — all fail.
+
+### The only real fix: set_mixer_ctl binary
+
+Must use `SNDRV_CTL_IOCTL_ELEM_WRITE` directly via ioctl — reads current value, sets target slot,
+writes back. Bypasses `mixer_ctl_get_array` entirely. Source: `native/set_mixer_ctl/set_mixer_ctl.c`.
+
+**Current status: binary NOT built.** `nativeBinDir` is empty → `RootUtils.setMixerElem()` falls
+back to tinymix slot 0 only → slot 1 (VoiceMMode2) never set → injection goes to wrong voice session
+→ remote party hears nothing from browser mic.
+
+To fix permanently:
+```bash
+NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh
+# then rebuild APK
+```
+
+### Approaches tried and failed
+
+1. **`AudioTrack(USAGE_MEDIA)` + tinymix slot 0** — routes to VoiceMMode1, call is on VoiceMMode2.
+   Injection is active but goes to the wrong voice session. Remote party hears nothing.
+
+2. **`VoiceMMode1_Tx Mute` / `VoiceMMode2_Tx Mute` via tinymix** — these control names don't exist
+   on this device. `Voice Tx Mute` and `Voice Tx Device Mute` exist but are INT type, not BOOL.
+   Hardware mic muting was failing silently — phone mic may still bleed.
+
+3. **tinymix with multiple value syntax** — `tinymix 1689 1 1`, `tinymix 1689 On On` — all rejected.
+   The broken `mixer_ctl_get_array` is called before any write attempt regardless of syntax.
+
+4. **Objective-C / low-level binary patching** — explored writing raw ARM64 shellcode to call ioctl
+   directly. Rejected: no compiler available on device, no NDK installed at the time, no busybox.
+
+5. **set_mixer_ctl ioctl binary built and tested** — slot 0 writes work. Slot 1 writes return
+   OK but value never changes in tinymix. Confirmed: `ELEM_WRITE` for slot 1 is silently ignored
+   by this kernel on ALL 2-slot BOOL controls (`Incall_Music`, `VOC_REC_DL`, `VoiceMMode2_Tx Mixer`).
+   This is NOT limited to active-call state — tested outside a call too. The kernel simply never
+   applies slot 1 writes for these controls on this MIUI CAF build.
+
+6. **Direct PCM write to pcmC0D19p (VoiceMMode2 TX) — uplink working** ✓
+   Device 19 = VoiceMMode2 (playback+capture). Format: S16_LE, mono, 8kHz.
+   `exec tinyplay /proc/self/fd/0 -D 0 -d 19` writes browser mic PCM to the call TX uplink.
+   Pipe kept alive with `exec` (replaces su shell so Java app's outputStream stays connected).
+   Hardware mic muted via `VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2` slot 0 = 0.
+   CALL_CONNECTED sent after tinyplay starts → browser receives it → browser starts mic capture.
+   **Status: uplink pipeline works end-to-end. Remote party hears silence instead of browser mic
+   because browser mic audio is not arriving at Android over /ws/audio.**
+
+7. **Downlink (remote party → browser) still broken** — tinycap on device 0 captures
+   MultiMedia1, which requires VOC_REC_DL slot 1 (VoiceMMode2) to be set. Slot 1 is always Off
+   (kernel ignores writes). tinycap runs but captures silence (RMS ~0.000).
+   pcmC0D19c (VoiceMMode2 capture) is exclusively locked by the modem — can't open from userspace.
+   Pre-priming VOC_REC_DL before dialing also doesn't work — slot 1 never sticks regardless.
+
+8. **Browser mic audio not arriving at Android** — CALL_CONNECTED is sent, browser receives
+   `gsm:call-connected` via Pusher, sets `isCallActive=true`. `startMicCapture()` fires when
+   the first downlink audio packet arrives in `ws.onmessage`. But downlink is silence (see #7),
+   so `startMicCapture()` never triggers. Chicken-and-egg: browser waits for downlink audio to
+   start mic, but downlink is broken. Fix: `onCallConnected` in useInitGSM.ts must call
+   `startMicCapture()` directly instead of waiting for the first audio packet.
+
+### What needs to happen to fully fix browser mic uplink
+
+1. **Frontend fix** (useInitGSM.ts): `onCallConnected` must call `startMicCapture()` directly —
+   not wait for first downlink audio packet. The browser currently only auto-starts mic when
+   it receives a WS audio packet with `isCallActiveRef.current=true`.
+
+2. **Downlink fix** — tinycap on device 0 captures silence because VOC_REC_DL slot 1 is Off.
+   The kernel won't let us set slot 1. The only remaining option not yet tried:
+   reading directly from the ALSA PCM device that VoiceMMode2 RX writes to, without going
+   through the MultiMedia1 mixer route. Need to find which PCM device (not pcmC0D19c which is
+   capture-exclusive) carries the VoiceMMode2 downlink in a readable way.
+
+### Correct TX mute control names (confirmed from live dump)
+
+```
+VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2  (numid 2022) BOOL slot 0 — hardware mic TX
+```
+Setting slot 0 = 0 disconnects phone mic from VoiceMMode2 TX uplink.
+Restore on call end: set slot 0 = 1.
 
 ---
 

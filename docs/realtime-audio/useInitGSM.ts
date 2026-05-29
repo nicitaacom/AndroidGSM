@@ -483,9 +483,29 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       isCallActiveRef.current = true
       setIsCalling(false)
       setIsConnected(true)
-      console.info("[gsm/pusher] call-connected (answered)", { deviceToken: tok })
-      // Tell Android to start tinycap + pcm_play now that remote has answered
-      sendCommand("START_AUDIO")
+      console.info("[gsm/call-connected] fired", { deviceToken: tok })
+      console.info("[gsm/call-connected] wsState", wsRef.current?.readyState, "mediaStream", !!mediaStreamRef.current)
+      const ctx = audioContextRef.current
+      if (ctx?.state === "suspended") ctx.resume().catch(() => {})
+      ensurePlayoutLoop()
+      // Start mic immediately — retry until WS is open (same pattern as onTestAudioStarted).
+      // Do NOT wait for first downlink audio packet — downlink may be silent if VOC_REC_DL
+      // slot 1 is not set, so the ws.onmessage auto-start path never fires.
+      const tryStartMic = (attemptsLeft: number) => {
+        if (attemptsLeft <= 0) {
+          console.error("[gsm/call-connected] WS never opened — mic aborted")
+          return
+        }
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          startMicCapture()
+            .then(() => console.info("[gsm/call-connected] startMicCapture succeeded"))
+            .catch(err => console.error("[gsm/call-connected] startMicCapture FAILED", err))
+          return
+        }
+        console.warn(`[gsm/call-connected] WS not open, retrying... (${attemptsLeft} left)`)
+        setTimeout(() => tryStartMic(attemptsLeft - 1), 200)
+      }
+      tryStartMic(15) // 15 × 200ms = 3s max wait
     }
 
     // Call ended or rejected

@@ -128,42 +128,35 @@ object RootUtils {
     }
 
     // Route MultiMedia1 AudioTrack playback into the GSM voice uplink (TX path).
-    // tinymix on this device cannot set slot 1 (VoiceMMode2) of these BOOL controls
-    // due to a broken mixer_ctl_get_array. We use set_mixer_ctl (native ioctl binary)
-    // to write each element index individually via SNDRV_CTL_IOCTL_ELEM_WRITE.
-    fun enableIncallMusicInjection(): Boolean {
-        var any = false
-        for (mm in listOf("MultiMedia1", "MultiMedia2", "MultiMedia5")) {
-            for (slot in 0..1) {
-                if (setMixerElem("Incall_Music Audio Mixer $mm", slot, 1)) any = true
-                setMixerElem("Incall_Music_2 Audio Mixer $mm", slot, 1)
-            }
-        }
-        return any
-    }
-
-    fun disableIncallMusicInjection() {
-        for (mm in listOf("MultiMedia1", "MultiMedia2", "MultiMedia5")) {
-            for (slot in 0..1) {
-                setMixerElem("Incall_Music Audio Mixer $mm", slot, 0)
-                setMixerElem("Incall_Music_2 Audio Mixer $mm", slot, 0)
-            }
-        }
-        Log.d(TAG, "✅ Incall_Music injection disabled")
-    }
-
-    // Route AFE-PROXY RX (pcmC0D6p) into VoiceMMode2 TX uplink.
-    // This is the confirmed working injection path on sdm660/MIUI — slot 0 sticks
-    // unlike Incall_Music slot 1 (VoiceMMode2) which the HAL immediately resets.
-    fun enableAfeProxyInjection(): Boolean {
-        val ok = setMixerElem("VoiceMMode2_Tx Mixer AFE_PCM_TX_MMode2", 0, 1)
-        Log.d(TAG, if (ok) "✅ AFE-PROXY injection enabled" else "❌ AFE-PROXY injection failed")
+    // 'Incall_Music Audio Mixer MultiMedia1/5' are 2-slot BOOL controls. Same MIUI tinymix
+    // bug applies — must use set_mixer_ctl for each slot separately.
+    // Mute hardware mic from VoiceMMode2 TX so browser mic is the only uplink source.
+    // The control name was confirmed live via tinymix dump during an active call:
+    //   2021 BOOL 2 VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2  On Off
+    // Slot 0 = the active mic route. Setting it Off disconnects the phone mic from the uplink.
+    // Call this AFTER tinyplay is already writing to pcmC0D19p, otherwise remote hears silence.
+    fun muteMicTxForBrowserUplink(): Boolean {
+        val ok = setMixerElem("VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2", 0, 0)
+        Log.d(TAG, if (ok) "✅ Hardware mic TX muted (browser mic uplink active)" else "❌ Hardware mic TX mute failed")
         return ok
     }
 
-    fun disableAfeProxyInjection() {
-        setMixerElem("VoiceMMode2_Tx Mixer AFE_PCM_TX_MMode2", 0, 0)
-        Log.d(TAG, "✅ AFE-PROXY injection disabled")
+    fun unmuteMicTxAfterBrowserUplink() {
+        setMixerElem("VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2", 0, 1)
+        Log.d(TAG, "✅ Hardware mic TX restored")
+    }
+
+    fun enableIncallMusicInjection(): Boolean {
+        // NOTE: Incall_Music mixer injection (slot 1 / VoiceMMode2) is blocked by the MIUI CAF kernel.
+        // Browser mic uplink now uses tinyplay → pcmC0D19p directly. This function is kept
+        // as a no-op for compatibility but does nothing useful on this device.
+        Log.d(TAG, "enableIncallMusicInjection: skipped — using tinyplay pcmC0D19p path instead")
+        return true
+    }
+
+    fun disableIncallMusicInjection() {
+        // No-op — see enableIncallMusicInjection comment above.
+        Log.d(TAG, "disableIncallMusicInjection: skipped — using tinyplay pcmC0D19p path instead")
     }
 
     // Mute earpiece + speaker output controls so call audio is inaudible on the phone.

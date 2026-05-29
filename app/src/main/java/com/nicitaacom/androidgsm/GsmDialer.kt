@@ -114,9 +114,12 @@ class GsmDialer(private val context: Context) {
                 return false
             }
 
-            val simState = telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
-            if (simState != TelephonyManager.SIM_STATE_READY) {
-                MainActivity.log("ERROR: SIM not ready (state: $simState)")
+            // Check that at least one SIM slot is READY — simState without a subscriptionId
+            // returns the default slot which may be ABSENT on dual-SIM phones where only slot 1 is active.
+            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            val hasReadySim = telecomManager.callCapablePhoneAccounts.isNotEmpty()
+            if (!hasReadySim) {
+                log("ERROR: No call-capable SIM available")
                 return false
             }
 
@@ -133,27 +136,19 @@ class GsmDialer(private val context: Context) {
                 MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
             }
 
-            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             val uri = Uri.parse("tel:$number")
 
-            val extras = Bundle()
-            // If a specific SIM was requested, pass its PhoneAccountHandle so Telecom routes
-            // through that SIM's modem instead of showing a system chooser or defaulting to SIM 1.
-            if (!simAccountId.isNullOrBlank() && !simComponentName.isNullOrBlank()) {
-                try {
-                    val componentName = android.content.ComponentName.unflattenFromString(simComponentName)
-                    if (componentName != null) {
-                        val handle = android.telecom.PhoneAccountHandle(componentName, simAccountId)
-                        extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
-                        MainActivity.log("GsmDialer: routing via PhoneAccount id=$simAccountId component=$simComponentName")
-                    }
-                } catch (e: Exception) {
-                    MainActivity.log("WARNING: Could not build PhoneAccountHandle: ${e.message}")
-                }
-            }
-
-            telecomManager.placeCall(uri, extras)
-            MainActivity.log("GsmDialer: placeCall() dispatched to GSM modem for $number")
+            // TelephonyConnectionService.getPhoneForAccount on this MIUI build resolves Phone
+            // objects by subId string, not ICCID. callCapablePhoneAccounts returns handles with
+            // id=ICCID which don't match → chosenPhone=null → "Mobile network not available".
+            // Build the handle with id=subId ("2") using the same TelephonyConnectionService component.
+            // No PhoneAccountHandle — let MIUI resolve the SIM itself.
+            // Passing any handle causes TelephonyConnectionService.getPhoneForAccount to fail
+            // on this device (single active SIM, dual-SIM slot with slot 0 absent).
+            android.util.Log.d("GsmDialer", "placeCall to $number, no handle")
+            log("GsmDialer: placeCall to $number")
+            telecomManager.placeCall(uri, Bundle())
+            log("GsmDialer: placeCall() dispatched to GSM modem for $number")
             return true
         } catch (exception: Exception) {
             MainActivity.log("ERROR starting call: ${exception.message}")

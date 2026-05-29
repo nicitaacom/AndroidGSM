@@ -295,8 +295,28 @@ class GsmService : Service() {
                     startServiceDuplexOutputToServerAndServerToInput()
                     return START_NOT_STICKY
                 }
-                ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT -> {
-                    stopServiceDuplexOutputToServerAndServerToInput()
+                ACTION_STOP_SERVICE -> {
+                    stopServiceMode()
+                    return START_NOT_STICKY
+                }
+                ACTION_SET_MIC_SOURCE -> {
+                    val source = intent.getStringExtra(EXTRA_MIC_SOURCE) ?: "browser"
+                    val useBrowser = source != "phone"
+                    AudioWebSocketHandler.useBrowserMicUplink = useBrowser
+                    // Uplink is now pcmC0D19p direct write — stop/restart playback to toggle source
+                    if (callController.isCallActive) {
+                        Thread {
+                            if (useBrowser) {
+                                audioWsHandlerRef.handler?.startAudioPlayback()
+                                Thread.sleep(300)
+                                RootUtils.muteMicTxForBrowserUplink()
+                            } else {
+                                audioWsHandlerRef.handler?.stopAudioPlayback()
+                                RootUtils.unmuteMicTxAfterBrowserUplink()
+                            }
+                        }.start()
+                    }
+                    cmdWsClient?.sendEvent("MIC_SOURCE_CHANGED", mapOf("source" to source))
                     return START_NOT_STICKY
                 }
             }
@@ -561,7 +581,27 @@ class GsmService : Service() {
                     val playback = (data["playbackGain"] as? Number)?.toFloat()
                     if (mic != null) AudioWebSocketHandler.micGain = mic.coerceIn(0f, 4f)
                     if (playback != null) AudioWebSocketHandler.playbackGain = playback.coerceIn(0f, 4f)
-                    MainActivity.log("🎚️ Gain: mic=${mic} playback=${playback}")
+                    log("🎚️ Gain: mic=${mic} playback=${playback}")
+                }
+                "SET_MIC_SOURCE" -> {
+                    val source = data["source"] as? String
+                    val useBrowser = source != "phone"
+                    AudioWebSocketHandler.useBrowserMicUplink = useBrowser
+                    MainActivity.notifyMicSource(useBrowser)
+                    log("🎤 Mic source: ${if (useBrowser) "browser" else "phone"}")
+                    if (callController.isCallActive) {
+                        Thread {
+                            if (useBrowser) {
+                                audioWsHandlerRef.handler?.startAudioPlayback()
+                                Thread.sleep(300)
+                                RootUtils.muteMicTxForBrowserUplink()
+                            } else {
+                                audioWsHandlerRef.handler?.stopAudioPlayback()
+                                RootUtils.unmuteMicTxAfterBrowserUplink()
+                            }
+                        }.start()
+                    }
+                    cmdWsClient?.sendEvent("MIC_SOURCE_CHANGED", mapOf("source" to if (useBrowser) "browser" else "phone"))
                 }
                 "START_SERVICE" -> {
                     ensureRealtimeClientsInitialized()

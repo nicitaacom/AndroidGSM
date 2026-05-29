@@ -181,19 +181,20 @@ class AudioWebSocketHandler(
         }
     }
 
-    // Capture GSM call downlink via tinycap as root.
-    // tinycap reads from ALSA MultiMedia1 (card 0 device 0) at kernel level — no Java
-    // permission check applies. VOC_REC_DL mixer must be open before this is called.
+    // Capture GSM call downlink via tinycap on MultiMedia1 (device 0, 16kHz).
+    // VOC_REC_DL must be set BEFORE the call connects (during dialing) — the kernel blocks
+    // slot 1 (VoiceMMode2) writes once the call session is active.
+    // primed in handleCallStarted → enableIncallMusicCapture() before gsmDialer.startCall().
     private suspend fun captureViaTinycap() = withContext(Dispatchers.IO) {
         val chunkSamples = 320 // 20ms at 16kHz
-        val chunkBytes = chunkSamples * 2 // PCM16 = 2 bytes/sample
-        // tinycap writes a 44-byte WAV header before PCM data — skip it
+        val chunkBytes = chunkSamples * 2
+        val CAPTURE_SAMPLE_RATE = SAMPLE_RATE // 16000
         val WAV_HEADER_BYTES = 44
 
         try {
             val proc = Runtime.getRuntime().exec(arrayOf(
                 "su", "-c",
-                "/system/bin/tinycap /proc/self/fd/1 -D 0 -d 0 -c 1 -r 16000 -b 16"
+                "exec /system/bin/tinycap /proc/self/fd/1 -D 0 -d 0 -c 1 -r 16000 -b 16"
             ))
             tinycapProcess = proc
 
@@ -220,10 +221,9 @@ class AudioWebSocketHandler(
                 }
                 if (offset == 0) continue
 
-                // Send raw PCM bytes — no HPF/gain processing for downlink voice
                 val base64Audio = Base64.encodeToString(buffer, 0, offset, Base64.NO_WRAP)
                 wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-                if (seq % 500L == 0L) {
+                if (seq % 50L == 0L) {
                     val shorts = ShortArray(offset / 2)
                     ByteBuffer.wrap(buffer, 0, offset).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
                     Log.d(TAG, "tinycap-SEND seq=$seq rms=${String.format("%.4f", rms(shorts, shorts.size))}")
@@ -398,33 +398,23 @@ class AudioWebSocketHandler(
         }
     }
 
-    private fun startPcmPlayProcess() {
-        // Wait for the previous pcm_play to release /dev/snd/pcmC0D0p before opening it again.
-        // stopAudioPlayback() destroys the process and records it in lastDestroyedTinyplay.
-        lastDestroyedTinyplay?.let { old ->
-            try { old.waitFor(2, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
-        }
-        lastDestroyedTinyplay = null
-        tinyplayProcess = null
-
-        val binPath = "${RootUtils.nativeBinDir}/pcm_play"
-        // Open pcmC0D6p (AFE-PROXY RX) at 8kHz — feeds into VoiceMMode2_Tx via
-        // "VoiceMMode2_Tx Mixer AFE_PCM_TX_MMode2" which sticks (HAL doesn't reset it).
-        // pcmC0D0p (MultiMedia1) Incall_Music slot 1 (VoiceMMode2) reverts immediately.
-        val cmd = "$binPath -D 0 -d 6 -r 8000 -c 1 -p 160 -n 4"
+    // Writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX uplink).
+    // Spawns a root subprocess that reads from stdin and writes to the PCM device.
+    // VoiceMMode2 format: S16_LE, mono, 8000 Hz, period=1024 samples.
+    // Browser sends 8kHz PCM (PLAYBACK_SAMPLE_RATE=8000) which matches exactly.
+    private fun startCallUplinkPcmWriter() {
         try {
-            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmd))
-            tinyplayProcess = proc
-            // Drain stderr in background so it doesn't block the pipe
-            Thread {
-                try { proc.errorStream.bufferedReader().forEachLine { line ->
-                    if (line.isNotBlank()) Log.d(TAG, "pcm_play: $line")
-                }} catch (_: Exception) {}
-            }.also { it.isDaemon = true; it.start() }
-            MainActivity.log("📞 pcm_play started: $cmd")
+            val proc = Runtime.getRuntime().exec(arrayOf(
+                "su", "-c",
+                "tinyplay /proc/self/fd/0 -D 0 -d 19 -c 1 -r 8000 -b 16 2>/dev/null"
+            ))
+            uplinkPcmProcess = proc
+            isPlaying = true
+            log("✅ Uplink PCM writer started (VoiceMMode2 pcmC0D19p, 8kHz mono S16_LE)")
+            // startPlaybackConsumer will drain the channel and write to proc.outputStream
+            startCallUplinkConsumer(proc)
         } catch (e: Exception) {
-            tinyplayProcess = null
-            MainActivity.log("❌ pcm_play launch failed: ${e.message}")
+            log("❌ ERROR starting uplink PCM writer: ${e.message}")
         }
     }
 
