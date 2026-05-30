@@ -1,10 +1,14 @@
 package com.nicitaacom.androidgsm
 
 import android.Manifest
+import android.app.AlertDialog
+import android.app.role.RoleManager
 import android.content.Context
 import android.content.Intent
 import android.content.ClipData
 import android.content.ClipboardManager
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContracts
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.content.pm.PackageManager
@@ -13,6 +17,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
+import android.telecom.TelecomManager
 import android.telephony.SubscriptionManager
 import android.view.View
 import android.view.WindowManager
@@ -37,11 +42,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var copyLogsButton: Button
     private lateinit var statusTextView: TextView
     private lateinit var versionTextView: TextView
+    private lateinit var micSourceToggleButton: Button
     private var hasSimAvailable = true
     private var hasInternetConnection = true
     private var hasRequiredPermissions = false
     private var pendingAllowStartWithoutSim = false
-    private var pendingStartAudioTest = false
     private var isTestAudioActive = false
     private val meetsMinAndroid = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q // API 29
     private var isServiceAudioActive = false
@@ -49,10 +54,14 @@ class MainActivity : AppCompatActivity() {
     private val logBuffer = StringBuilder()
     private val logLock = Any()
     private val dateFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-    private var originalBrightness = -1f
     private var originalScreenTimeout: Long = -1
-    private var hasCallPermissions = false
     private var logUpdatePending = false
+
+    private val dialerRoleLauncher: ActivityResultLauncher<Intent> =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            val granted = result.resultCode == RESULT_OK
+            addLog(if (granted) "✅ Default dialer GRANTED" else "❌ Default dialer DENIED (resultCode=${result.resultCode})")
+        }
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
@@ -96,6 +105,12 @@ class MainActivity : AppCompatActivity() {
                 activity.updateStatus()
             }
         }
+
+        fun notifyMicSource(useBrowser: Boolean) {
+            instance?.get()?.runOnUiThread {
+                instance?.get()?.updateMicSourceButton(useBrowser)
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -122,11 +137,25 @@ class MainActivity : AppCompatActivity() {
         copyLogsButton = findViewById(R.id.copyLogsButton)
         statusTextView = findViewById(R.id.statusTextView)
         versionTextView = findViewById(R.id.versionTextView)
+        micSourceToggleButton = findViewById(R.id.micSourceToggleButton)
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
         evaluateVersionFreshness()
 
         copyLogsButton.setOnClickListener {
             copyLastLogsToClipboard()
+        }
+
+        micSourceToggleButton.setOnClickListener {
+            val newUseBrowser = !AudioWebSocketHandler.useBrowserMicUplink
+            AudioWebSocketHandler.useBrowserMicUplink = newUseBrowser
+            updateMicSourceButton(newUseBrowser)
+            addLog("🎤 Mic source toggled to: ${if (newUseBrowser) "browser" else "phone"}")
+            // Notify GsmService to hot-swap injection if call is active
+            val intent = Intent(this, GsmService::class.java).apply {
+                action = GsmService.ACTION_SET_MIC_SOURCE
+                putExtra(GsmService.EXTRA_MIC_SOURCE, if (newUseBrowser) "browser" else "phone")
+            }
+            startGsmServiceSafely(intent)
         }
 
         checkNetworkAvailability()
@@ -139,11 +168,8 @@ class MainActivity : AppCompatActivity() {
         if (!meetsMinAndroid) addLog("❌ Android ${Build.VERSION.RELEASE} unsupported - SERVICE mode requires Android 10+ (API 29)")
         addLog("Device: ${Build.MANUFACTURER} ${Build.MODEL}")
         Thread {
-            val isRooted = RootUtils.isRooted()
-            addLog(if (isRooted) "✅ Root access detected - REMOTE_SUBMIX audio output capture can be attempted" else "⚠️ Root access not detected by app checks - fallback to mic capture")
+            addLog(if (RootUtils.isRooted) "✅ Root access detected" else "⚠️ Root not detected — fallback to mic capture")
         }.start()
-
-        checkServiceStatus()
 
         if (hasPhoneStatePermission()) {
             try {
@@ -156,6 +182,54 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         addLog("Screen will stay on while app is active")
 
+        // Defer to after window is attached — AlertDialog.show() in onCreate can silently fail.
+        window.decorView.post { promptDefaultDialerIfNeeded() }
+    }
+
+    private var defaultDialerPromptShown = false
+
+    // Prompt user to set this app as the default dialer. Required so our GsmInCallService
+    // receives the Call object — the only reliable way to send DTMF (Call.playDtmfTone).
+    private fun promptDefaultDialerIfNeeded() {
+        addLog("🔍 Checking default dialer status…")
+        if (defaultDialerPromptShown) { addLog("(prompt already shown this session)"); return }
+        try {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                addLog("Default dialer prompt skipped — pre-Android 10")
+                return
+            }
+            val rm = getSystemService(Context.ROLE_SERVICE) as? RoleManager
+            if (rm == null) { addLog("❌ RoleManager unavailable"); return }
+            if (rm.isRoleHeld(RoleManager.ROLE_DIALER)) {
+                addLog("✅ App is the default dialer — DTMF available")
+                return
+            }
+            if (!rm.isRoleAvailable(RoleManager.ROLE_DIALER)) {
+                addLog("❌ ROLE_DIALER not available on this MIUI build — set manually in Settings → Apps → Default apps → Phone")
+                return
+            }
+            defaultDialerPromptShown = true
+            addLog("⚠️ App is not default dialer — showing prompt")
+            AlertDialog.Builder(this)
+                .setTitle("Set as default Phone app")
+                .setMessage("DTMF tones (key presses during calls) require this app to be the default Phone app. Otherwise key presses won't be sent to the remote party.\n\nTap 'Set as default' to grant.")
+                .setPositiveButton("Set as default") { _, _ ->
+                    try {
+                        val intent = rm.createRequestRoleIntent(RoleManager.ROLE_DIALER)
+                        dialerRoleLauncher.launch(intent)
+                        addLog("Default dialer role request launched")
+                    } catch (e: Exception) {
+                        addLog("❌ Failed to launch role intent: ${e.message}")
+                    }
+                }
+                .setNegativeButton("Skip (no DTMF)") { _, _ ->
+                    addLog("User skipped default dialer prompt")
+                }
+                .setCancelable(false)
+                .show()
+        } catch (e: Exception) {
+            addLog("default dialer prompt failed: ${e.message}")
+        }
     }
 
     override fun onResume() {
@@ -166,21 +240,8 @@ class MainActivity : AppCompatActivity() {
             try { loadSimSelection() } catch (_: Exception) {}
         }
         updateStatus()
-        // Re-check actual running state - handles crash/restart scenario
-        checkActualServiceState()
-    }
-
-    private fun checkActualServiceState() {
-        // getRunningServices() is deprecated on Android 8+ and always returns empty for
-        // other apps — do not use it to infer service state. State is tracked via
-        // notifyServiceActive / notifyTestActive called from GsmService directly.
-        updateStatus()
-    }
-
-
-
-    private fun checkServiceStatus() {
-        updateStatus()
+        // Backup trigger — guarded by defaultDialerPromptShown, won't re-show after grant/deny
+        window.decorView.post { promptDefaultDialerIfNeeded() }
     }
 
     private fun updateStatus() {
@@ -202,36 +263,6 @@ class MainActivity : AppCompatActivity() {
         }
         statusTextView.text = text
         statusTextView.setTextColor(ContextCompat.getColor(this, color))
-    }
-
-    private fun requestPermissionsAndStart(allowWithoutSim: Boolean = false) {
-        pendingAllowStartWithoutSim = allowWithoutSim
-        val permissions = mutableListOf<String>().apply {
-            if (!allowWithoutSim) {
-                add(Manifest.permission.CALL_PHONE)
-                add(Manifest.permission.READ_PHONE_NUMBERS)
-                add(Manifest.permission.READ_PHONE_STATE)
-            }
-            add(Manifest.permission.RECORD_AUDIO)
-            add(Manifest.permission.READ_PHONE_STATE)
-            add(Manifest.permission.ANSWER_PHONE_CALLS)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) add(Manifest.permission.BLUETOOTH_CONNECT)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                add(Manifest.permission.POST_NOTIFICATIONS)
-            }
-        }
-        val missing = permissions.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
-        if (missing.isNotEmpty()) {
-            addLog("Requesting ${missing.size} permissions...")
-            ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
-        } else {
-            hasRequiredPermissions = true
-            startService(allowWithoutSim)
-            // 1. Dispatch audio action AFTER service is started
-            if (pendingStartAudioTest) dispatchTestAudioRequest()
-            else dispatchServiceAudioInputRequest()
-            pendingAllowStartWithoutSim = false
-        }
     }
 
     private fun requestBatteryOptimizationExemption() {
@@ -270,19 +301,8 @@ class MainActivity : AppCompatActivity() {
             stopService(intent)
 
             isTestAudioActive = false
-            pendingStartAudioTest = false
             updateStatus()
             addLog("Service stopped successfully!")
-
-            if (originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
-                try {
-                    Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
-                    addLog("Restored original screen timeout")
-                } catch (e: Exception) {
-                    addLog("Error restoring screen timeout: ${e.message}")
-                }
-                originalScreenTimeout = -1L
-            }
         } catch (error: Exception) {
             addLog("ERROR stopping service: ${error.message}")
         }
@@ -290,7 +310,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopServiceAudioInput() {
         val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
+            action = GsmService.ACTION_STOP_SERVICE
         }
         startGsmServiceSafely(intent)
         isServiceAudioActive = false
@@ -308,7 +328,6 @@ class MainActivity : AppCompatActivity() {
             if (allGranted) {
                 addLog("All permissions granted!")
                 hasRequiredPermissions = true
-                hasCallPermissions = true
                 requestBatteryOptimizationExemption()
                 try { loadSimSelection() } catch (error: Exception) { addLog("SIM load error: ${error.message}") }
                 startService(pendingAllowStartWithoutSim)
@@ -316,7 +335,6 @@ class MainActivity : AppCompatActivity() {
             } else {
                 hasRequiredPermissions = false
                 pendingAllowStartWithoutSim = false
-                pendingStartAudioTest = false
                 addLog("ERROR: Some permissions were denied")
                 val deniedPermissions = permissions.filterIndexed { index, _ ->
                     grantResults[index] != PackageManager.PERMISSION_GRANTED
@@ -327,22 +345,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun dispatchTestAudioRequest() {
-        val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
-        }
-        if (!startGsmServiceSafely(intent)) return
-        isTestAudioActive = true
-        isServiceAudioActive = false
-        pendingStartAudioTest = false
-        updateStatus()
-        addLog("🎧 TEST audio started")
-    }
-
-
     private fun dispatchServiceAudioInputRequest() {
         val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT
+            action = GsmService.ACTION_START_SERVICE
         }
         if (!startGsmServiceSafely(intent)) return
         isServiceAudioActive = true
@@ -353,12 +358,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopTestAudio() {
         val intent = Intent(this, GsmService::class.java).apply {
-            action = GsmService.ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT
+            action = GsmService.ACTION_STOP_TEST
         }
         startGsmServiceSafely(intent)
         isTestAudioActive = false
         isServiceAudioActive = false
-        pendingStartAudioTest = false
         updateStatus()
         addLog("🛑 Test audio stopped")
     }
@@ -441,12 +445,10 @@ class MainActivity : AppCompatActivity() {
         )
         val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         hasRequiredPermissions = missing.isEmpty()
-        hasCallPermissions = ContextCompat.checkSelfPermission(this, Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
         if (missing.isNotEmpty()) {
             addLog("Requesting permissions...")
             ActivityCompat.requestPermissions(this, missing.toTypedArray(), PERMISSION_REQUEST_CODE)
         } else {
-            requestBatteryOptimizationExemption()
             if (hasPhoneStatePermission()) loadSimSelection()
             // Start the service process so WS cmd connects — SERVICE/TEST controlled by frontend
             startService()
@@ -540,18 +542,14 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         unregisterNetworkCallback()
-        if (instance?.get() == this) {
-            instance = null
-        }
-        if (originalScreenTimeout != -1L && Settings.System.canWrite(this)) {
-            try {
-                Settings.System.putLong(contentResolver, Settings.System.SCREEN_OFF_TIMEOUT, originalScreenTimeout)
-                addLog("Restored timeout on destroy")
-            } catch (e: Exception) {
-                addLog("Error restoring timeout on destroy: ${e.message}")
-            }
-            originalScreenTimeout = -1L
-        }
+        if (instance?.get() == this) instance = null
+    }
+
+    fun updateMicSourceButton(useBrowser: Boolean) {
+        micSourceToggleButton.text = if (useBrowser) "MIC: BROWSER" else "MIC: PHONE"
+        micSourceToggleButton.setBackgroundColor(
+            ContextCompat.getColor(this, if (useBrowser) R.color.brand_green else R.color.error_red)
+        )
     }
 
     private fun loadSimSelection() {

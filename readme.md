@@ -7,6 +7,153 @@ Phone = modem. Backend = brain. Frontend controls service lifecycle.
 
 ---
 
+## ⛔ STOP — website-mic uplink on a real GSM call is a FIRMWARE DEAD END (don't go in circles)
+
+> Read this before touching kernel/mixer/tinyplay/host-PCM uplink code again.
+> Confirmed on hardware 2026-05-30. Device: Redmi Note 7 (lavender, sdm660, MIUI A10).
+
+**Goal that does NOT work:** feeding the *website's* mic into a live **carrier CS
+(circuit-switched) GSM call** so the remote party hears the website. The remote can
+only ever hear the **phone's own hardware mic** on a CS call.
+
+**Where the wall actually is:** the closed **ADSP firmware**, one layer *below* the
+kernel. It is signed/encrypted — you cannot read, modify, or override it from the OS.
+
+**Two earlier diagnoses were WRONG (both misreads — do not chase them again):**
+1. ❌ "slot 1 (VoiceMMode2) write silently dropped" — the control is `SOC_SINGLE_EXT`
+   (single-element); the "2 slots" tinymix shows is a display artifact.
+2. ❌ "kvaddr=NULL ION timing bug" — `kvaddr=0` in dmesg is `%pK` printing zeros under
+   `kptr_restrict=2`, NOT a real NULL. `msm_audio_ion_alloc()` errors out if vaddr is
+   truly NULL, so it can't succeed with NULL. ION mapped fine (`mem_handle=0x24`).
+
+**The real, final failure** (kernel injector flashed, live VoiceMMode2 call):
+```
+vmm2_inj: ADSP memory mapped, mem_handle=0x24            ← kernel side SUCCEEDED
+voc_send_cvp_start_vocpcm: DSP returned error[ADSP_EUNSUPPORTED]
+vmm2_inj: start_vocpcm failed -38                        ← FIRMWARE refused (-38 = ENOSYS)
+```
+The only software TX-injection the firmware supports (VSS_IVPCM host-PCM tap) is
+accepted **only on a session created as host-PCM** (the dormant
+`msm-pcm-host-voice-v2.c` driver). A live carrier CS call set up by the modem/RIL is a
+different session and the firmware refuses to retrofit a TX tap onto it. Enabling that
+dormant driver would only inject into its *own* host-PCM session, not the carrier call.
+**No kernel patch can make the DSP say yes.**
+
+### Why every alternative is also walled (the full map — read this, save months)
+
+The goal "I speak on the laptop, remote hears me" has exactly **two** technical shapes,
+and **each hits a hard wall.** Neither wall is something you can code around.
+
+#### Wall 1 — CS (carrier) call → FIRMWARE wall
+A normal carrier call's mic is hardware-only, owned by the ADSP firmware (proven above).
+Software cannot inject into it. This includes the seductive idea of a **"virtual mic"**:
+
+> ❌ **A virtual / software mic does NOT work for a CS call on this phone.**
+> A virtual mic lives in Android's AudioFlinger (software audio layer). A CS call's mic
+> comes from the hardware mic → modem voice DSP, **bypassing AudioFlinger entirely**.
+> So the call never reads the virtual mic. A virtual mic only works for apps that read
+> the mic via AudioFlinger — VoIP apps, recorders, WebRTC — **never a carrier CS call.**
+> "Virtual mic" is just "software mic injection" = the exact thing the firmware blocks.
+
+The only way audio enters a CS call's uplink is as a **physical analog mic signal**:
+wired headset mic, Bluetooth (HFP) headset mic, or acoustic (speaker → phone mic).
+
+#### Wall 2 — VoIP call → PROVIDER / KYC wall
+A VoIP/SIP call's audio DOES go through AudioFlinger, so a virtual mic WOULD work.
+But to place a VoIP call to a **real phone number** (PSTN) you need a provider with a
+carrier relationship — and that's a regulated, KYC-gated activity. Confirmed dead ends
+(months of attempts, 2026):
+- **Twilio** — works technically but too expensive for the use case.
+- **Telnyx** — KYC via Onfido; rejects every passport tried (own + friends'). No KYC → no service.
+- **Dial9 / many UK SIP providers** — require a **UK proof-of-address**.
+- **Betamax/Voipbuster-family, misc cheap providers** — registration rejected / sign-up broken.
+- General truth: cheap + no-KYC + PSTN-origination basically **does not exist**, because
+  the phone network legally won't let an unverified stranger originate calls. The KYC
+  *is* the wall, not the software.
+
+#### The asset you already have: your UK SIM passed KYC
+You already cleared verification once — when you got the **UK SIM**. That SIM is your
+only KYC-free PSTN credential. So the realistic exits all route **through that SIM**,
+just in hardware where the call audio is *software-accessible* (not firmware-locked):
+
+| Exit | KYC? | Buy? | Virtual mic works? | Notes |
+|---|---|---|---|---|
+| **This phone, CS call + physical mic feed** (wired headset / BT / acoustic) | none | cable/host near phone | no — analog only | works today; audio must be physically beside the phone |
+| **USB LTE modem (Quectel EC25 / SIMCom A7600) with the SIM** | none (uses your SIM) | ~$30–60 module + host | ✅ yes (call audio over USB-audio) | self-hosted, no firmware wall; needs hardware near the SIM |
+| **VoIP↔GSM gateway box (GoIP / Yeastar TG) with the SIM** | none (uses your SIM) | ~$40–100 box | ✅ yes (SIP ↔ GSM) | most plug-and-play; the commercial version of this project |
+| Self-hosted Asterisk/FreeSWITCH + **paid/KYC SIP trunk** | YES (the wall) | trunk cost | ✅ yes | blocked by Wall 2 above |
+
+**Bottom line:** on *this phone*, for a *CS call*, there is **no software-only fix** —
+not kernel, not mixer, not virtual mic. Either feed analog audio physically into this
+phone, or move the SIM into a USB-modem / gateway box where the audio is software. Both
+keep your UK number and need **no provider KYC.**
+
+#### ✅ THE EXIT THAT WORKS: Bluetooth HFP mic (proven on hardware 2026-05-30)
+When a Bluetooth headset (HFP) connects during a live CS call, the **modem/DSP itself
+reroutes the call mic from the phone mic to the BT SCO mic** — a *firmware-blessed*
+route (unlike VSS_IVPCM, which the firmware rejects). Confirmed in the live mixer during
+an active VoiceMMode2 call:
+```
+VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2   Off Off   ← phone hardware mic: OFF
+VoiceMMode2_Tx Mixer SLIM_7_TX_MMode2      On  Off   ← BT HFP/SCO mic: ON
+```
+A real BT headset's mic was confirmed audible to the remote party. **The audio on that
+SCO channel doesn't have to come from a physical headset mic** — it's whatever device
+acts as the BT HFP headset.
+
+**Plan (website mic → remote, no KYC, no firmware patch, no root mixer):**
+1. Small always-on Linux host **beside the UK phone** (BT is local-range): Pi / mini-PC / old laptop.
+2. Host runs BlueZ as a **Bluetooth HFP headset/audio-gateway** the phone routes call audio to → it owns the SCO mic channel (= `SLIM_7_TX` into the call).
+3. Website mic (browser, DE) → existing `/ws/audio` → VPS → UK-side host → injected as the BT HFP SCO "mic" → phone → CS uplink → remote hears the laptop.
+4. Downlink already works via tinycap (or take it from the same BT SCO speaker channel).
+
+The firmware auto-selects `SLIM_7_TX` when BT HFP is the active call-audio device — **no
+manual tinymix/set_mixer_ctl needed.** See memory `bt-hfp-uplink-works.md`.
+
+##### UK-side host: Raspberry Pi (decided 2026-05-30; future build, not done yet)
+The "fake headset" that injects WS audio as the BT mic must be a **programmable** BT
+device next to the phone — a real headset can't (it only sends its own mic; you can't
+feed a stream into it). Options weighed:
+- ❌ Dumb BT headset — closed appliance, no audio-in.
+- ❌ Spare Android (5.2) — Android won't let an app replace the BT HFP mic stream (closed
+  BT stack/HAL, no API, not even rooted). Wired-cable variant could play audio out its
+  jack, but 5.2 is too fragile for the WS-receiver app.
+- ✅ **Raspberry Pi** — full BlueZ/audio control, no vendor lock. The right host.
+
+**Cost case (Pi beats every PSTN provider, and isn't KYC-blocked):**
+
+| | One-time | Ongoing | Year 1 | Then/yr |
+|---|---|---|---|---|
+| **Phone + Raspberry Pi setup** | ~$50 phone + ~$40 Pi + ~$10 ship ≈ **$100** | ~$15/mo SIM | **≈ $250** | **≈ $150** |
+| Twilio / Telnyx / etc. | — | — | **> $500** | > $500 |
+| | | | | *and KYC-blocked (Onfido rejects, UK address required)* |
+
+Plus: keeps your UK number, your already-verified SIM, and needs no provider sign-up.
+Build steps (BlueZ HFP role, SCO codec, audio injection) are open for the next session.
+
+##### Works-today fallback (phone local in DE, no Pi yet)
+Until the Pi-in-UK setup is built, you can already use this **right now** with the phone
+in front of you in DE. The goal "remote hears me, not just the phone mic" is met by
+making *your* voice the phone's mic directly — two ways:
+1. **Wired USB-C mic:** plug a **USB-C mic** (or a USB mic via a USB-C adapter) into the
+   phone and talk into that instead of the laptop. It registers as a USB Audio Class
+   (UAC) input and the firmware routes it via `USB_AUDIO_TX_MMode2` (seen in the mixer
+   dump) — same firmware-blessed external-mic path. Skips the laptop entirely. (Not the
+   3.5mm jack — a USB-C / USB mic.)
+2. **Bluetooth (no Frankenstein phone-holder rig):** connect the small **Lenovo
+   thinkplus** BT earbuds to the phone and **talk into the RIGHT earbud's mic** — proven
+   above to route into the call uplink (`SLIM_7_TX`). Lets you talk hands-free without
+   holding the phone to your face.
+
+These are the same firmware-blessed mic path the Pi plan uses — just with you physically
+next to the phone instead of a Pi bridging your laptop audio over the internet.
+
+**What still works as-is:** downlink (remote → website via tinycap on MultiMedia1),
+and `placeCall` with no PhoneAccountHandle. Full history below under
+"Browser mic uplink" / "Iterations to use website's mic" (kept for the record).
+
+---
+
 ## First-time setup (Kali / no Android SDK)
 
 ```bash

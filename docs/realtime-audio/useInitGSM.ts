@@ -30,6 +30,8 @@ type GsmCallsEvent = {
 
 /**
  * Utility: Downsample Float32Array audio buffer to 16kHz.
+ * WARNING: using website's mic is a hard DSP (microchip) limit - SIM require KYC (that's why I hit KYC on twilio or telnyx)
+ * The only workaround I found is to use raspberry PI + rooted android 10 with SIM
  */
 function downsampleTo(buffer: Float32Array, inputSampleRate: number, targetRate: number): Float32Array {
   if (inputSampleRate === targetRate) return buffer
@@ -40,8 +42,12 @@ function downsampleTo(buffer: Float32Array, inputSampleRate: number, targetRate:
   let offsetBuffer = 0
   while (offsetResult < result.length) {
     const nextOffset = Math.round((offsetResult + 1) * ratio)
-    let accum = 0, count = 0
-    for (let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) { accum += buffer[i]; count++ }
+    let accum = 0,
+      count = 0
+    for (let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) {
+      accum += buffer[i]
+      count++
+    }
     result[offsetResult] = count > 0 ? accum / count : 0
     offsetResult++
     offsetBuffer = nextOffset
@@ -53,6 +59,9 @@ function downsampleTo16k(buffer: Float32Array, inputSampleRate: number): Float32
   return downsampleTo(buffer, inputSampleRate, 16000)
 }
 
+function downsampleTo8k(buffer: Float32Array, inputSampleRate: number): Float32Array {
+  return downsampleTo(buffer, inputSampleRate, 8000)
+}
 
 /**
  * Converts a Float32Array of audio samples (range -1..1) to base64-encoded PCM16 (little-endian).
@@ -123,7 +132,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
   const isTestActiveRef = useRef(false)
   const triggerCallEndedRef = useRef<() => void>(() => {})
   const micGainRef = useRef(1.0)
-  const playbackGainRef = useRef(3.0)
+  const playbackGainRef = useRef(1.0)
 
   const shouldStreamMic = () => isConnected || isTestAudioActiveRef.current || duplexValidationModeRef.current
 
@@ -477,10 +486,6 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
     const onCallConnected = (eventData: GsmCallsEvent) => {
       const tok = deviceTokenRef.current
       if (!tok || eventData?.deviceToken !== tok) return
-      // Reset seq and audio state before enabling mic — ensures fresh start with no dialing-phase audio
-      seqTxRef.current = 0
-      resetInboundAudioState()
-      isCallActiveRef.current = true
       setIsCalling(false)
       setIsConnected(true)
       console.info("[gsm/call-connected] fired", { deviceToken: tok })
@@ -742,7 +747,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       // Defensive tear-down — protects against a race where two callers (status poll +
       // ws.onmessage + useEffect) all enter startMicCapture concurrently and leak processors.
       stopMicCapture()
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false, sampleRate: 16000 } })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+      })
       // After the await, the call may have ended — bail out instead of leaking the stream.
       if (
         isCleaningUpRef.current ||
@@ -770,9 +777,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
           // Apply mic gain in browser before encoding
           const gain = micGainRef.current
           if (gain !== 1.0) for (let i = 0; i < inF32.length; i++) inF32[i] = Math.max(-1, Math.min(1, inF32[i] * gain))
-          // Send at 16kHz — Android AudioTrack plays at 16kHz which matches voice HAL natively.
-          // Fewer resampling steps = much cleaner audio than 8kHz→kernel upsample→HAL.
-          const downsampled = downsampleTo16k(inF32, e.inputBuffer.sampleRate)
+          // GSM uplink is 8kHz narrowband — downsample to 8k so Android plays it natively
+          // without the network resampling 16k→8k poorly.
+          const downsampled = downsampleTo8k(inF32, e.inputBuffer.sampleRate)
           const audio = cleanAndEncodePcm16(downsampled)
           const pkt: AudioPacket = {
             role: "browser",
@@ -781,7 +788,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
             codec: "pcm16",
             seq: seqTxRef.current++,
             ts: performance.now(),
-            sampleRate: 16000,
+            sampleRate: 8000,
             audio,
           }
           wsRef.current.send(JSON.stringify(pkt))
@@ -848,8 +855,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
     console.info("[gsm/call] initiating call", { deviceToken, num })
 
     try {
-      // Do NOT set isCallActiveRef=true here — mic would stream during dialing/ringing.
-      // isCallActiveRef is set in onCallConnected (when remote answers).
+      isCallActiveRef.current = true
       setIsCalling(true)
       // ⚠️ Read from store (single source of truth) — selectedSimRef is only updated by selectSim()
       // which is never called from the UI. The UI calls useGSM's setSelectedSim directly.
@@ -958,8 +964,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
     })
   }
 
-  const setMicGain = (value: number) => { micGainRef.current = value; sendCommand("SET_GAIN", { micGain: value }) }
-  const setPlaybackGain = (value: number) => { playbackGainRef.current = value; sendCommand("SET_GAIN", { playbackGain: value }) }
+  const setMicGain = (value: number) => {
+    micGainRef.current = value
+    sendCommand("SET_GAIN", { micGain: value })
+  }
+  const setPlaybackGain = (value: number) => {
+    playbackGainRef.current = value
+    sendCommand("SET_GAIN", { playbackGain: value })
+  }
 
   const fetchLogs = async (): Promise<string[]> => {
     try {

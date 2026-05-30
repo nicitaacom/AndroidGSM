@@ -8,11 +8,8 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.media.AudioManager
 import android.os.Build
 import android.os.IBinder
-import android.content.BroadcastReceiver
-import android.content.IntentFilter
 import android.os.PowerManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
@@ -23,69 +20,42 @@ class GsmService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var cmdWsClient: CommandWebSocketClient? = null
     private var gsmDialer: GsmDialer? = null
-    private var audioStreamHandler: AudioStreamHandler? = null
-    private var audioWsHandler: AudioWebSocketHandler? = null
     private var config: Config? = null
     private var isTestAudioActive = false
     private var isServiceAudioActive = false
-    private var isCallActive = false
     private var telephonyManager: TelephonyManager? = null
     private var phoneStateListener: PhoneStateListener? = null
-    private val callStateReceiver: BroadcastReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
-            try {
-                val action = intent?.action
-                when (action) {
-                    ACTION_CALL_CONNECTED_BROADCAST -> {
-                        // Audio setup is handled entirely by setCallConnectedCallback in handleCallStarted.
-                        // This broadcast is sent by that callback — do NOT start audio here again.
-                        MainActivity.log("callStateReceiver: CALL_CONNECTED broadcast received (no-op)")
-                    }
-                    ACTION_CALL_DISCONNECTED_BROADCAST -> {
-                        MainActivity.log("callStateReceiver: CALL_DISCONNECTED received")
-                        try {
-                            audioStreamHandler?.stopAudioCapture()
-                            audioStreamHandler?.stopAudioPlayback()
-                            audioWsHandler?.setCallActive(false)
-                            audioWsHandler?.disconnect()
-                            Thread {
-                                repeat(3) { attempt ->
-                                    if (cmdWsClient?.isConnected == true) {
-                                        try { cmdWsClient?.sendEvent("CALL_ENDED", emptyMap()) } catch (_: Exception) {}
-                                        MainActivity.log("📴 [receiver] CALL_ENDED sent (attempt ${attempt + 1})")
-                                        return@Thread
-                                    }
-                                    Thread.sleep(500)
-                                }
-                                try { cmdWsClient?.sendEvent("CALL_ENDED", emptyMap()) } catch (_: Exception) {}
-                            }.start()
-                        } catch (e: Exception) {
-                            MainActivity.log("callStateReceiver disconnect error: ${e.message}")
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                MainActivity.log("callStateReceiver unexpected error: ${e.message}")
-            }
-        }
+
+    private val log: GsmLogger = { MainActivity.log(it) }
+    private val audioWsHandlerRef = AudioWsHandlerRef()
+    val callController: CallController by lazy {
+        CallController(
+            context = this,
+            config = config!!,
+            cmdWsClient = { cmdWsClient },
+            audioWsHandlerRef = audioWsHandlerRef,
+            onCallActiveChanged = { /* GsmService reads callController.isCallActive directly */ },
+            onMicSourceReset = { MainActivity.notifyMicSource(true) },
+            log = log
+        )
     }
 
     companion object {
         private const val NOTIFICATION_ID = 1
-        private const val CALL_NOTIFICATION_ID = 2
         private const val CHANNEL_ID = "gsm_gateway_channel"
-        private const val CALL_CHANNEL_ID = "gsm_call_channel"
-        // TEST mode: Android mic -> server, and server audio -> Android output route.
-        const val ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT =
-            "com.nicitaacom.androidgsm.action.START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT"
-        const val ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT =
-            "com.nicitaacom.androidgsm.action.STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT"
+        // TEST: bidirectional audio with the phone's physical mic (no real GSM call).
+        //       Phone mic → server → browser speaker; browser mic → server → phone speaker.
+        const val ACTION_START_TEST = "com.nicitaacom.androidgsm.action.START_TEST"
+        const val ACTION_STOP_TEST = "com.nicitaacom.androidgsm.action.STOP_TEST"
 
-        // SERVICE mode: Android audio output -> server, and server audio -> Android audio input path.
-        const val ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT =
-            "com.nicitaacom.androidgsm.action.START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT"
-        const val ACTION_STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT =
-            "com.nicitaacom.androidgsm.action.STOP_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT"
+        // SERVICE: GSM gateway mode. Waits for CALL_STARTED from backend, then:
+        //   downlink — GSM call audio (remote party) → tinycap → server → browser speaker
+        //   uplink   — browser mic → server → AudioTrack → Incall_Music mixer → GSM TX → remote party
+        //              (or phone's hardware mic if MIC_SOURCE toggled to "phone")
+        const val ACTION_START_SERVICE = "com.nicitaacom.androidgsm.action.START_SERVICE"
+        const val ACTION_STOP_SERVICE = "com.nicitaacom.androidgsm.action.STOP_SERVICE"
+        const val ACTION_SET_MIC_SOURCE = "com.nicitaacom.androidgsm.action.SET_MIC_SOURCE"
+        const val EXTRA_MIC_SOURCE = "mic_source"
         const val ACTION_CALL_CONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_CONNECTED"
         const val ACTION_CALL_DISCONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_DISCONNECTED"
     }
@@ -94,149 +64,68 @@ class GsmService : Service() {
         super.onCreate()
         try {
             AppContextHolder.ctx = applicationContext
-            MainActivity.log("GsmService: onCreate called")
+            log("GsmService: onCreate called")
 
-            // 1. Create notification channels FIRST
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 val manager = getSystemService(NotificationManager::class.java)
-
-                val channel = NotificationChannel(
-                    CHANNEL_ID,
-                    "GSM Gateway Service",
-                    NotificationManager.IMPORTANCE_HIGH
-                )
+                val channel = NotificationChannel(CHANNEL_ID, "GSM Gateway Service", NotificationManager.IMPORTANCE_HIGH)
                 channel.description = "GSM Gateway background service"
                 manager?.createNotificationChannel(channel)
-                MainActivity.log("Service notification channel created")
-
-                val callChannel = NotificationChannel(
-                    CALL_CHANNEL_ID,
-                    "GSM Calls",
-                    NotificationManager.IMPORTANCE_HIGH
-                )
-                callChannel.description = "Notifications for initiating calls"
-                manager?.createNotificationChannel(callChannel)
-                MainActivity.log("Call notification channel created")
             }
 
-            // 2. acquire wake lock if possible
             try {
                 val powerManager = getSystemService(POWER_SERVICE) as PowerManager
                 wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GsmService::WakeLock")
                 wakeLock?.acquire()
-                MainActivity.log("GsmService: Wake lock acquired")
+                log("GsmService: Wake lock acquired")
             } catch (error: Exception) {
-                MainActivity.log("WARNING: Could not acquire wake lock: ${error.message}")
+                log("WARNING: Could not acquire wake lock: ${error.message}")
             }
 
-            // 3. unpack native binaries from assets
+            // Unpack set_mixer_ctl native binary from assets on first run.
+            // Enables full 2-slot BOOL mixer control on MIUI sdm660 (tinymix only handles slot 0).
+            // If binary is missing from assets, RootUtils falls back to tinymix (slot 0 only).
+            // To build: NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh
             try {
-                val binDir = filesDir  // /data/data/<pkg>/files — always writable
-                for (name in listOf("set_mixer_ctl", "pcm_play")) {
-                    val bin = java.io.File(binDir, name)
-                    assets.open(name).use { input ->
-                        bin.outputStream().use { output -> input.copyTo(output) }
+                val dest = java.io.File(filesDir, "set_mixer_ctl")
+                if (!dest.exists()) {
+                    assets.open("set_mixer_ctl").use { input ->
+                        dest.outputStream().use { output -> input.copyTo(output) }
                     }
-                    if (!bin.canExecute()) bin.setExecutable(true, false)
-                    MainActivity.log("GsmService: $name unpacked to ${bin.absolutePath}")
+                    dest.setExecutable(true, false)
                 }
-                RootUtils.nativeBinDir = binDir.absolutePath
-            } catch (e: Exception) {
-                MainActivity.log("WARNING: could not unpack native binaries: ${e.message}")
+                RootUtils.nativeBinDir = filesDir.absolutePath
+                log("✅ set_mixer_ctl ready (full 2-slot mixer control)")
+            } catch (_: Exception) {
+                log("⚠️ set_mixer_ctl not in assets — using tinymix fallback (slot 0 only)")
             }
 
-            // 4. load config
             try {
                 config = ConfigReader.readConfig(this)
-                if (config == null) {
-                    MainActivity.log("ERROR: ConfigReader returned null - service will run in degraded mode")
-                    return
-                }
+                log("GsmService: Config loaded — ${config?.BACKEND_URL} device=${config?.DEVICE_TOKEN}")
 
-                MainActivity.log("GsmService: Config loaded")
-                MainActivity.log("Backend URL: ${config?.BACKEND_URL}")
-                MainActivity.log("Device Token: ${config?.DEVICE_TOKEN}")
-
-                // Setup phone state listener to maintain audio during system dialer
+                // PhoneStateListener: safety net for IDLE only (no audio-mode changes — those are
+                // owned by the GsmDialer callbacks below to avoid fighting each other).
                 setupPhoneStateListener()
 
-                // init dialer
-                gsmDialer = GsmDialer(this)
-                MainActivity.log("GsmService: GsmDialer initialized")
+                gsmDialer = GsmDialer(this, log)
+                log("GsmService: GsmDialer initialized")
 
-                // Set callbacks once at init — these fire on ANY call state change,
-                // including manual hang-up or remote party ending the call.
-                gsmDialer?.setCallEndedCallback {
-                    if (!isCallActive && audioWsHandler == null) return@setCallEndedCallback  // ignore IDLE fired on boot/init
-                    isCallActive = false
-                    MainActivity.log("📴 Call ended (IDLE) — stopping audio, notifying backend")
-                    // Close incall capture path
-                    try {
-                        RootUtils.disableIncallMusicCapture()
-                        RootUtils.disableIncallMusicInjection()
-                        RootUtils.disableAfeProxyInjection()
-                        RootUtils.unmutePhoneSpeaker()
-                        val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                        val maxVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                        am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVol, 0)
-                        am.isSpeakerphoneOn = false
-                        am.mode = AudioManager.MODE_NORMAL
-                    } catch (_: Exception) {}
-                    try {
-                        audioWsHandler?.setCallActive(false)
-                        audioWsHandler?.stopAudioCapture()
-                        audioWsHandler?.stopAudioPlayback()
-                        audioWsHandler?.disconnect()
-                        audioWsHandler = null
-                    } catch (_: Exception) {}
-                    Thread {
-                        // Retry a few times in case the WS is momentarily reconnecting
-                        repeat(3) { attempt ->
-                            if (cmdWsClient?.isConnected == true) {
-                                cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
-                                MainActivity.log("📴 CALL_ENDED sent (attempt ${attempt + 1})")
-                                return@Thread
-                            }
-                            MainActivity.log("📴 CALL_ENDED attempt ${attempt + 1} — WS not ready, retrying...")
-                            Thread.sleep(500)
-                        }
-                        // Last attempt regardless
-                        cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
-                        MainActivity.log("📴 CALL_ENDED final attempt sent")
-                    }.start()
-                }
-                gsmDialer?.setCallConnectedCallback {
-                    isCallActive = true
-                    MainActivity.log("📞 Call connected (OFFHOOK) — default callback, handleCallStarted will override")
-                    val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                    am.mode = AudioManager.MODE_IN_CALL
-                    am.isSpeakerphoneOn = true
-                }
-                // Register for broadcasts from ConnectionService (default-dialer)
-                try {
-                    val filter = IntentFilter().apply {
-                        addAction(ACTION_CALL_CONNECTED_BROADCAST)
-                        addAction(ACTION_CALL_DISCONNECTED_BROADCAST)
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        registerReceiver(callStateReceiver, filter, RECEIVER_NOT_EXPORTED)
-                    } else {
-                        registerReceiver(callStateReceiver, filter)
-                    }
-                    MainActivity.log("GsmService: callStateReceiver registered")
-                } catch (e: Exception) {
-                    MainActivity.log("Failed to register callStateReceiver: ${e.message}")
+                // Wire call lifecycle callbacks into CallController (once, in onCreate).
+                // config must be non-null here — callController lazy init reads config!!
+                if (config != null) {
+                    callController.wireDialerCallbacks(gsmDialer!!)
+                } else {
+                    log("❌ Cannot wire call callbacks — config is null")
                 }
 
-                // Connect WS cmd channel immediately — frontend needs "ready" before any button click
                 ensureRealtimeClientsInitialized()
             } catch (error: Exception) {
-                MainActivity.log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
+                log("ERROR in GsmService.onCreate (config/dialer): ${error.message}")
                 error.printStackTrace()
-                return
             }
         } catch (e: Exception) {
-            MainActivity.log("FATAL: Uncaught exception in onCreate: ${e.message}")
+            log("FATAL: Uncaught exception in onCreate: ${e.message}")
             e.printStackTrace()
         }
     }
@@ -256,43 +145,34 @@ class GsmService : Service() {
             startForeground(NOTIFICATION_ID, notification)
             return
         }
-
         val serviceType = buildForegroundServiceTypeMask()
-        if (serviceType == 0) {
-            startForeground(NOTIFICATION_ID, notification)
-            return
-        }
-
+        if (serviceType == 0) { startForeground(NOTIFICATION_ID, notification); return }
         try {
             startForeground(NOTIFICATION_ID, notification, serviceType)
         } catch (error: SecurityException) {
-            MainActivity.log("WARNING: Foreground type denied (${error.message}); retrying without explicit type")
+            log("WARNING: Foreground type denied (${error.message}); retrying without explicit type")
             startForeground(NOTIFICATION_ID, notification)
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         try {
-            MainActivity.log("GsmService: onStartCommand called")
-
-            // 1. ALWAYS start foreground first — required for background mic capture on Android 10+
             val notification = createNotification()
             startForegroundSafely(notification)
-            MainActivity.log("GsmService: Foreground started")
 
             when (intent?.action) {
-                ACTION_START_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT -> {
+                ACTION_START_TEST -> {
                     ensureRealtimeClientsInitialized()
-                    startTestDuplexMicToServerAndServerToOutput()
+                    startTestMode()
                     return START_NOT_STICKY
                 }
-                ACTION_STOP_TEST_DUPLEX_MIC_TO_SERVER_AND_SERVER_TO_OUTPUT -> {
-                    stopTestDuplexMicToServerAndServerToOutput()
+                ACTION_STOP_TEST -> {
+                    stopTestMode()
                     return START_NOT_STICKY
                 }
-                ACTION_START_SERVICE_DUPLEX_OUTPUT_TO_SERVER_AND_SERVER_TO_INPUT -> {
+                ACTION_START_SERVICE -> {
                     ensureRealtimeClientsInitialized()
-                    startServiceDuplexOutputToServerAndServerToInput()
+                    startServiceMode()
                     return START_NOT_STICKY
                 }
                 ACTION_STOP_SERVICE -> {
@@ -307,12 +187,9 @@ class GsmService : Service() {
                     if (callController.isCallActive) {
                         Thread {
                             if (useBrowser) {
-                                audioWsHandlerRef.handler?.startAudioPlayback()
-                                Thread.sleep(300)
-                                RootUtils.muteMicTxForBrowserUplink()
+                                audioWsHandlerRef.handler?.startAudioPlayback() // restart PCM writer
                             } else {
-                                audioWsHandlerRef.handler?.stopAudioPlayback()
-                                RootUtils.unmuteMicTxAfterBrowserUplink()
+                                audioWsHandlerRef.handler?.stopAudioPlayback() // stop PCM writer, phone mic takes over
                             }
                         }.start()
                     }
@@ -320,9 +197,8 @@ class GsmService : Service() {
                     return START_NOT_STICKY
                 }
             }
-
         } catch (error: Exception) {
-            MainActivity.log("ERROR in onStartCommand: ${error.message}")
+            log("ERROR in onStartCommand: ${error.message}")
         }
         return START_NOT_STICKY
     }
@@ -331,7 +207,7 @@ class GsmService : Service() {
         Thread {
             try {
                 val safeConfig = config ?: run {
-                    MainActivity.log("WARNING: Config unavailable, skipping realtime init")
+                    log("WARNING: Config unavailable, skipping realtime init")
                     return@Thread
                 }
 
@@ -345,63 +221,54 @@ class GsmService : Service() {
                             onCommand = { type, data -> handleWsCommand(type, data) },
                             stateProvider = { mapOf("isServiceActive" to isServiceAudioActive, "isTestActive" to isTestAudioActive) },
                             onConnected = {
-                                // Send SIM list immediately on connect so frontend can show SIM picker
                                 val sims = gsmDialer?.getSimAccounts() ?: emptyList()
                                 if (sims.isNotEmpty()) {
                                     cmdWsClient?.sendEvent("SIM_LIST", mapOf("sims" to sims.toString()))
-                                    MainActivity.log("GsmService: SIM_LIST sent: ${sims.size} accounts")
+                                    log("GsmService: SIM_LIST sent: ${sims.size} accounts")
                                 }
-                                startServiceDuplexOutputToServerAndServerToInput()
+                                if (isServiceAudioActive) {
+                                    // Reconnect: server lost in-memory state — re-announce without touching audio
+                                    log("GsmService: WS reconnected, re-sending SERVICE_STARTED")
+                                    cmdWsClient?.sendEvent("SERVICE_STARTED", emptyMap())
+                                } else {
+                                    startServiceMode()
+                                }
                             }
                         )
                         cmdWsClient?.connect()
-                        MainActivity.log("GsmService: CommandWS connecting...")
+                        log("GsmService: CommandWS connecting...")
                     }
                 }
 
-                if (audioStreamHandler == null) {
-                    audioStreamHandler = AudioStreamHandler(this, null)
-                }
-                if (audioWsHandler == null) {
-                    audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
-                }
-                MainActivity.log("GsmService: realtime clients initialized")
+                // Do NOT pre-create the audio handler here — calls create a fresh one in CallController.
+                // Pre-creating it caused the OFFHOOK path to reuse a stale unconnected handler,
+                // so all tinycap chunks were silently dropped (isConnected=false → sendAudioChunk no-op).
+                log("GsmService: realtime clients initialized")
             } catch (error: Exception) {
-                MainActivity.log("WARNING: realtime init failed: ${error.message}")
+                log("WARNING: realtime init failed: ${error.message}")
             }
         }.start()
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        // 1. Force-stop all audio first — prevents zombie audio after crash/kill
         try {
-            audioWsHandler?.stopAudioCapture()
-            audioWsHandler?.stopAudioPlayback()
-            audioWsHandler?.disconnect()
-            audioWsHandler = null
+            audioWsHandlerRef.handler?.stopAudioCapture()
+            audioWsHandlerRef.handler?.stopAudioPlayback()
+            audioWsHandlerRef.handler?.disconnect()
+            audioWsHandlerRef.handler = null
         } catch (_: Exception) {}
-
-        try {
-            audioStreamHandler?.stopAudioCapture()
-            audioStreamHandler?.stopAudioPlayback()
-        } catch (_: Exception) {}
-
-        // 2. Notify backend device is gone
         Thread {
             try { cmdWsClient?.sendEvent("DISCONNECTED", emptyMap()) } catch (_: Exception) {}
             try { cmdWsClient?.disconnect() } catch (_: Exception) {}
         }.apply { isDaemon = true; start() }.join(1000)
-
-        try { unregisterReceiver(callStateReceiver) } catch (_: Exception) {}
         unregisterPhoneStateListener()
         wakeLock?.let { if (it.isHeld) it.release() }
-        audioStreamHandler?.cleanup()
         gsmDialer?.cleanup()
         gsmDialer = null
         isServiceAudioActive = false
         isTestAudioActive = false
-        MainActivity.log("GsmService: Destroyed")
+        log("GsmService: Destroyed")
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -411,24 +278,22 @@ class GsmService : Service() {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
         }
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0
-        val pendingIntent: PendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
-
-        val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+        val pendingIntent = PendingIntent.getActivity(this, 0, intent, flags)
+        return NotificationCompat.Builder(this, CHANNEL_ID)
             .setContentTitle("GSM Gateway Active")
             .setContentText("Waiting for calls...")
             .setSmallIcon(R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .setContentIntent(pendingIntent)
-
-        return builder.build()
+            .build()
     }
 
-    private fun startTestDuplexMicToServerAndServerToOutput() {
-        if (isTestAudioActive) { MainActivity.log("Test audio already running"); return }
+    private fun startTestMode() {
+        if (isTestAudioActive) { log("Test audio already running"); return }
         if (isServiceAudioActive) {
-            MainActivity.log("Stopping SERVICE audio before TEST start")
-            stopServiceDuplexOutputToServerAndServerToInput()
+            log("Stopping SERVICE audio before TEST start")
+            stopServiceMode()
         }
         isTestAudioActive = true
         MainActivity.setStatus("Status: Test Audio Active", true)
@@ -438,81 +303,61 @@ class GsmService : Service() {
         val deviceToken = config?.DEVICE_TOKEN
 
         if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
-            MainActivity.log("⚠️ Test audio unavailable: missing backend configuration")
+            log("⚠️ Test audio unavailable: missing backend configuration")
             isTestAudioActive = false
             return
         }
 
         Thread {
             try {
-                // 1. Wait up to 5s for cmdWsClient to be ready before sending event
                 val deadline = System.currentTimeMillis() + 5000
                 while (cmdWsClient == null && System.currentTimeMillis() < deadline) {
-                    MainActivity.log("⏳ Waiting for Pusher to connect...")
+                    log("⏳ Waiting for cmd WS to connect...")
                     Thread.sleep(300)
                 }
-
                 if (cmdWsClient == null) {
-                    MainActivity.log("❌ Pusher not available after 5s - TEST AUDIO aborted")
+                    log("❌ Cmd WS not available after 5s - TEST AUDIO aborted")
                     isTestAudioActive = false
                     return@Thread
                 }
 
-                // 2. Init WS handler if needed
-                if (audioWsHandler == null) {
-                    config?.let { safeConfig ->
-                                        audioWsHandler = AudioWebSocketHandler(this@GsmService, safeConfig) { _: ShortArray -> }
-                                    }
-                    MainActivity.log("Test audio: WebSocket handler initialized")
-                }
-
-                val ws = audioWsHandler ?: run {
-                    isTestAudioActive = false
-                    return@Thread
-                }
-
+                val safeConfig = config ?: run { isTestAudioActive = false; return@Thread }
+                audioWsHandlerRef.handler?.disconnect()
+                audioWsHandlerRef.handler = AudioWebSocketHandler(this@GsmService, safeConfig, log = log) { _: ShortArray -> }
+                val ws = audioWsHandlerRef.handler!!
                 val wsUrl = baseUrl.replace("http://", "ws://").replace("https://", "wss://").removeSuffix("/") + "/ws/audio"
-
-                // 3. Connect WS for TEST mode duplex
                 ws.setCallActive(false)
                 ws.connect(wsUrl, bearerToken, deviceToken)
-                Thread.sleep(500) // wait for WS handshake
-
-                // 4. TEST mode is duplex:
-                // Android mic -> server -> browser AND browser mic -> server -> Android speaker
+                val wsDeadline = System.currentTimeMillis() + 5000
+                while (!ws.isWsConnected && System.currentTimeMillis() < wsDeadline) Thread.sleep(100)
+                if (!ws.isWsConnected) { log("❌ Audio WS failed to connect — TEST aborted"); isTestAudioActive = false; return@Thread }
                 ws.startAudioPlayback()
                 ws.startAudioCapture()
-
-                // 5. Notify browser AFTER WS is ready so browser starts mic capture immediately
                 cmdWsClient?.sendEvent("TEST_AUDIO_STARTED", emptyMap())
-                MainActivity.log("✅ TEST mode active: duplex browser<->android over websocket")
+                log("✅ TEST mode active: duplex browser<->android over websocket")
             } catch (error: Exception) {
-                MainActivity.log("ERROR starting test audio: ${error.message}")
+                log("ERROR starting test audio: ${error.message}")
                 isTestAudioActive = false
             }
         }.start()
     }
 
-    private fun stopTestDuplexMicToServerAndServerToOutput() {
+    private fun stopTestMode() {
         isTestAudioActive = false
         MainActivity.setStatus("Status: Ready", false)
-        audioWsHandler?.stopAudioCapture()
-        audioWsHandler?.stopAudioPlayback()
-        audioWsHandler?.disconnect()
-        audioWsHandler = null
-        // cmdWsClient stays connected — it's the persistent command channel
+        audioWsHandlerRef.handler?.stopAudioCapture()
+        audioWsHandlerRef.handler?.stopAudioPlayback()
+        audioWsHandlerRef.handler?.disconnect()
+        audioWsHandlerRef.handler = null
         Thread { try { cmdWsClient?.sendEvent("TEST_AUDIO_STOPPED", emptyMap()) } catch (_: Exception) {} }.start()
-        MainActivity.log("🛑 TEST stopped")
+        log("🛑 TEST stopped")
     }
 
-    private fun startServiceDuplexOutputToServerAndServerToInput() {
-        if (isServiceAudioActive) {
-            MainActivity.log("SERVICE audio already running")
-            return
-        }
+    private fun startServiceMode() {
+        if (isServiceAudioActive) { log("SERVICE audio already running"); return }
         if (isTestAudioActive) {
-            MainActivity.log("Stopping TEST audio before SERVICE start")
-            stopTestDuplexMicToServerAndServerToOutput()
+            log("Stopping TEST audio before SERVICE start")
+            stopTestMode()
         }
 
         val baseUrl = config?.BACKEND_URL
@@ -520,7 +365,7 @@ class GsmService : Service() {
         val deviceToken = config?.DEVICE_TOKEN
 
         if (baseUrl.isNullOrBlank() || bearerToken.isNullOrBlank() || deviceToken.isNullOrBlank()) {
-            MainActivity.log("⚠️ SERVICE audio unavailable: missing backend configuration")
+            log("⚠️ SERVICE audio unavailable: missing backend configuration")
             return
         }
 
@@ -537,33 +382,27 @@ class GsmService : Service() {
                 Thread.sleep(300)
             }
         }.start()
-
-        // SERVICE mode: just connect to backend and wait for CALL_STARTED command.
-        // Audio capture/playback starts only when a call connects (OFFHOOK via GsmDialer callback).
-        // Do NOT start audio here — REMOTE_SUBMIX would stream all system sounds.
-        MainActivity.log("✅ SERVICE mode active: connected to backend, waiting for CALL_STARTED")
+        log("✅ SERVICE mode active: connected to backend, waiting for CALL_STARTED")
     }
 
-    private fun stopServiceDuplexOutputToServerAndServerToInput() {
+    private fun stopServiceMode() {
         isServiceAudioActive = false
         MainActivity.setStatus("Status: Ready", false)
         Thread { cmdWsClient?.sendEvent("SERVICE_STOPPED", emptyMap()) }.start()
         try {
-            audioWsHandler?.stopAudioCapture()
-            audioWsHandler?.stopAudioPlayback()
-            audioWsHandler?.disconnect()
+            audioWsHandlerRef.handler?.stopAudioCapture()
+            audioWsHandlerRef.handler?.stopAudioPlayback()
+            audioWsHandlerRef.handler?.disconnect()
         } catch (error: Exception) {
-            MainActivity.log("WARNING: error stopping SERVICE ws: ${error.message}")
+            log("WARNING: error stopping SERVICE ws: ${error.message}")
         }
-        audioWsHandler = null
-        // cmdWsClient stays connected — it's the persistent command channel
-        MainActivity.log("🛑 SERVICE stopped")
+        audioWsHandlerRef.handler = null
+        log("🛑 SERVICE stopped")
     }
 
-    // central command dispatcher - single entrypoint
     fun handleCommand(type: String, data: Map<String, Any>) {
         try {
-            if (type != "AUDIO_CHUNK") MainActivity.log("Command received: $type")
+            if (type != "AUDIO_CHUNK") log("Command received: $type")
 
             val normalizedType = when (type) {
                 "MAKE_CALL", "CALL_START" -> "CALL_STARTED"
@@ -571,11 +410,10 @@ class GsmService : Service() {
             }
 
             when (normalizedType) {
-                "CALL_STARTED" -> handleCallStarted(data)
-                "START_AUDIO" -> handleStartAudio()
-                "CALL_ENDED" -> handleCallEnded()
-                "SEND_DTMF" -> handleSendDtmf(data)
-                "AUDIO_CHUNK" -> handleAudioChunk(data)
+                "CALL_STARTED" -> callController.handleCallStarted(data, gsmDialer)
+                "CALL_ENDED" -> callController.handleCallEnded(gsmDialer)
+                "SEND_DTMF" -> callController.handleSendDtmf(data)
+                "AUDIO_CHUNK" -> { /* legacy path — audio flows over /ws/audio, not /ws/cmd */ }
                 "SET_GAIN" -> {
                     val mic = (data["micGain"] as? Number)?.toFloat()
                     val playback = (data["playbackGain"] as? Number)?.toFloat()
@@ -591,198 +429,42 @@ class GsmService : Service() {
                     log("🎤 Mic source: ${if (useBrowser) "browser" else "phone"}")
                     if (callController.isCallActive) {
                         Thread {
-                            if (useBrowser) {
-                                audioWsHandlerRef.handler?.startAudioPlayback()
-                                Thread.sleep(300)
-                                RootUtils.muteMicTxForBrowserUplink()
-                            } else {
-                                audioWsHandlerRef.handler?.stopAudioPlayback()
-                                RootUtils.unmuteMicTxAfterBrowserUplink()
-                            }
+                            if (useBrowser) audioWsHandlerRef.handler?.startAudioPlayback()
+                            else audioWsHandlerRef.handler?.stopAudioPlayback()
                         }.start()
                     }
                     cmdWsClient?.sendEvent("MIC_SOURCE_CHANGED", mapOf("source" to if (useBrowser) "browser" else "phone"))
                 }
                 "START_SERVICE" -> {
                     ensureRealtimeClientsInitialized()
-                    startServiceDuplexOutputToServerAndServerToInput()
+                    startServiceMode()
                     MainActivity.notifyServiceActive(true)
                 }
                 "STOP_SERVICE" -> {
-                    stopServiceDuplexOutputToServerAndServerToInput()
+                    stopServiceMode()
                     MainActivity.notifyServiceActive(false)
                 }
                 "START_TEST" -> {
                     ensureRealtimeClientsInitialized()
-                    startTestDuplexMicToServerAndServerToOutput()
+                    startTestMode()
                     MainActivity.notifyTestActive(true)
                 }
                 "STOP_TEST" -> {
-                    stopTestDuplexMicToServerAndServerToOutput()
+                    stopTestMode()
                     MainActivity.notifyTestActive(false)
                 }
-                else -> MainActivity.log("Unhandled command: $type")
+                else -> log("Unhandled command: $type")
             }
         } catch (e: Exception) {
-            MainActivity.log("FATAL: Uncaught exception in handleCommand: ${e.message}")
+            log("FATAL: Uncaught exception in handleCommand: ${e.message}")
             e.printStackTrace()
         }
     }
 
-    // Dispatches commands arriving over the persistent command WebSocket (/ws/cmd)
     private fun handleWsCommand(type: String, data: org.json.JSONObject) {
         val dataMap = mutableMapOf<String, Any>()
         data.keys().forEach { key -> dataMap[key] = data.get(key) }
         handleCommand(type, dataMap)
-    }
-
-    private fun handleCallStarted(data: Map<String, Any>) {
-        try {
-            val number = data["number"] as? String
-            if (number.isNullOrBlank()) {
-                MainActivity.log("CALL_STARTED ignored: missing number")
-                return
-            }
-            val simAccountId = data["simAccountId"] as? String
-            val simComponentName = data["simComponentName"] as? String
-            MainActivity.log("Starting call to: $number (sim=$simAccountId)")
-            // Mark call active immediately — MIUI may not fire OFFHOOK callback via GsmDialer
-            isCallActive = true
-
-            // Override onCallConnected for this call — sets up WS audio for SERVICE mode
-            gsmDialer?.setCallConnectedCallback {
-                MainActivity.log("📞 OFFHOOK callback fired — call connected")
-                // MODE_IN_CALL + speakerphone routes GSM audio through the media HAL mixer,
-                // which REMOTE_SUBMIX can capture without CAPTURE_AUDIO_OUTPUT.
-                val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                audioManager.mode = AudioManager.MODE_IN_CALL
-                audioManager.isSpeakerphoneOn = true
-                // STREAM_VOICE_CALL volume must be > 0 — REMOTE_SUBMIX taps the post-volume
-                // mixer output, so volume=0 yields silence in capture even though the path is open.
-                val maxVoiceVol = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-                audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoiceVol, 0)
-                MainActivity.log("📞 Speakerphone ON + STREAM_VOICE_CALL set to max=$maxVoiceVol (REMOTE_SUBMIX needs audible signal to tap)")
-
-                Thread {
-                    try {
-                        val wsUrl = config?.BACKEND_URL?.replace("http://", "ws://")
-                            ?.replace("https://", "wss://")?.removeSuffix("/") + "/ws/audio"
-                        if (audioWsHandler == null) {
-                            config?.let { c -> audioWsHandler = AudioWebSocketHandler(this@GsmService, c) { } }
-                        }
-                        audioWsHandler?.connect(wsUrl, config?.BACKEND_BEARER ?: "", config?.DEVICE_TOKEN ?: "")
-                        Thread.sleep(300)
-                        isCallActive = true
-                        audioWsHandler?.setCallActive(true)
-                        val amMute = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                        amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
-                        RootUtils.mutePhoneSpeaker()
-                        // Enable downlink capture path
-                        val captureEnabled = RootUtils.enableIncallMusicCapture()
-                        MainActivity.log("📞 Incall capture path: $captureEnabled")
-                        Thread.sleep(200)
-                        audioWsHandler?.stopAudioPlayback()
-                        audioWsHandler?.startAudioCapture()
-                        // Enable AFE-PROXY injection (pcmC0D6p → VoiceMMode2_Tx) before opening pcm_play
-                        val afeOk = RootUtils.enableAfeProxyInjection()
-                        MainActivity.log("📞 AFE-PROXY injection enabled=$afeOk")
-                        audioWsHandler?.startAudioPlayback()
-                        // Re-mute in case HAL re-enabled speaker when pcm0p opened
-                        amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
-                        RootUtils.mutePhoneSpeaker()
-                        cmdWsClient?.sendEvent("CALL_CONNECTED", emptyMap())
-                        MainActivity.log("📞 CALL_CONNECTED sent to backend")
-                    } catch (error: Exception) {
-                        MainActivity.log("ERROR in CALL_CONNECTED callback: ${error.message}")
-                    }
-                }.start()
-            }
-
-            // 2. start call with error handling
-            try {
-                val started = gsmDialer?.startCall(number, simAccountId, simComponentName) ?: false
-                if (started) {
-                    MainActivity.log("Call started via GsmDialer to $number")
-                } else {
-                    MainActivity.log("Call start failed - syncing CALL_ENDED state")
-                    audioStreamHandler?.stopAudioCapture()
-                    audioStreamHandler?.stopAudioPlayback()
-                    audioWsHandler?.disconnect()
-                    cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
-                }
-            } catch (error: Exception) {
-                MainActivity.log("ERROR starting call: ${error.message}")
-                audioStreamHandler?.stopAudioCapture()
-                audioStreamHandler?.stopAudioPlayback()
-                audioWsHandler?.disconnect()
-                cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
-                error.printStackTrace()
-            }
-        } catch (e: Exception) {
-            MainActivity.log("FATAL ERROR in handleCallStarted: ${e.message}")
-            e.printStackTrace()
-        }
-    }
-
-    private fun handleStartAudio() {
-        MainActivity.log("📞 START_AUDIO received — starting tinycap + pcm_play")
-        Thread {
-            try {
-                val captureEnabled = RootUtils.enableIncallMusicCapture()
-                MainActivity.log("📞 Incall capture path: $captureEnabled")
-                // Enable AFE-PROXY injection before starting pcm_play so the mixer
-                // route is live when pcmC0D6p opens.
-                val afeOk = RootUtils.enableAfeProxyInjection()
-                MainActivity.log("📞 AFE-PROXY injection enabled=$afeOk")
-                Thread.sleep(200)
-                audioWsHandler?.stopAudioPlayback()
-                audioWsHandler?.startAudioCapture()
-                audioWsHandler?.startAudioPlayback()
-                // Re-mute in case HAL re-enabled speaker when pcm0p opened
-                val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
-                RootUtils.mutePhoneSpeaker()
-            } catch (e: Exception) {
-                MainActivity.log("ERROR in handleStartAudio: ${e.message}")
-            }
-        }.start()
-    }
-
-    private fun handleCallEnded() {
-        try {
-            MainActivity.log("Ending call")
-            Thread {
-                try {
-                    gsmDialer?.endCall()
-                    Thread.sleep(300)
-                    audioWsHandler?.stopAudioCapture()
-                    audioWsHandler?.stopAudioPlayback()
-                    audioStreamHandler?.stopAudioCapture()
-                    audioStreamHandler?.stopAudioPlayback()
-                    cmdWsClient?.sendEvent("CALL_ENDED", emptyMap())
-                } catch (error: Exception) {
-                    MainActivity.log("ERROR in handleCallEnded thread: ${error.message}")
-                }
-            }.start()
-        } catch (error: Exception) {
-            MainActivity.log("ERROR in handleCallEnded: ${error.message}")
-        }
-    }
-
-    private fun handleSendDtmf(data: Map<String, Any>) {
-        try {
-            val digit = data["digit"] as? String
-            if (digit.isNullOrBlank()) {
-                MainActivity.log("SEND_DTMF ignored: missing digit")
-                return
-            }
-            MainActivity.log("Sending DTMF: $digit")
-            gsmDialer?.sendDtmf(digit[0])
-            cmdWsClient?.sendEvent("DTMF_SENT", mapOf("digit" to digit))
-        } catch (e: Exception) {
-            MainActivity.log("ERROR in handleSendDtmf: ${e.message}")
-            e.printStackTrace()
-        }
     }
 
     private fun setupPhoneStateListener() {
@@ -791,26 +473,25 @@ class GsmService : Service() {
             phoneStateListener = object : PhoneStateListener() {
                 override fun onCallStateChanged(state: Int, phoneNumber: String?) {
                     when (state) {
-                        TelephonyManager.CALL_STATE_OFFHOOK -> {
-                            // Audio mode is set by GsmDialer OFFHOOK callback (MODE_IN_CALL + speakerphone).
-                            // Do NOT override it here — MODE_IN_COMMUNICATION routes to earpiece and breaks MultiMedia1.
-                            MainActivity.log("PhoneStateListener: OFFHOOK - audio mode managed by GsmDialer callback")
-                        }
+                        // OFFHOOK: do NOT touch audio mode here — GsmDialer's setCallConnectedCallback
+                        // owns MODE_IN_CALL + speakerphone setup. Overriding it here caused the
+                        // speakerphone to be flipped off, silencing GSM audio capture.
                         TelephonyManager.CALL_STATE_IDLE -> {
-                            // Audio teardown is owned by GsmDialer.setCallEndedCallback — do NOT touch audio here.
-                            // MIUI fires IDLE spuriously ~10s into active calls which would kill the AudioTrack mid-call.
-                            MainActivity.log("PhoneStateListener: IDLE - audio teardown delegated to GsmDialer callback")
+                            log("PhoneStateListener: IDLE")
+                            // Safety net: if GsmDialer callback didn't fire (edge case), clean up.
+                            if (callController.isCallActive || audioWsHandlerRef.handler != null) {
+                                log("PhoneStateListener: IDLE safety net — tearing down call")
+                                callController.teardownCall()
+                            }
                         }
-                        TelephonyManager.CALL_STATE_RINGING -> {
-                            MainActivity.log("PhoneStateListener: RINGING")
-                        }
+                        TelephonyManager.CALL_STATE_RINGING -> log("PhoneStateListener: RINGING")
                     }
                 }
             }
             telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_CALL_STATE)
-            MainActivity.log("PhoneStateListener registered")
+            log("PhoneStateListener registered")
         } catch (e: Exception) {
-            MainActivity.log("Error setting up PhoneStateListener: ${e.message}")
+            log("Error setting up PhoneStateListener: ${e.message}")
         }
     }
 
@@ -818,30 +499,8 @@ class GsmService : Service() {
         try {
             if (phoneStateListener != null && telephonyManager != null) {
                 telephonyManager?.listen(phoneStateListener, PhoneStateListener.LISTEN_NONE)
-                MainActivity.log("PhoneStateListener unregistered")
             }
-        } catch (e: Exception) {
-            MainActivity.log("Error unregistering PhoneStateListener: ${e.message}")
-        }
+        } catch (_: Exception) {}
     }
 
-    private fun handleAudioChunk(data: Map<String, Any>) {
-        try {
-            val audioData = data["audio"] as? String
-            if (audioData.isNullOrBlank()) {
-                MainActivity.log("AUDIO_CHUNK ignored: missing audio data")
-                return
-            }
-
-            if (audioStreamHandler == null) {
-                MainActivity.log("AUDIO_CHUNK received but AudioStreamHandler not initialized")
-                return
-            }
-
-            audioStreamHandler?.playAudioChunk(audioData)
-        } catch (e: Exception) {
-            MainActivity.log("ERROR playing audio chunk: ${e.message}")
-            e.printStackTrace()
-        }
-    }
 }

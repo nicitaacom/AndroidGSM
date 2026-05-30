@@ -23,7 +23,8 @@ class WebSocketAudioClient(
         .build()
 
     private var ws: WebSocket? = null
-    private var isConnected = false
+    var isConnected = false
+        private set
 
     companion object {
         private const val TAG = "WebSocketAudio"

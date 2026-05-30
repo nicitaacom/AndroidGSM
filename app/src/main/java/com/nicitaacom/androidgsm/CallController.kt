@@ -60,9 +60,8 @@ class CallController(
 
             Thread {
                 try {
-                    // VOC_REC_DL was already primed in handleCallStarted (before dialing).
-                    // Re-confirm slot state here for logging only.
-                    log("📞 OFFHOOK — VOC_REC_DL state: ${RootUtils.enableIncallMusicCapture()}")
+                    val captureEnabled = RootUtils.enableIncallMusicCapture()
+                    log("📞 Incall capture path: $captureEnabled")
                     Thread.sleep(300)
 
                     val wsUrl = config.BACKEND_URL
@@ -93,22 +92,12 @@ class CallController(
                     val amMute = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
                     amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
                     RootUtils.mutePhoneSpeaker()
-                    // Start tinyplay → pcmC0D19p (VoiceMMode2 TX) for browser mic uplink.
-                    // Then mute hardware mic TX so phone mic doesn't compete with browser audio.
-                    // IMPORTANT: mute AFTER startAudioPlayback so tinyplay is already writing;
-                    // if muted before any audio arrives, remote hears silence.
-                    log("📞 calling startAudioPlayback...")
+                    // Uplink injection via Incall_Music mixer is NOT used — MIUI CAF kernel
+                    // blocks slot 1 (VoiceMMode2) ELEM_WRITE silently. Instead, startAudioPlayback()
+                    // writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX PCM device).
                     audioWsHandlerRef.handler?.startAudioPlayback()
-                    log("📞 startAudioPlayback returned, sleeping 300ms")
-                    Thread.sleep(300)
-                    if (AudioWebSocketHandler.useBrowserMicUplink) {
-                        RootUtils.muteMicTxForBrowserUplink()
-                    }
-                    val client = cmdWsClient()
-                    android.util.Log.d("CmdWS", "📞 about to send CALL_CONNECTED, client=$client isConnected=${client?.isConnected}")
-                    client?.sendEvent("CALL_CONNECTED", emptyMap())
-                    android.util.Log.d("CmdWS", "📞 CALL_CONNECTED sendEvent returned")
-                    CallActivity.notifyConnected()
+                    cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
+                    log("📞 CALL_CONNECTED sent to backend")
                 } catch (error: Exception) {
                     log("ERROR in CALL_CONNECTED callback: ${error.message}")
                 }
@@ -127,7 +116,6 @@ class CallController(
         try {
             RootUtils.disableIncallMusicCapture()
             RootUtils.disableIncallMusicInjection()
-            RootUtils.unmuteMicTxAfterBrowserUplink() // restore hardware mic TX
             RootUtils.unmutePhoneSpeaker()
             val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
             am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL), 0)
@@ -168,22 +156,12 @@ class CallController(
             val simComponentName = data["simComponentName"] as? String
             log("Starting call to: $number (sim=$simAccountId)")
             RootUtils.mutePhoneSpeaker()
-            // Prime VOC_REC_DL BEFORE the call connects — the kernel blocks slot 1 writes
-            // once VoiceMMode2 is active. Setting it during dialing (before OFFHOOK) sticks.
-            RootUtils.enableIncallMusicCapture()
             setCallActive(true)
             // GsmDialer callbacks (set once in wireDialerCallbacks) handle OFFHOOK and IDLE — do NOT
             // override setCallConnectedCallback here; doing so per-call created duplicate
             // teardown paths that fired triple CALL_ENDED events.
             try {
-                if (gsmDialer == null) {
-                    // Service just started — gsmDialer not ready yet. Retry up to 3s.
-                    log("⚠️ CALL_STARTED: gsmDialer null, will retry via GsmService")
-                    setCallActive(false)
-                    cmdWsClient()?.sendEvent("CALL_ENDED", emptyMap())
-                    return
-                }
-                val started = gsmDialer.startCall(number, simAccountId, simComponentName)
+                val started = gsmDialer?.startCall(number, simAccountId, simComponentName) ?: false
                 if (started) {
                     log("Call started via GsmDialer to $number")
                 } else {
