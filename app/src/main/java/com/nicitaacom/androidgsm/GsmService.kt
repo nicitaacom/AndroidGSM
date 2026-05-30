@@ -56,6 +56,8 @@ class GsmService : Service() {
         const val ACTION_STOP_SERVICE = "com.nicitaacom.androidgsm.action.STOP_SERVICE"
         const val ACTION_SET_MIC_SOURCE = "com.nicitaacom.androidgsm.action.SET_MIC_SOURCE"
         const val EXTRA_MIC_SOURCE = "mic_source"
+        const val ACTION_CALL_CONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_CONNECTED"
+        const val ACTION_CALL_DISCONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_DISCONNECTED"
     }
 
     override fun onCreate() {

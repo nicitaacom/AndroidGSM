@@ -7,6 +7,153 @@ Phone = modem. Backend = brain. Frontend controls service lifecycle.
 
 ---
 
+## ⛔ STOP — website-mic uplink on a real GSM call is a FIRMWARE DEAD END (don't go in circles)
+
+> Read this before touching kernel/mixer/tinyplay/host-PCM uplink code again.
+> Confirmed on hardware 2026-05-30. Device: Redmi Note 7 (lavender, sdm660, MIUI A10).
+
+**Goal that does NOT work:** feeding the *website's* mic into a live **carrier CS
+(circuit-switched) GSM call** so the remote party hears the website. The remote can
+only ever hear the **phone's own hardware mic** on a CS call.
+
+**Where the wall actually is:** the closed **ADSP firmware**, one layer *below* the
+kernel. It is signed/encrypted — you cannot read, modify, or override it from the OS.
+
+**Two earlier diagnoses were WRONG (both misreads — do not chase them again):**
+1. ❌ "slot 1 (VoiceMMode2) write silently dropped" — the control is `SOC_SINGLE_EXT`
+   (single-element); the "2 slots" tinymix shows is a display artifact.
+2. ❌ "kvaddr=NULL ION timing bug" — `kvaddr=0` in dmesg is `%pK` printing zeros under
+   `kptr_restrict=2`, NOT a real NULL. `msm_audio_ion_alloc()` errors out if vaddr is
+   truly NULL, so it can't succeed with NULL. ION mapped fine (`mem_handle=0x24`).
+
+**The real, final failure** (kernel injector flashed, live VoiceMMode2 call):
+```
+vmm2_inj: ADSP memory mapped, mem_handle=0x24            ← kernel side SUCCEEDED
+voc_send_cvp_start_vocpcm: DSP returned error[ADSP_EUNSUPPORTED]
+vmm2_inj: start_vocpcm failed -38                        ← FIRMWARE refused (-38 = ENOSYS)
+```
+The only software TX-injection the firmware supports (VSS_IVPCM host-PCM tap) is
+accepted **only on a session created as host-PCM** (the dormant
+`msm-pcm-host-voice-v2.c` driver). A live carrier CS call set up by the modem/RIL is a
+different session and the firmware refuses to retrofit a TX tap onto it. Enabling that
+dormant driver would only inject into its *own* host-PCM session, not the carrier call.
+**No kernel patch can make the DSP say yes.**
+
+### Why every alternative is also walled (the full map — read this, save months)
+
+The goal "I speak on the laptop, remote hears me" has exactly **two** technical shapes,
+and **each hits a hard wall.** Neither wall is something you can code around.
+
+#### Wall 1 — CS (carrier) call → FIRMWARE wall
+A normal carrier call's mic is hardware-only, owned by the ADSP firmware (proven above).
+Software cannot inject into it. This includes the seductive idea of a **"virtual mic"**:
+
+> ❌ **A virtual / software mic does NOT work for a CS call on this phone.**
+> A virtual mic lives in Android's AudioFlinger (software audio layer). A CS call's mic
+> comes from the hardware mic → modem voice DSP, **bypassing AudioFlinger entirely**.
+> So the call never reads the virtual mic. A virtual mic only works for apps that read
+> the mic via AudioFlinger — VoIP apps, recorders, WebRTC — **never a carrier CS call.**
+> "Virtual mic" is just "software mic injection" = the exact thing the firmware blocks.
+
+The only way audio enters a CS call's uplink is as a **physical analog mic signal**:
+wired headset mic, Bluetooth (HFP) headset mic, or acoustic (speaker → phone mic).
+
+#### Wall 2 — VoIP call → PROVIDER / KYC wall
+A VoIP/SIP call's audio DOES go through AudioFlinger, so a virtual mic WOULD work.
+But to place a VoIP call to a **real phone number** (PSTN) you need a provider with a
+carrier relationship — and that's a regulated, KYC-gated activity. Confirmed dead ends
+(months of attempts, 2026):
+- **Twilio** — works technically but too expensive for the use case.
+- **Telnyx** — KYC via Onfido; rejects every passport tried (own + friends'). No KYC → no service.
+- **Dial9 / many UK SIP providers** — require a **UK proof-of-address**.
+- **Betamax/Voipbuster-family, misc cheap providers** — registration rejected / sign-up broken.
+- General truth: cheap + no-KYC + PSTN-origination basically **does not exist**, because
+  the phone network legally won't let an unverified stranger originate calls. The KYC
+  *is* the wall, not the software.
+
+#### The asset you already have: your UK SIM passed KYC
+You already cleared verification once — when you got the **UK SIM**. That SIM is your
+only KYC-free PSTN credential. So the realistic exits all route **through that SIM**,
+just in hardware where the call audio is *software-accessible* (not firmware-locked):
+
+| Exit | KYC? | Buy? | Virtual mic works? | Notes |
+|---|---|---|---|---|
+| **This phone, CS call + physical mic feed** (wired headset / BT / acoustic) | none | cable/host near phone | no — analog only | works today; audio must be physically beside the phone |
+| **USB LTE modem (Quectel EC25 / SIMCom A7600) with the SIM** | none (uses your SIM) | ~$30–60 module + host | ✅ yes (call audio over USB-audio) | self-hosted, no firmware wall; needs hardware near the SIM |
+| **VoIP↔GSM gateway box (GoIP / Yeastar TG) with the SIM** | none (uses your SIM) | ~$40–100 box | ✅ yes (SIP ↔ GSM) | most plug-and-play; the commercial version of this project |
+| Self-hosted Asterisk/FreeSWITCH + **paid/KYC SIP trunk** | YES (the wall) | trunk cost | ✅ yes | blocked by Wall 2 above |
+
+**Bottom line:** on *this phone*, for a *CS call*, there is **no software-only fix** —
+not kernel, not mixer, not virtual mic. Either feed analog audio physically into this
+phone, or move the SIM into a USB-modem / gateway box where the audio is software. Both
+keep your UK number and need **no provider KYC.**
+
+#### ✅ THE EXIT THAT WORKS: Bluetooth HFP mic (proven on hardware 2026-05-30)
+When a Bluetooth headset (HFP) connects during a live CS call, the **modem/DSP itself
+reroutes the call mic from the phone mic to the BT SCO mic** — a *firmware-blessed*
+route (unlike VSS_IVPCM, which the firmware rejects). Confirmed in the live mixer during
+an active VoiceMMode2 call:
+```
+VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2   Off Off   ← phone hardware mic: OFF
+VoiceMMode2_Tx Mixer SLIM_7_TX_MMode2      On  Off   ← BT HFP/SCO mic: ON
+```
+A real BT headset's mic was confirmed audible to the remote party. **The audio on that
+SCO channel doesn't have to come from a physical headset mic** — it's whatever device
+acts as the BT HFP headset.
+
+**Plan (website mic → remote, no KYC, no firmware patch, no root mixer):**
+1. Small always-on Linux host **beside the UK phone** (BT is local-range): Pi / mini-PC / old laptop.
+2. Host runs BlueZ as a **Bluetooth HFP headset/audio-gateway** the phone routes call audio to → it owns the SCO mic channel (= `SLIM_7_TX` into the call).
+3. Website mic (browser, DE) → existing `/ws/audio` → VPS → UK-side host → injected as the BT HFP SCO "mic" → phone → CS uplink → remote hears the laptop.
+4. Downlink already works via tinycap (or take it from the same BT SCO speaker channel).
+
+The firmware auto-selects `SLIM_7_TX` when BT HFP is the active call-audio device — **no
+manual tinymix/set_mixer_ctl needed.** See memory `bt-hfp-uplink-works.md`.
+
+##### UK-side host: Raspberry Pi (decided 2026-05-30; future build, not done yet)
+The "fake headset" that injects WS audio as the BT mic must be a **programmable** BT
+device next to the phone — a real headset can't (it only sends its own mic; you can't
+feed a stream into it). Options weighed:
+- ❌ Dumb BT headset — closed appliance, no audio-in.
+- ❌ Spare Android (5.2) — Android won't let an app replace the BT HFP mic stream (closed
+  BT stack/HAL, no API, not even rooted). Wired-cable variant could play audio out its
+  jack, but 5.2 is too fragile for the WS-receiver app.
+- ✅ **Raspberry Pi** — full BlueZ/audio control, no vendor lock. The right host.
+
+**Cost case (Pi beats every PSTN provider, and isn't KYC-blocked):**
+
+| | One-time | Ongoing | Year 1 | Then/yr |
+|---|---|---|---|---|
+| **Phone + Raspberry Pi setup** | ~$50 phone + ~$40 Pi + ~$10 ship ≈ **$100** | ~$15/mo SIM | **≈ $250** | **≈ $150** |
+| Twilio / Telnyx / etc. | — | — | **> $500** | > $500 |
+| | | | | *and KYC-blocked (Onfido rejects, UK address required)* |
+
+Plus: keeps your UK number, your already-verified SIM, and needs no provider sign-up.
+Build steps (BlueZ HFP role, SCO codec, audio injection) are open for the next session.
+
+##### Works-today fallback (phone local in DE, no Pi yet)
+Until the Pi-in-UK setup is built, you can already use this **right now** with the phone
+in front of you in DE. The goal "remote hears me, not just the phone mic" is met by
+making *your* voice the phone's mic directly — two ways:
+1. **Wired USB-C mic:** plug a **USB-C mic** (or a USB mic via a USB-C adapter) into the
+   phone and talk into that instead of the laptop. It registers as a USB Audio Class
+   (UAC) input and the firmware routes it via `USB_AUDIO_TX_MMode2` (seen in the mixer
+   dump) — same firmware-blessed external-mic path. Skips the laptop entirely. (Not the
+   3.5mm jack — a USB-C / USB mic.)
+2. **Bluetooth (no Frankenstein phone-holder rig):** connect the small **Lenovo
+   thinkplus** BT earbuds to the phone and **talk into the RIGHT earbud's mic** — proven
+   above to route into the call uplink (`SLIM_7_TX`). Lets you talk hands-free without
+   holding the phone to your face.
+
+These are the same firmware-blessed mic path the Pi plan uses — just with you physically
+next to the phone instead of a Pi bridging your laptop audio over the internet.
+
+**What still works as-is:** downlink (remote → website via tinycap on MultiMedia1),
+and `placeCall` with no PhoneAccountHandle. Full history below under
+"Browser mic uplink" / "Iterations to use website's mic" (kept for the record).
+
+---
+
 ## First-time setup (Kali / no Android SDK)
 
 ```bash
@@ -26,7 +173,10 @@ Edit `app/src/main/assets/androidgsm.config.json`:
 ```json
 {
   "BACKEND_URL": "https://your-backend.com",
-  "BACKEND_BEARER": "your-secret-token"
+  "BACKEND_BEARER": "your-secret-token",
+  "PUSHER_KEY": "your-pusher-key",
+  "PUSHER_CLUSTER": "eu",
+  "DEVICE_TOKEN": ""
 }
 ```
 
@@ -38,12 +188,10 @@ Edit `app/src/main/assets/androidgsm.config.json`:
 ```bash
 adb devices   # must show device, not unauthorized
 
-sudo udevadm control --reload-rules && sudo udevadm trigger
-
 # Always clean to avoid INSTALL_PARSE_FAILED
 adb shell am force-stop com.nicitaacom.androidgsm \
   ; ./gradlew clean assembleDebug \
-  && adb install -r -d $(ls -t app/build/outputs/apk/debug/*.apk | head -n1) \
+  && adb install -r $(ls -t app/build/outputs/apk/debug/*.apk | head -n1) \
   && adb shell am start -n com.nicitaacom.androidgsm/.MainActivity
 
 # Live logs
@@ -61,18 +209,10 @@ adb logcat -s GSM:D AudioWebSocket:D WebSocketAudio:D CmdWS:D RootUtils:D
 
 ## Architecture
 
-### Why WebSocket for Android commands (not Pusher)
+### Pusher usage (minimal — browser only)
 
-Android uses a persistent outbound WebSocket (`/ws/cmd`) for all commands — CALL_STARTED,
-CALL_ENDED, DTMF, heartbeats, status events. Pusher is **not used on Android** because:
-- Android already holds an open WS connection — no extra channel needed
-- No Pusher auth endpoint required (no `/pusher/auth` dependency)
-- Zero Pusher quota cost — commands never count against the message limit
-- Lower latency — direct WS vs Pusher relay
-- Self-managed reconnect with no third-party failure mode
-
-Pusher is used **only** to push call state events to the browser (5–10 messages per call),
-where it provides push delivery without the browser needing a persistent connection.
+Pusher is used **only** to push call state events to the browser (5–10 messages per call).
+Android does NOT subscribe to Pusher. All Android↔backend communication goes over WebSocket.
 
 | What | Where | Cost |
 |------|-------|------|
@@ -82,59 +222,6 @@ where it provides push delivery without the browser needing a persistent connect
 | Android heartbeats | `/ws/cmd` WebSocket | 0 Pusher msgs |
 | Audio | `/ws/audio` WebSocket | 0 Pusher msgs |
 
-### WebSocket internals (under the hood)
-
-Two persistent WebSocket connections are maintained by the Android app at all times:
-
-/ws/cmd  — command channel (CommandWebSocketClient)
-/ws/audio — audio channel (WebSocketAudioClient, only open during calls/TEST)
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  Android (CommandWebSocketClient)                               │
-│                                                                 │
-│  on connect:  ──► CONNECTED_EXPLICIT { isServiceActive, ... }  │
-│  every 10s:   ──► CONNECTED          { heartbeat:true,         │
-│                                        isServiceActive,         │
-│                                        isTestActive }           │
-│  on call:     ──► CALL_CONNECTED {}                             │
-│  on end:      ──► CALL_ENDED {}                                 │
-│  on svc start:──► SERVICE_STARTED {}                            │
-│                                                                 │
-│               ◄── CALL_STARTED  { number, simAccountId }       │
-│               ◄── CALL_ENDED    {}                              │
-│               ◄── SEND_DTMF     { digit }                       │
-│               ◄── SET_GAIN      { micGain, playbackGain }       │
-│               ◄── SET_MIC_SOURCE{ source: "browser"|"phone" }  │
-│               ◄── START_SERVICE / STOP_SERVICE                  │
-│               ◄── START_TEST    / STOP_TEST                     │
-└─────────────────────────────────────────────────────────────────┘
-                         ↕ /ws/cmd (always open)
-                   ┌─────────────┐
-                   │  server.ts  │
-                   │  in-memory  │
-                   │  connectedDevices map:        │
-                   │    lastSeen (updated each HB) │
-                   │    isServiceActive            │
-                   │    isTestActive               │
-                   └─────────────┘
-                         ↕ /ws/audio (open during call/TEST only)
-┌─────────────────────────────────────────────────────────────────┐
-│  Android (WebSocketAudioClient)                                 │
-│                                                                 │
-│  on connect:  ──► { role:"android", deviceToken, dir:"toBrowser"} │
-│  streaming:   ──► { role, deviceToken, dir:"toBrowser",         │
-│                     codec:"pcm16", seq, ts, sampleRate:16000,   │
-│                     audio:<base64 PCM16> }    (50 chunks/sec)   │
-│               ◄── { dir:"toAndroid", audio:<base64 PCM16> }    │
-│                     (browser mic → AudioTrack → GSM uplink)    │
-└─────────────────────────────────────────────────────────────────┘
-
-Server staleness: device marked offline if lastSeen > 30s ago.
-Heartbeat interval: 10s  →  safe margin of 3× before timeout.
-OkHttp WS ping:     20s  →  keeps TCP alive through NAT.
-```
-
 ### Service lifecycle
 
 The phone app **never auto-starts SERVICE or TEST mode** on launch. GsmService starts as a
@@ -143,7 +230,7 @@ stopped exclusively from the frontend via commands over `/ws/cmd`.
 
 State sync is dual-path:
 1. **Immediate**: Android sends `SERVICE_STARTED`/`SERVICE_STOPPED` events over `/ws/cmd` with a retry loop (10s deadline, 300ms poll) to handle WS not yet open
-2. **Periodic fallback**: Heartbeat every 10s carries `isServiceActive` and `isTestActive` via `stateProvider` lambda
+2. **Periodic fallback**: Heartbeat every 15s carries `isServiceActive` and `isTestActive` via `stateProvider` lambda
 
 Frontend polls `/api/gsm/status` every 2s — returns `isServiceActive` and `isTestActive` so the UI reflects real phone state.
 
@@ -207,7 +294,7 @@ GsmService              Foreground service; owns all state, dispatches commands.
 CommandWebSocketClient  Persistent WS to /ws/cmd. Stays connected always.
                         Receives CALL_STARTED/CALL_ENDED/START_SERVICE/STOP_SERVICE/
                           START_TEST/STOP_TEST/SET_GAIN commands.
-                        Sends CONNECTED heartbeats every 10s with isServiceActive +
+                        Sends CONNECTED heartbeats every 15s with isServiceActive +
                           isTestActive state (no Pusher cost).
                         Sends SERVICE_STARTED/STOPPED/CALL_CONNECTED/CALL_ENDED events.
                         Auto-reconnects on failure.
@@ -412,31 +499,6 @@ Frontend clicks STOP TEST:
 
 ---
 
-## Mic source toggle
-
-During a GSM call, the uplink source (what the remote party hears) can be switched between
-**browser mic** (default) and **phone mic** (hardware mic handles uplink natively).
-
-Toggling from the phone UI (button in header) or from frontend via `SET_MIC_SOURCE` command:
-
-```
-Toggle → browser mic (default):
-  RootUtils.enableIncallMusicInjection() — MultiMedia1 → voice TX
-  AudioTrack plays browser PCM → remote party
-
-Toggle → phone mic:
-  RootUtils.disableIncallMusicInjection() — MultiMedia1 route removed
-  Hardware mic TX active — phone mic → remote party directly
-  Browser audio chunks dropped (not played to AudioTrack)
-```
-
-The button shows current state: **green = MIC: BROWSER**, **red = MIC: PHONE**.
-Downlink (tinycap → browser) is unaffected by this toggle.
-
-Android → server event: `MIC_SOURCE_CHANGED { source: "browser" | "phone" }`
-
----
-
 ## Gain control
 
 Mic gain and playback volume are controlled from the frontend — no phone UI sliders.
@@ -475,6 +537,120 @@ The frontend (`useInitGSM.ts`) auto-selects the first SIM and exposes `simsRef`,
 
 When `call()` is invoked, `simAccountId` and `simComponentName` are sent to the backend
 and forwarded to Android, which passes the correct `PhoneAccountHandle` to `placeCall()`.
+
+---
+
+## placeCall() "Mobile network not available" — iterations
+
+All failures share the same root cause: `TelephonyConnectionService.getPhoneForAccount` returns
+null → Telecom immediately disconnects the call with `DisconnectCause(ERROR, "Phone is null, OUT_OF_SERVICE")`.
+
+**Device context:** Xiaomi Redmi Note 7 (sdm660, MIUI Android 10), dual-SIM slot.
+Slot 0: ABSENT (subId=1, iccId=...674563). Slot 1: LOADED/active (subId=2, iccId=...622364).
+`gsm.sim.state = ABSENT,LOADED`. Default subId resolves to -1 (no default set).
+
+**Iteration 1 — old simState check**
+`telephonyManager.simState` checks the default subscription (slot 0 = ABSENT) → call rejected
+before `placeCall()` is even called. Fixed: replaced with `callCapablePhoneAccounts.isNotEmpty()`.
+
+**Iteration 2 — GsmConnectionService intercepting placeCall()**
+`GsmConnectionService` was registered with `BIND_TELECOM_CONNECTION_SERVICE` intent filter.
+When our app is the default dialer, Telecom routed `placeCall()` through our `ConnectionService`
+first instead of `TelephonyConnectionService`. Our `GsmConnection.setDialing()` returned a dead
+connection with no real modem. Fixed: removed `GsmConnectionService` and `GsmConnection` entirely
+from the manifest — they are not needed for the DIALER role. Only `GsmInCallService` is needed.
+
+**Iteration 3 — no PhoneAccountHandle → default subId=-1**
+Without `EXTRA_PHONE_ACCOUNT_HANDLE`, Telecom picks the default voice subscription (subId=-1 on
+this device) → `getPhoneForAccount` → `chosenPhone=null`. Fixed: always pass an explicit handle.
+
+**Iteration 4 — handle built from callCapablePhoneAccounts has id=ICCID, not subId**
+`callCapablePhoneAccounts.firstOrNull()` returns a handle with `id=89490240001956622364` (ICCID).
+`TelephonyConnectionService.getPhoneForAccount` on this MIUI build resolves Phone objects by
+subId string, not ICCID → still `chosenPhone=null`. Fix attempt: build handle manually with
+`id=activeSubId.toString()` using `TelephonyConnectionService` component.
+
+**Iteration 5 — activeSubscriptionInfoList returned wrong SIM (current)**
+`activeSubscriptionInfoList.firstOrNull { it.simSlotIndex >= 0 }` returned the absent SIM
+(subId=1, simSlotIndex from DB = -1 but list returned it with slot ≥ 0 on this MIUI build).
+Result: `handle.id="1"` → wrong SIM → `chosenPhone=null`. Fix: `maxByOrNull { it.simSlotIndex }`
+to pick the SIM in the highest slot index (slot 1 = active).
+
+**Iteration 6 — no PhoneAccountHandle at all (WORKING)**
+Passing ANY handle causes `TelephonyConnectionService.getPhoneForAccount` to fail on this MIUI
+build regardless of what id is used. Solution: pass empty `Bundle()` with no handle — MIUI
+resolves the SIM itself. Call connects. ✅
+
+**Dual-SIM caveat:** the `simAccountId`/`simComponentName` from the frontend are now ignored
+when no handle is explicitly provided. Dual-SIM SIM selection from the frontend is broken until
+a working way to pass a handle for a specific SIM is found on this MIUI build.
+
+**Current status: call connects. Dual-SIM selection disabled.**
+
+---
+
+## Browser mic uplink — why remote party hears nothing (confirmed dead end)
+
+tinyplay writing to pcmC0D19p is the VoiceMMode2 **RX** playback device — it plays audio
+to the phone's earpiece/speaker, NOT into the GSM TX uplink. The `VoiceMMode2_Tx Mixer`
+has no entry for any MM/VOIP/pcmC0D19 source — only physical mic interfaces (INT3_MI2S_TX etc.).
+
+Full mixer dump during active call confirms: all `VoiceMMode2_Tx Mixer` entries are Off.
+The only active route is `INT0_MI2S_RX_Voice Mixer VoiceMMode2 On Off` (earpiece downlink).
+
+The ONLY path into VoiceMMode2 TX from software is `Incall_Music Audio Mixer MultiMedia*/MultiMedia5`
+slot 1 (VoiceMMode2) — which the MIUI CAF kernel silently ignores on ELEM_WRITE (confirmed by
+brute-force ioctl scan). Slot 0 (VoiceMMode1) writes succeed but the active call uses VoiceMMode2.
+
+**Known dead ends for browser mic → remote party TX:**
+1. `AudioTrack(USAGE_MEDIA)` + `Incall_Music Audio Mixer` slot 0 → routes to VoiceMMode1 (wrong session)
+2. `Incall_Music Audio Mixer` slot 1 → kernel ignores ELEM_WRITE silently
+3. tinyplay to pcmC0D19p → RX playback device, not TX; remote party hears nothing
+4. `VoiceMMode2_Tx Mixer` has no MM/software source — only physical mics
+
+**Iteration 7 — Incall_Music_2 Audio Mixer + tinyplay to MultiMedia1/MultiMedia5/VoiceMMode1/VoIP devices**
+Set `Incall_Music_2 Audio Mixer MultiMedia1` slot 0 = On (succeeds, kernel does not block it).
+Played white noise and 1kHz tone via tinyplay to pcmC0D0p (MultiMedia1), pcmC0D13p (MultiMedia5),
+pcmC0D2p (VoiceMMode1), pcmC0D3p (VoIP), pcmC0D19p (VoiceMMode2). Remote party heard silence on
+all devices. Full mixer dump during active call: `VoiceMMode2_Tx Mixer` has zero active entries.
+`Incall_Music` controls are set but MultiMedia1 PCM is closed — no audio routed into TX.
+Conclusion: `Incall_Music` DSP path does not connect to VoiceMMode2 TX on this MIUI CAF build
+regardless of which PCM device or mixer control is used.
+
+**Iteration 8 — confirmed the slot-1 block is systemic (all 2-slot voice TX controls)**
+Tested `VoiceMMode2_Tx Mixer INT_BT_SCO_TX_MMode2` (numid 2014):
+- slot 0 write → `On` (kernel accepts)
+- slot 1 write → stays `Off` (kernel silently drops, same as Incall_Music)
+
+This proves the slot-1 (VoiceMMode2) block is NOT specific to Incall_Music — it affects EVERY
+2-element BOOL voice-TX kcontrol. The active call uses VoiceMMode2 = slot 1, so no userspace
+write can ever route into it. Single root cause in the kernel ASoC platform driver.
+
+**CONFIRMED DEAD END (userspace): No software TX injection path exists on this device
+(sdm660, MIUI Android 10).** Every 2-slot voice TX control has its slot-1 (VoiceMMode2) write
+silently dropped by the kernel. The only working uplink is MIC: PHONE (hardware mic via
+`INT3_MI2S_TX_MMode2`). Website mic → remote party is not achievable with userspace tools.
+
+### Kernel patch route (the real fix)
+
+The slot-1 ELEM_WRITE is dropped in the MSM ASoC routing driver
+(`sound/soc/msm/msm-pcm-routing-v2.c`, function `msm_routing_put_audio_mixer` /
+`msm_pcm_routing_process_voice` or the matrix update path). The kcontrol write returns success
+but the ADM (Audio Device Manager) matrix connection for session index 1 (VoiceMMode2) is never
+committed to the ADSP.
+
+To fix permanently:
+1. Obtain kernel source for this exact build (Xiaomi lavender / sdm660, kernel 4.x CAF).
+2. In `msm-pcm-routing-v2.c`, find where the 2-slot voice mixer writes iterate session indices
+   and locate the guard that skips/no-ops index 1 (VoiceMMode2) — likely a session-state or
+   `is_custom_stereo`/`voc_session` validity check that fails for the second mode.
+3. Force the `adm_matrix_map` / `voice_set_route` call for the VoiceMMode2 session.
+4. Build, package as a custom boot image (needs unlocked bootloader), flash.
+
+Once slot 1 commits, the existing `RootUtils.enableIncallMusicInjection()` +
+`AudioTrack(USAGE_MEDIA) → MultiMedia1` path works as originally designed — no app changes needed.
+
+**Status: userspace exhausted. Uplink requires a kernel patch + custom boot image.**
 
 ---
 
@@ -557,59 +733,6 @@ dropping `isServiceActive`/`isTestActive`. Fixed: spread existing entry first.
 attaches to the LAST parameter, which was `onCommand`, not `onAudioPacket`.
 Fixed: use named argument: `onAudioPacket = { packet -> handleAudioPacket(packet) }`.
 
-**DTMF not reaching remote party (fixed)**
-Three approaches failed before finding the correct one:
-1. `ToneGenerator(STREAM_DTMF)` — plays a local beep only, never signals the GSM network.
-   `sendDtmfCode()` does not exist on `TelephonyManager`.
-2. In-band PCM via `AudioTrack(USAGE_MEDIA)` → `MultiMedia1` uplink — AMR voice codec
-   (~12kbps, speech-optimised) mangles pure DTMF tones enough that carrier detectors reject them.
-3. Non-UI `InCallService` (with `IN_CALL_SERVICE_UI=false`) — MIUI binds it but then
-   interferes with the existing call audio routing, breaking audio capture entirely.
-Fixed: app is set as default dialer (via `RoleManager.ROLE_DIALER` — `ACTION_CHANGE_DEFAULT_DIALER`
-is deprecated on Android 10+ and silently does nothing on MIUI). As default dialer, the system
-binds our `GsmInCallService` as the UI InCallService, giving us the `Call` object.
-`Call.playDtmfTone(char)` sends DTMF out-of-band via the modem (RIL), bypassing the audio codec.
-The role prompt must use `RoleManager.createRequestRoleIntent()` launched via `ActivityResultLauncher`
-— launching it directly from `onCreate` without `window.decorView.post {}` causes the dialog to
-silently not appear on MIUI.
-Root cause of the symptom ("I press 2, nothing happens"): the frontend numpad component was never
-wired to call `sendDTMF(digit)`. Fix was purely in the frontend — Android side was correct once
-the default dialer role was granted.
-
-**set_mixer_ctl binary not in assets — tinymix fallback active (known state)**
-`app/src/main/assets/set_mixer_ctl` has never been built. `RootUtils.setMixerElem()` falls back to
-`tinymix` for slot 0 only. This means VOC_REC_DL slot 1 (VoiceMMode2) is not set.
-Audio still works if the active call uses VoiceMMode1 (slot 0). Do NOT remove the tinymix fallback
-in `RootUtils` — doing so silently breaks all call audio (tested: broke it once already).
-To get full 2-slot support: `NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.sh`
-then copy the output binary to `app/src/main/assets/set_mixer_ctl` and rebuild.
-`GsmService.onCreate` will unpack it automatically on first run.
-
-**INSTALL_FAILED_VERSION_DOWNGRADE**
-Use `adb install -r -d` (the `-d` flag allows version downgrade for debug builds).
-
-**INSTALL_FAILED_UPDATE_INCOMPATIBLE: signatures do not match**
-APK was previously signed with a different debug keystore (e.g. after SDK reinstall or new machine).
-Fix: `adb uninstall com.nicitaacom.androidgsm` then `adb install <apk>`.
-
-**ADB: insufficient permissions for device**
-User not in `plugdev` group, or udev rules missing. Fix:
-```bash
-sudo usermod -aG plugdev $USER   # then log out + back in
-sudo tee /etc/udev/rules.d/51-android.rules <<'EOF'
-SUBSYSTEM=="usb", ATTR{idVendor}=="2717", MODE="0666", GROUP="plugdev"  # Xiaomi
-EOF
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-Then unplug and replug phone. On MIUI also enable: Settings → Developer Options →
-USB debugging (Security settings) + Install via USB.
-
-**Version string doesn't change between local builds**
-`versionName` is derived from `git rev-list --count origin/production` and the hash of
-`origin/production`. It only changes when commits are pushed to the remote. Local uncommitted
-changes build with the same version string — use APK filename date or `lastUpdateTime` from
-`adb shell dumpsys package com.nicitaacom.androidgsm` to verify a new build is installed.
-
 ---
 
 ## WebSocket message schemas
@@ -637,7 +760,7 @@ Android → server:
 
 Server → Android:
 ```json
-{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN|SET_MIC_SOURCE", "data": { "number": "...", "simAccountId": "...", "micGain": 1.0, "source": "browser|phone" } }
+{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN", "data": { "number": "...", "simAccountId": "...", "micGain": 1.0 } }
 ```
 
 ## Audio format
@@ -705,27 +828,53 @@ NDK=/home/kali/android-sdk/ndk/27.2.12479018 ./native/set_mixer_ctl/build_arm64.
 4. **Objective-C / low-level binary patching** — explored writing raw ARM64 shellcode to call ioctl
    directly. Rejected: no compiler available on device, no NDK installed at the time, no busybox.
 
-5. **Building set_mixer_ctl + using ioctl directly** — NDK built successfully. Binary works for
-   slot 0 but slot 1 writes are silently ignored by the kernel. Confirmed: the MIUI CAF kernel
-   prevents ELEM_WRITE for slot 1 on VoiceMMode2 controls while VoiceMMode2 is an active call
-   session. This is a hard kernel restriction, not a userspace bug.
+5. **set_mixer_ctl ioctl binary built and tested** — slot 0 writes work. Slot 1 writes return
+   OK but value never changes in tinymix. Confirmed: `ELEM_WRITE` for slot 1 is silently ignored
+   by this kernel on ALL 2-slot BOOL controls (`Incall_Music`, `VOC_REC_DL`, `VoiceMMode2_Tx Mixer`).
+   This is NOT limited to active-call state — tested outside a call too. The kernel simply never
+   applies slot 1 writes for these controls on this MIUI CAF build.
 
-6. **Direct PCM write to /dev/snd/pcmC0D19p (VoiceMMode2) — CURRENT APPROACH** ✓
-   `cat /proc/asound/pcm` revealed PCM device 19 = `VoiceMMode2 playback`.
-   Format confirmed via `hw_params`: S16_LE, mono, 8000 Hz (matches browser mic sample rate).
-   `tinyplay /file -D 0 -d 19` successfully injects audio into the active call uplink.
-   No mixer control needed — writes directly to the voice DSP TX path.
-   **Implemented**: `AudioWebSocketHandler.startCallUplinkPcmWriter()` spawns:
-   `su -c 'tinyplay /proc/self/fd/0 -D 0 -d 19 -c 1 -r 8000 -b 16'`
-   Browser mic PCM from the playback channel is piped to stdin of this subprocess.
+6. **Direct PCM write to pcmC0D19p (VoiceMMode2 TX) — uplink working** ✓
+   Device 19 = VoiceMMode2 (playback+capture). Format: S16_LE, mono, 8kHz.
+   `exec tinyplay /proc/self/fd/0 -D 0 -d 19` writes browser mic PCM to the call TX uplink.
+   Pipe kept alive with `exec` (replaces su shell so Java app's outputStream stays connected).
+   Hardware mic muted via `VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2` slot 0 = 0.
+   CALL_CONNECTED sent after tinyplay starts → browser receives it → browser starts mic capture.
+   **Status: uplink pipeline works end-to-end. Remote party hears silence instead of browser mic
+   because browser mic audio is not arriving at Android over /ws/audio.**
+
+7. **Downlink (remote party → browser) still broken** — tinycap on device 0 captures
+   MultiMedia1, which requires VOC_REC_DL slot 1 (VoiceMMode2) to be set. Slot 1 is always Off
+   (kernel ignores writes). tinycap runs but captures silence (RMS ~0.000).
+   pcmC0D19c (VoiceMMode2 capture) is exclusively locked by the modem — can't open from userspace.
+   Pre-priming VOC_REC_DL before dialing also doesn't work — slot 1 never sticks regardless.
+
+8. **Browser mic audio not arriving at Android** — CALL_CONNECTED is sent, browser receives
+   `gsm:call-connected` via Pusher, sets `isCallActive=true`. `startMicCapture()` fires when
+   the first downlink audio packet arrives in `ws.onmessage`. But downlink is silence (see #7),
+   so `startMicCapture()` never triggers. Chicken-and-egg: browser waits for downlink audio to
+   start mic, but downlink is broken. Fix: `onCallConnected` in useInitGSM.ts must call
+   `startMicCapture()` directly instead of waiting for the first audio packet.
+
+### What needs to happen to fully fix browser mic uplink
+
+1. **Frontend fix** (useInitGSM.ts): `onCallConnected` must call `startMicCapture()` directly —
+   not wait for first downlink audio packet. The browser currently only auto-starts mic when
+   it receives a WS audio packet with `isCallActiveRef.current=true`.
+
+2. **Downlink fix** — tinycap on device 0 captures silence because VOC_REC_DL slot 1 is Off.
+   The kernel won't let us set slot 1. The only remaining option not yet tried:
+   reading directly from the ALSA PCM device that VoiceMMode2 RX writes to, without going
+   through the MultiMedia1 mixer route. Need to find which PCM device (not pcmC0D19c which is
+   capture-exclusive) carries the VoiceMMode2 downlink in a readable way.
 
 ### Correct TX mute control names (confirmed from live dump)
 
 ```
-Voice Tx Mute      (numid 2)   INT, 3 values  — use: tinymix 'Voice Tx Mute' 1 1 1
-Voice Tx Device Mute (numid 1) INT, 3 values  — device-level mute
+VoiceMMode2_Tx Mixer INT3_MI2S_TX_MMode2  (numid 2022) BOOL slot 0 — hardware mic TX
 ```
-NOT: `VoiceMMode1_Tx Mute` / `VoiceMMode2_Tx Mute` — these don't exist on sdm660.
+Setting slot 0 = 0 disconnects phone mic from VoiceMMode2 TX uplink.
+Restore on call end: set slot 0 = 1.
 
 ---
 
@@ -789,19 +938,3 @@ docs/realtime-audio/
 - `SERVICE_STARTED` event uses retry loop (10s, 300ms poll) — do not remove it
 - `stateProvider` lambda in `CommandWebSocketClient` carries live `isServiceActive`/`isTestActive`
 - Trailing lambda in Kotlin attaches to the LAST parameter — always use named args for non-last lambdas
-- Mic source toggle: `AudioWebSocketHandler.useBrowserMicUplink` (companion `@Volatile`) controls uplink source.
-  `true` (default) = browser mic → AudioTrack → MultiMedia1 → voice TX (injection active).
-  `false` = phone mic handles uplink natively; injection disabled; browser audio chunks dropped in `playAudioChunk`.
-  Hot-swap during active call: `RootUtils.enableIncallMusicInjection()` / `disableIncallMusicInjection()`.
-  Triggered by phone UI button (`ACTION_SET_MIC_SOURCE`) or frontend `SET_MIC_SOURCE` command over `/ws/cmd`.
-- DTMF is sent via `Call.playDtmfTone()` — requires app to be default dialer (GsmInCallService bound).
-  Do NOT use `ToneGenerator`, in-band PCM via AudioTrack, or non-UI InCallService — all confirmed broken.
-  `TelephonyManager.sendDtmfCode()` does not exist. Non-UI InCallService on MIUI breaks call audio.
-- Default dialer role must be requested via `RoleManager.createRequestRoleIntent(ROLE_DIALER)` on API 29+.
-  `ACTION_CHANGE_DEFAULT_DIALER` is deprecated and silently does nothing on MIUI Android 10.
-  Launch the role intent via `ActivityResultLauncher`, deferred with `window.decorView.post {}` —
-  calling it directly in `onCreate` causes the dialog to silently not appear on MIUI.
-- `adb install` flags: use `-r -d` for debug rebuilds (allows version downgrade).
-  If signatures mismatch: `adb uninstall` first.
-- Version string is pinned to `origin/production` git hash — does not change on local rebuilds.
-  Use `adb shell dumpsys package com.nicitaacom.androidgsm | grep lastUpdateTime` to verify install.

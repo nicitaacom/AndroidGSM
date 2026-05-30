@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:gravity="center"
+    android:background="@color/bg_dark"
+    android:padding="40dp">
+
+    <TextView
+        android:id="@+id/callStatusText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="Calling..."
+        android:textSize="16sp"
+        android:textColor="@color/text_secondary"
+        android:letterSpacing="0.1"
+        android:textAllCaps="true"
+        android:layout_marginBottom="16dp" />
+
+    <TextView
+        android:id="@+id/callNumberText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="32sp"
+        android:textColor="@color/text_primary"
+        android:textStyle="bold"
+        android:layout_marginBottom="12dp" />
+
+    <TextView
+        android:id="@+id/callDurationText"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text=""
+        android:textSize="20sp"
+        android:textColor="@color/brand_green"
+        android:fontFamily="monospace"
+        android:layout_marginBottom="64dp" />
+
+    <TextView
+        android:id="@+id/micSourceLabel"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="MIC: BROWSER"
+        android:textSize="12sp"
+        android:textColor="@color/text_secondary"
+        android:textAllCaps="true"
+        android:letterSpacing="0.1"
+        android:layout_marginBottom="80dp" />
+
+    <Button
+        android:id="@+id/hangUpButton"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
+        android:text="END"
+        android:textSize="12sp"
+        android:textColor="@color/white"
+        android:background="@color/error_red"
+        android:stateListAnimator="@null" />
+
+</LinearLayout>

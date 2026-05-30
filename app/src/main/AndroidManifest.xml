@@ -52,6 +52,16 @@
             android:supportsRtl="true"
             android:theme="@style/Theme.AndroidGSM">
 
+        <!-- Call screen — shown during active calls (required as default dialer) -->
+        <activity
+            android:name=".CallActivity"
+            android:exported="false"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.AndroidGSM"
+            android:excludeFromRecents="true" />
+
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
@@ -70,18 +80,17 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".CallInitiatorActivity"
+                  android:exported="true"
+                  android:launchMode="singleTask"
+                  android:showWhenLocked="true"
+                  android:turnScreenOn="true"
+                  android:theme="@android:style/Theme.Translucent.NoTitleBar"
+                  android:taskAffinity=""
+                  android:excludeFromRecents="true" />
+
         <service android:name=".GsmService" android:enabled="true" android:exported="false"
                  android:foregroundServiceType="connectedDevice|microphone|mediaPlayback" />
-
-        <!-- ConnectionService — required for default-dialer role eligibility -->
-        <service
-            android:name=".GsmConnectionService"
-            android:exported="true"
-            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
-            <intent-filter>
-                <action android:name="android.telecom.ConnectionService" />
-            </intent-filter>
-        </service>
 
         <!-- InCallService — bound by system when we are default dialer. Gives us the Call
              object so we can invoke Call.playDtmfTone() for proper out-of-band DTMF. -->

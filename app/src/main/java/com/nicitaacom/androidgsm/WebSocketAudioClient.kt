@@ -7,7 +7,6 @@ import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONObject
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicBoolean
 
 class WebSocketAudioClient(
     private val wsUrl: String,
@@ -17,47 +16,48 @@ class WebSocketAudioClient(
     private val onCommand: ((type: String, data: JSONObject) -> Unit)? = null
 ) : WebSocketListener() {
 
-    // Shared across all instances — never shut down between calls.
-    // Shutting down the dispatcher per-instance leaked a thread pool on every call cycle.
-    companion object {
-        private const val TAG = "WebSocketAudio"
-        private const val RECONNECT_DELAY_MS = 5000L
-        val httpClient: OkHttpClient = OkHttpClient.Builder()
-            .connectTimeout(10, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.SECONDS)  // no read timeout — streaming connection
-            .writeTimeout(10, TimeUnit.SECONDS)
-            .build()
-    }
+    private val httpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .writeTimeout(10, TimeUnit.SECONDS)
+        .build()
 
     private var ws: WebSocket? = null
-    @Volatile var isConnected = false
+    var isConnected = false
         private set
-    private val isClosed = AtomicBoolean(false)
+
+    companion object {
+        private const val TAG = "WebSocketAudio"
+    }
 
     init {
         connect()
     }
 
     private fun connect() {
-        if (isClosed.get()) return
         try {
             val urlWithToken = "$wsUrl?token=${java.net.URLEncoder.encode(bearerToken, "UTF-8")}"
-            val request = Request.Builder().url(urlWithToken).build()
+            val request = Request.Builder()
+                .url(urlWithToken)
+                .build()
+
             ws = httpClient.newWebSocket(request, this)
-            MainActivity.log("🔌 WebSocket Audio: Connecting to $wsUrl")
-            Log.d(TAG, "Connecting to: $wsUrl")
+            MainActivity.log("🔌 WebSocket: Connecting to $wsUrl")
+            Log.d(TAG, "Connecting to: $urlWithToken")
+
         } catch (e: Exception) {
             Log.e(TAG, "❌ Connection error: ${e.message}")
             MainActivity.log("ERROR: WebSocket connection failed: ${e.message}")
-            scheduleReconnect()
         }
     }
 
     override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
         isConnected = true
-        MainActivity.log("✅ WebSocket Audio: Connected")
+        MainActivity.log("✅ WebSocket: Connected")
         Log.d(TAG, "Connected: ${response.code} ${response.message}")
+
         try {
+            // Register android peer immediately so server can relay browser -> android audio over WS.
             val registerPacket = JSONObject().apply {
                 put("role", "android")
                 put("deviceToken", deviceToken)
@@ -72,6 +72,7 @@ class WebSocketAudioClient(
     override fun onMessage(webSocket: WebSocket, text: String) {
         try {
             val packet = JSONObject(text)
+            // Route command messages to command handler; everything else is audio
             if (packet.optString("type") == "command") {
                 val cmdType = packet.optString("cmdType", "")
                 val data = packet.optJSONObject("data") ?: JSONObject()
@@ -88,34 +89,40 @@ class WebSocketAudioClient(
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
         isConnected = false
         Log.e(TAG, "❌ WebSocket failure: ${t.message}")
-        MainActivity.log("WebSocket audio failed: ${t.message}")
-        // Schedule reconnect on a separate thread — never block the OkHttp callback thread
-        scheduleReconnect()
+        MainActivity.log("ERROR: WebSocket failed: ${t.message}")
+        
+        // Attempt reconnect after delay
+        Thread.sleep(5000)
+        connect()
     }
 
     override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
         isConnected = false
         Log.d(TAG, "⚠️ Closed: code=$code, reason=$reason")
-        MainActivity.log("WebSocket audio closed: $reason")
-        if (!isClosed.get()) scheduleReconnect()
+        MainActivity.log("WebSocket closed: $reason")
     }
 
-    private fun scheduleReconnect() {
-        if (isClosed.get()) return
-        Thread {
-            try { Thread.sleep(RECONNECT_DELAY_MS) } catch (_: InterruptedException) { return@Thread }
-            if (!isClosed.get()) {
-                Log.d(TAG, "Reconnecting audio WS...")
-                connect()
+    fun sendEvent(type: String, data: Map<String, Any> = emptyMap()) {
+        if (!isConnected) return
+        try {
+            val payload = JSONObject().apply {
+                put("type", "event")
+                put("eventType", type)
+                put("deviceToken", deviceToken)
+                if (data.isNotEmpty()) put("data", JSONObject(data))
             }
-        }.also { it.isDaemon = true; it.start() }
+            ws?.send(payload.toString())
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ sendEvent error: ${e.message}")
+        }
     }
 
     fun sendAudioChunk(audio: String, seq: Long, sampleRate: Int, codec: String) {
         if (!isConnected) {
-            Log.w(TAG, "⚠️ Not connected, skipping audio chunk seq=$seq")
+            Log.w(TAG, "⚠️ Not connected, skipping audio chunk")
             return
         }
+
         try {
             val packet = JSONObject().apply {
                 put("role", "android")
@@ -127,18 +134,20 @@ class WebSocketAudioClient(
                 put("sampleRate", sampleRate)
                 put("audio", audio)
             }
+
             ws?.send(packet.toString())
+            Log.d(TAG, "📤 Sent chunk seq=$seq, size=${audio.length}")
+
         } catch (e: Exception) {
             Log.e(TAG, "❌ Send error: ${e.message}")
         }
     }
 
     fun close() {
-        isClosed.set(true)
         isConnected = false
         ws?.close(1000, "Client close")
         ws = null
+        httpClient.dispatcher.executorService.shutdown()
         Log.d(TAG, "Closed")
-        // Do NOT shut down httpClient.dispatcher — it is shared across instances
     }
 }

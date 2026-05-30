@@ -112,9 +112,9 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
                 return false
             }
 
-            val simState = telephonyManager?.simState ?: TelephonyManager.SIM_STATE_UNKNOWN
-            if (simState != TelephonyManager.SIM_STATE_READY) {
-                log("ERROR: SIM not ready (state: $simState)")
+            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            if (telecomManager.callCapablePhoneAccounts.isEmpty()) {
+                log("ERROR: No call-capable SIM accounts found")
                 return false
             }
 
@@ -130,27 +130,11 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
             } catch (error: Exception) {
                 log("WARNING: Could not acquire wake lock: ${error.message}")
             }
-
-            val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
             val uri = Uri.parse("tel:$number")
 
-            val extras = Bundle()
-            // If a specific SIM was requested, pass its PhoneAccountHandle so Telecom routes
-            // through that SIM's modem instead of showing a system chooser or defaulting to SIM 1.
-            if (!simAccountId.isNullOrBlank() && !simComponentName.isNullOrBlank()) {
-                try {
-                    val componentName = android.content.ComponentName.unflattenFromString(simComponentName)
-                    if (componentName != null) {
-                        val handle = android.telecom.PhoneAccountHandle(componentName, simAccountId)
-                        extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
-                        log("GsmDialer: routing via PhoneAccount id=$simAccountId component=$simComponentName")
-                    }
-                } catch (e: Exception) {
-                    log("WARNING: Could not build PhoneAccountHandle: ${e.message}")
-                }
-            }
-
-            telecomManager.placeCall(uri, extras)
+            // MIUI sdm660: passing ANY PhoneAccountHandle causes "Phone is null / OUT_OF_SERVICE".
+            // Let MIUI resolve the SIM itself via empty Bundle — call connects. (Iteration 6)
+            telecomManager.placeCall(uri, Bundle())
             log("GsmDialer: placeCall() dispatched to GSM modem for $number")
             return true
         } catch (exception: Exception) {

@@ -114,6 +114,18 @@
                 android:letterSpacing="0.15" />
 
         <Button
+                android:id="@+id/micSourceToggleButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="MIC: BROWSER"
+                android:textSize="10sp"
+                android:textColor="@color/black"
+                android:background="@color/brand_green"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:stateListAnimator="@null" />
+
+        <Button
                 android:id="@+id/copyLogsButton"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"

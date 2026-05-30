@@ -30,6 +30,8 @@ type GsmCallsEvent = {
 
 /**
  * Utility: Downsample Float32Array audio buffer to 16kHz.
+ * WARNING: using website's mic is a hard DSP (microchip) limit - SIM require KYC (that's why I hit KYC on twilio or telnyx)
+ * The only workaround I found is to use raspberry PI + rooted android 10 with SIM
  */
 function downsampleTo(buffer: Float32Array, inputSampleRate: number, targetRate: number): Float32Array {
   if (inputSampleRate === targetRate) return buffer
@@ -40,8 +42,12 @@ function downsampleTo(buffer: Float32Array, inputSampleRate: number, targetRate:
   let offsetBuffer = 0
   while (offsetResult < result.length) {
     const nextOffset = Math.round((offsetResult + 1) * ratio)
-    let accum = 0, count = 0
-    for (let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) { accum += buffer[i]; count++ }
+    let accum = 0,
+      count = 0
+    for (let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) {
+      accum += buffer[i]
+      count++
+    }
     result[offsetResult] = count > 0 ? accum / count : 0
     offsetResult++
     offsetBuffer = nextOffset
@@ -482,7 +488,29 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       if (!tok || eventData?.deviceToken !== tok) return
       setIsCalling(false)
       setIsConnected(true)
-      console.info("[gsm/pusher] call-connected (answered)", { deviceToken: tok })
+      console.info("[gsm/call-connected] fired", { deviceToken: tok })
+      console.info("[gsm/call-connected] wsState", wsRef.current?.readyState, "mediaStream", !!mediaStreamRef.current)
+      const ctx = audioContextRef.current
+      if (ctx?.state === "suspended") ctx.resume().catch(() => {})
+      ensurePlayoutLoop()
+      // Start mic immediately — retry until WS is open (same pattern as onTestAudioStarted).
+      // Do NOT wait for first downlink audio packet — downlink may be silent if VOC_REC_DL
+      // slot 1 is not set, so the ws.onmessage auto-start path never fires.
+      const tryStartMic = (attemptsLeft: number) => {
+        if (attemptsLeft <= 0) {
+          console.error("[gsm/call-connected] WS never opened — mic aborted")
+          return
+        }
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          startMicCapture()
+            .then(() => console.info("[gsm/call-connected] startMicCapture succeeded"))
+            .catch(err => console.error("[gsm/call-connected] startMicCapture FAILED", err))
+          return
+        }
+        console.warn(`[gsm/call-connected] WS not open, retrying... (${attemptsLeft} left)`)
+        setTimeout(() => tryStartMic(attemptsLeft - 1), 200)
+      }
+      tryStartMic(15) // 15 × 200ms = 3s max wait
     }
 
     // Call ended or rejected
@@ -719,7 +747,9 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       // Defensive tear-down — protects against a race where two callers (status poll +
       // ws.onmessage + useEffect) all enter startMicCapture concurrently and leak processors.
       stopMicCapture()
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false } })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: false },
+      })
       // After the await, the call may have ended — bail out instead of leaking the stream.
       if (
         isCleaningUpRef.current ||
@@ -934,8 +964,14 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
     })
   }
 
-  const setMicGain = (value: number) => { micGainRef.current = value; sendCommand("SET_GAIN", { micGain: value }) }
-  const setPlaybackGain = (value: number) => { playbackGainRef.current = value; sendCommand("SET_GAIN", { playbackGain: value }) }
+  const setMicGain = (value: number) => {
+    micGainRef.current = value
+    sendCommand("SET_GAIN", { micGain: value })
+  }
+  const setPlaybackGain = (value: number) => {
+    playbackGainRef.current = value
+    sendCommand("SET_GAIN", { playbackGain: value })
+  }
 
   const fetchLogs = async (): Promise<string[]> => {
     try {
