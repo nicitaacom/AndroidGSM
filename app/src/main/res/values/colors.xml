@@ -2,12 +2,16 @@
 <resources>
     <color name="brand_green">#00FF88</color>
     <color name="brand_green_dark">#00CC6A</color>
+    <color name="brand_green_soft">#133B2C</color>
+    <color name="brand_green_dim">#0C241B</color>
     <color name="bg_dark">#0A0E10</color>
+    <color name="bg_deep_green">#06110E</color>
     <color name="bg_card">#141B1F</color>
     <color name="bg_elevated">#1A2228</color>
     <color name="text_primary">#E8F0F2</color>
     <color name="text_secondary">#8B9BA3</color>
     <color name="error_red">#FF3B30</color>
+    <color name="error_red_dark">#B91F1B</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 </resources>

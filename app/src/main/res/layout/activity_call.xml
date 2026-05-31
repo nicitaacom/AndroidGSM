@@ -1,62 +1,143 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:gravity="center"
-    android:background="@color/bg_dark"
-    android:padding="40dp">
+    android:background="@drawable/call_screen_background"
+    android:fitsSystemWindows="true">
 
-    <TextView
-        android:id="@+id/callStatusText"
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Calling..."
-        android:textSize="16sp"
-        android:textColor="@color/text_secondary"
-        android:letterSpacing="0.1"
-        android:textAllCaps="true"
-        android:layout_marginBottom="16dp" />
+        android:layout_gravity="top"
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:paddingStart="24dp"
+        android:paddingTop="64dp"
+        android:paddingEnd="24dp">
 
-    <TextView
-        android:id="@+id/callNumberText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text=""
-        android:textSize="32sp"
-        android:textColor="@color/text_primary"
-        android:textStyle="bold"
-        android:layout_marginBottom="12dp" />
+        <TextView
+            android:id="@+id/callStatusText"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:background="@drawable/status_pill_background"
+            android:gravity="center"
+            android:minWidth="140dp"
+            android:paddingStart="18dp"
+            android:paddingEnd="18dp"
+            android:text="Incoming call"
+            android:textAllCaps="true"
+            android:textColor="@color/brand_green"
+            android:textSize="12sp"
+            android:textStyle="bold" />
 
-    <TextView
-        android:id="@+id/callDurationText"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text=""
-        android:textSize="20sp"
-        android:textColor="@color/brand_green"
-        android:fontFamily="monospace"
-        android:layout_marginBottom="64dp" />
+        <FrameLayout
+            android:layout_width="132dp"
+            android:layout_height="132dp"
+            android:layout_marginTop="56dp"
+            android:background="@drawable/caller_avatar_ring">
 
-    <TextView
-        android:id="@+id/micSourceLabel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="MIC: BROWSER"
-        android:textSize="12sp"
-        android:textColor="@color/text_secondary"
-        android:textAllCaps="true"
-        android:letterSpacing="0.1"
-        android:layout_marginBottom="80dp" />
+            <TextView
+                android:id="@+id/callerInitialText"
+                android:layout_width="104dp"
+                android:layout_height="104dp"
+                android:layout_gravity="center"
+                android:background="@drawable/caller_avatar_background"
+                android:gravity="center"
+                android:text="#"
+                android:textColor="@color/brand_green"
+                android:textSize="42sp"
+                android:textStyle="bold" />
+        </FrameLayout>
 
-    <Button
+        <TextView
+            android:id="@+id/callNumberText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="28dp"
+            android:ellipsize="middle"
+            android:gravity="center"
+            android:maxLines="1"
+            android:text=""
+            android:textColor="@color/text_primary"
+            android:textSize="32sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/callDurationText"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:layout_marginTop="14dp"
+            android:fontFamily="monospace"
+            android:gravity="center"
+            android:text=""
+            android:textColor="@color/brand_green"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/micSourceLabel"
+            android:layout_width="wrap_content"
+            android:layout_height="32dp"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/mic_pill_background"
+            android:gravity="center"
+            android:minWidth="132dp"
+            android:paddingStart="16dp"
+            android:paddingEnd="16dp"
+            android:text="GSM Gateway"
+            android:textAllCaps="true"
+            android:textColor="@color/text_secondary"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/incomingActions"
+        android:layout_width="match_parent"
+        android:layout_height="112dp"
+        android:layout_gravity="bottom"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingStart="40dp"
+        android:paddingEnd="40dp"
+        android:paddingBottom="34dp">
+
+        <ImageButton
+            android:id="@+id/declineButton"
+            android:layout_width="76dp"
+            android:layout_height="76dp"
+            android:background="@drawable/action_decline_background"
+            android:contentDescription="@string/decline_call"
+            android:padding="20dp"
+            android:scaleType="center"
+            android:src="@drawable/ic_call_end"
+            android:tint="@color/white" />
+
+        <Space
+            android:layout_width="52dp"
+            android:layout_height="1dp" />
+
+        <ImageButton
+            android:id="@+id/answerButton"
+            android:layout_width="76dp"
+            android:layout_height="76dp"
+            android:background="@drawable/action_answer_background"
+            android:contentDescription="@string/answer_call"
+            android:padding="20dp"
+            android:scaleType="center"
+            android:src="@drawable/ic_call"
+            android:tint="@color/black" />
+    </LinearLayout>
+
+    <ImageButton
         android:id="@+id/hangUpButton"
-        android:layout_width="72dp"
-        android:layout_height="72dp"
-        android:text="END"
-        android:textSize="12sp"
-        android:textColor="@color/white"
-        android:background="@color/error_red"
-        android:stateListAnimator="@null" />
+        android:layout_width="76dp"
+        android:layout_height="76dp"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="34dp"
+        android:background="@drawable/action_decline_background"
+        android:contentDescription="@string/end_call"
+        android:padding="20dp"
+        android:scaleType="center"
+        android:src="@drawable/ic_call_end"
+        android:tint="@color/white" />
 
-</LinearLayout>
+</FrameLayout>

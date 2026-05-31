@@ -3,8 +3,11 @@ package com.nicitaacom.androidgsm
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.telecom.Call
+import android.telecom.VideoProfile
 import android.view.WindowManager
-import android.widget.Button
+import android.view.View
+import android.widget.ImageButton
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 
@@ -20,11 +23,21 @@ class CallActivity : AppCompatActivity() {
     private lateinit var numberText: TextView
     private lateinit var durationText: TextView
     private lateinit var micLabel: TextView
-    private lateinit var hangUpButton: Button
+    private lateinit var callerInitialText: TextView
+    private lateinit var answerButton: ImageButton
+    private lateinit var declineButton: ImageButton
+    private lateinit var hangUpButton: ImageButton
 
     private val handler = Handler(Looper.getMainLooper())
     private var elapsedSeconds = 0
     private var isConnected = false
+    private var activeCall: Call? = null
+
+    private val callCallback = object : Call.Callback() {
+        override fun onStateChanged(call: Call, state: Int) {
+            runOnUiThread { updateUiForState(state) }
+        }
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -76,22 +89,42 @@ class CallActivity : AppCompatActivity() {
         numberText = findViewById(R.id.callNumberText)
         durationText = findViewById(R.id.callDurationText)
         micLabel = findViewById(R.id.micSourceLabel)
+        callerInitialText = findViewById(R.id.callerInitialText)
+        answerButton = findViewById(R.id.answerButton)
+        declineButton = findViewById(R.id.declineButton)
         hangUpButton = findViewById(R.id.hangUpButton)
 
         // Populate number from intent
         val number = intent.getStringExtra("number") ?: ""
-        numberText.text = number
-        statusText.text = "Calling..."
+        numberText.text = number.ifBlank { "Unknown caller" }
+        callerInitialText.text = number.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "#"
         durationText.text = ""
 
-        hangUpButton.setOnClickListener {
-            val call = GsmInCallService.currentCall
+        activeCall = GsmInCallService.currentCall
+        activeCall?.registerCallback(callCallback)
+        updateUiForState(activeCall?.state ?: Call.STATE_NEW)
+
+        answerButton.setOnClickListener {
+            val call = activeCall ?: GsmInCallService.currentCall
             if (call != null) {
-                call.disconnect()
+                call.answer(VideoProfile.STATE_AUDIO_ONLY)
+                MainActivity.log("CallActivity: answered incoming call")
+                statusText.text = "Answering..."
+                durationText.text = ""
+                answerButton.visibility = View.GONE
+                declineButton.visibility = View.GONE
+                hangUpButton.visibility = View.VISIBLE
             } else {
-                // Fallback: send CALL_ENDED via backend
-                MainActivity.log("CallActivity: no Call object, sending hangup via backend")
+                MainActivity.log("CallActivity: answer ignored, no Call object")
             }
+        }
+
+        declineButton.setOnClickListener {
+            declineOrDisconnect()
+        }
+
+        hangUpButton.setOnClickListener {
+            declineOrDisconnect()
             finish()
         }
 
@@ -99,17 +132,79 @@ class CallActivity : AppCompatActivity() {
     }
 
     fun onCallConnected() {
+        handler.removeCallbacks(ticker)
+        val wasConnected = isConnected
         isConnected = true
         statusText.text = "Connected"
         micLabel.text = if (AudioWebSocketHandler.useBrowserMicUplink) "MIC: BROWSER" else "MIC: PHONE"
-        elapsedSeconds = 0
+        answerButton.visibility = View.GONE
+        declineButton.visibility = View.GONE
+        hangUpButton.visibility = View.VISIBLE
+        if (!wasConnected) elapsedSeconds = 0
         handler.post(ticker)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         handler.removeCallbacks(ticker)
+        activeCall?.unregisterCallback(callCallback)
         if (instance === this) instance = null
+    }
+
+    private fun updateUiForState(state: Int) {
+        when (state) {
+            Call.STATE_RINGING -> {
+                isConnected = false
+                handler.removeCallbacks(ticker)
+                statusText.text = "Incoming call"
+                durationText.text = "Tap to answer"
+                micLabel.text = "GSM Gateway"
+                answerButton.visibility = View.VISIBLE
+                declineButton.visibility = View.VISIBLE
+                hangUpButton.visibility = View.GONE
+            }
+            Call.STATE_ACTIVE -> onCallConnected()
+            Call.STATE_DIALING, Call.STATE_CONNECTING, Call.STATE_SELECT_PHONE_ACCOUNT -> {
+                isConnected = false
+                handler.removeCallbacks(ticker)
+                statusText.text = "Calling..."
+                durationText.text = "Ringing"
+                micLabel.text = "GSM Gateway"
+                answerButton.visibility = View.GONE
+                declineButton.visibility = View.GONE
+                hangUpButton.visibility = View.VISIBLE
+            }
+            Call.STATE_DISCONNECTING -> {
+                statusText.text = "Ending call"
+                durationText.text = ""
+                answerButton.visibility = View.GONE
+                declineButton.visibility = View.GONE
+                hangUpButton.visibility = View.VISIBLE
+            }
+            Call.STATE_DISCONNECTED -> finish()
+            else -> {
+                statusText.text = "Call"
+                durationText.text = ""
+                answerButton.visibility = View.GONE
+                declineButton.visibility = View.GONE
+                hangUpButton.visibility = View.VISIBLE
+            }
+        }
+    }
+
+    private fun declineOrDisconnect() {
+        val call = activeCall ?: GsmInCallService.currentCall
+        if (call != null) {
+            if (call.state == Call.STATE_RINGING) {
+                call.reject(false, null)
+                MainActivity.log("CallActivity: declined incoming call")
+            } else {
+                call.disconnect()
+                MainActivity.log("CallActivity: disconnected call")
+            }
+        } else {
+            MainActivity.log("CallActivity: no Call object, sending hangup via backend")
+        }
     }
 
     private fun formatDuration(seconds: Int): String {
