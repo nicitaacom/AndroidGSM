@@ -60,6 +60,9 @@ class CallController(
 
             Thread {
                 try {
+                    // Remote answered — stop the website ringback tone; real downlink audio takes over.
+                    audioWsHandlerRef.handler?.stopRingback()
+
                     val captureEnabled = RootUtils.enableIncallMusicCapture()
                     log("📞 Incall capture path: $captureEnabled")
                     Thread.sleep(300)
@@ -69,11 +72,13 @@ class CallController(
                         ?.replace("https://", "wss://")
                         ?.removeSuffix("/") + "/ws/audio"
 
-                    // Always create a fresh handler for calls — the pre-init handler from
-                    // ensureRealtimeClientsInitialized has no active WS and wrong callActive state.
-                    audioWsHandlerRef.handler?.disconnect()
-                    audioWsHandlerRef.handler = AudioWebSocketHandler(context, config, log = log) { }
-                    audioWsHandlerRef.handler?.connect(wsUrl, config.BACKEND_BEARER ?: "", config.DEVICE_TOKEN ?: "")
+                    // The audio WS was already opened in handleCallStarted (for ringback). Reuse it
+                    // if still connected — avoids a reconnect gap. Only create fresh if missing/dead.
+                    if (audioWsHandlerRef.handler?.isWsConnected != true) {
+                        audioWsHandlerRef.handler?.disconnect()
+                        audioWsHandlerRef.handler = AudioWebSocketHandler(context, config, log = log) { }
+                        audioWsHandlerRef.handler?.connect(wsUrl, config.BACKEND_BEARER ?: "", config.DEVICE_TOKEN ?: "")
+                    }
 
                     // Wait for WS to actually open before starting capture — blind sleep(300) was
                     // not enough on slow networks and caused all tinycap chunks to be silently dropped.
@@ -164,6 +169,10 @@ class CallController(
                 val started = gsmDialer?.startCall(number, simAccountId, simComponentName) ?: false
                 if (started) {
                     log("Call started via GsmDialer to $number")
+                    // Open the audio WS now (before OFFHOOK) and stream a ringback tone to the
+                    // website while dialing. Phone plays nothing — the tone is generated as PCM
+                    // and sent over /ws/audio, exactly like downlink call audio.
+                    startRingbackToWebsite()
                 } else {
                     log("Call start failed - syncing CALL_ENDED state")
                     setCallActive(false)
@@ -181,6 +190,38 @@ class CallController(
             log("FATAL ERROR in handleCallStarted: ${e.message}")
             e.printStackTrace()
         }
+    }
+
+    // Opens the audio WS (if needed) during dialing and streams a ringback tone to the website.
+    // Runs on its own thread so it doesn't block command handling. OFFHOOK stops the ringback;
+    // teardownCall() disconnects the handler if the call never connects.
+    private fun startRingbackToWebsite() {
+        Thread {
+            try {
+                val wsUrl = config.BACKEND_URL
+                    ?.replace("http://", "ws://")
+                    ?.replace("https://", "wss://")
+                    ?.removeSuffix("/") + "/ws/audio"
+
+                audioWsHandlerRef.handler?.disconnect()
+                val handler = AudioWebSocketHandler(context, config, log = log) { }
+                audioWsHandlerRef.handler = handler
+                handler.connect(wsUrl, config.BACKEND_BEARER ?: "", config.DEVICE_TOKEN ?: "")
+
+                val deadline = System.currentTimeMillis() + 5000
+                while (handler.isWsConnected != true && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(100)
+                }
+                // Only start the tone if the call hasn't already connected (race with fast OFFHOOK).
+                if (handler.isWsConnected && isCallActive) {
+                    handler.startRingback()
+                } else {
+                    log("⚠️ Ringback skipped (wsConnected=${handler.isWsConnected}, callActive=$isCallActive)")
+                }
+            } catch (e: Exception) {
+                log("ERROR starting ringback to website: ${e.message}")
+            }
+        }.start()
     }
 
     fun handleCallEnded(gsmDialer: GsmDialer?) {

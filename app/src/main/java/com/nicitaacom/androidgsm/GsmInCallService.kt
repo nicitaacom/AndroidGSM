@@ -10,9 +10,22 @@ import android.telecom.InCallService
 // "Mobile network not available" and to display number/duration/hang-up button.
 class GsmInCallService : InCallService() {
 
+    private val callCallback = object : Call.Callback() {
+        override fun onStateChanged(call: Call, state: Int) {
+            MainActivity.log("GsmInCallService: call state → $state")
+            if (state == Call.STATE_ACTIVE) {
+                // TelephonyManager.CALL_STATE_OFFHOOK is unreliable on MIUI for some numbers
+                // (e.g. service numbers like 3311) — it never fires. STATE_ACTIVE from the
+                // Telecom Call object is the authoritative "remote answered" signal.
+                onCallActive?.invoke()
+            }
+        }
+    }
+
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
         currentCall = call
+        call.registerCallback(callCallback)
         MainActivity.log("GsmInCallService: Call attached — DTMF available")
 
         // Launch call screen — system requires default dialer to show call UI
@@ -26,6 +39,7 @@ class GsmInCallService : InCallService() {
 
     override fun onCallRemoved(call: Call) {
         super.onCallRemoved(call)
+        call.unregisterCallback(callCallback)
         if (currentCall === call) currentCall = null
         CallActivity.notifyEnded()
         MainActivity.log("GsmInCallService: Call detached")
@@ -34,5 +48,8 @@ class GsmInCallService : InCallService() {
     companion object {
         @Volatile var currentCall: Call? = null
             private set
+        // Set by CallController.wireDialerCallbacks() — invoked on STATE_ACTIVE as a
+        // reliable fallback for when TelephonyManager misses OFFHOOK (MIUI quirk).
+        @Volatile var onCallActive: (() -> Unit)? = null
     }
 }

@@ -144,6 +144,27 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
         }
     }
     fun endCall() {
+        // Primary path: disconnect the actual Call object held by GsmInCallService — same path
+        // as the on-screen hang-up button. TelecomManager.endCall() is unreliable on this MIUI
+        // build while the call is still DIALING/CONNECTING (returns false / no-ops), which left
+        // the phone calling forever after a website hang-up. Call.disconnect() works in any state.
+        val call = GsmInCallService.currentCall
+        if (call != null) {
+            try {
+                if (call.state == android.telecom.Call.STATE_RINGING) {
+                    call.reject(false, null)
+                    log("✅ Incoming call rejected via Call object")
+                } else {
+                    call.disconnect()
+                    log("✅ Call disconnected via Call object (state=${call.state})")
+                }
+                return
+            } catch (e: Exception) {
+                log("⚠️ Call.disconnect() failed, falling back to TelecomManager: ${e.message}")
+            }
+        } else {
+            log("⚠️ No Call object — falling back to TelecomManager.endCall()")
+        }
         try {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
             @Suppress("MissingPermission")

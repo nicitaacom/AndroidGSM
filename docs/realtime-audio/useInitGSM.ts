@@ -259,10 +259,10 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
   // Scheduling chunks end-to-end eliminates gaps/overlaps caused by setInterval jitter.
   const nextPlayTimeRef = useRef(0)
   // Initial buffering delay before first playback (seconds) — absorbs network jitter
-  const PLAYOUT_BUFFER_S = 0.15 // 150ms — enough to buffer ~7 chunks before starting
+  const PLAYOUT_BUFFER_S = 0.40 // 400ms — enough headroom for re-anchor after silence gap
   // How far ahead to keep the schedule filled (seconds). The scheduler loop fires
   // whenever a new chunk arrives and fills the lookahead window.
-  const SCHEDULE_AHEAD_S = 0.25 // fill 250ms of audio ahead of current time
+  const SCHEDULE_AHEAD_S = 1.5 // fill 1.5s ahead — covers the full 1s tone burst in one pass
   let playoutCount = 0
 
   // Drains the rx queue and schedules all available chunks into the AudioContext
@@ -277,8 +277,12 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       return
     }
 
-    // Anchor the schedule head the first time (or after a reset/gap)
-    if (nextPlayTimeRef.current < ctx.currentTime + PLAYOUT_BUFFER_S) {
+    // Anchor on fresh start (nextPlayTime===0) OR when the schedule head has fallen
+    // behind current time — the latter happens after a ringback silence gap: the silence
+    // is NOT sent as PCM, so no chunks arrive for 4s, nextPlayTimeRef stays wherever the
+    // last tone chunk ended, and by the time the next tone burst arrives it is in the past.
+    // Re-anchoring in that case gives the new burst a clean 150ms buffer start with no click.
+    if (nextPlayTimeRef.current === 0 || nextPlayTimeRef.current < ctx.currentTime) {
       nextPlayTimeRef.current = ctx.currentTime + PLAYOUT_BUFFER_S
     }
 
@@ -492,6 +496,11 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       console.info("[gsm/call-connected] wsState", wsRef.current?.readyState, "mediaStream", !!mediaStreamRef.current)
       const ctx = audioContextRef.current
       if (ctx?.state === "suspended") ctx.resume().catch(() => {})
+      // Flush any buffered ringback-tone tail so live call audio starts immediately —
+      // the phone burst-sends ~1s of ringback ahead, and without this the swell keeps
+      // playing for up to a second after the remote answers ("non-stoppable" lag).
+      resetInboundAudioState()
+      nextPlayTimeRef.current = 0
       ensurePlayoutLoop()
       // Start mic immediately — retry until WS is open (same pattern as onTestAudioStarted).
       // Do NOT wait for first downlink audio packet — downlink may be silent if VOC_REC_DL

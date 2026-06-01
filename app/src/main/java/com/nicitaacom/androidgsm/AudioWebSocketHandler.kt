@@ -37,6 +37,7 @@ class AudioWebSocketHandler(
     private var audioRecord: AudioRecord? = null
     private var tinycapProcess: Process? = null
     private var uplinkPcmProcess: Process? = null
+    @Volatile private var ringbackJob: Job? = null
     @Volatile private var audioTrack: AudioTrack? = null
     @Volatile private var isPlaying = false
     private var isRecording = false
@@ -59,6 +60,14 @@ class AudioWebSocketHandler(
         private const val TAG = "AudioWebSocket"
         private const val SAMPLE_RATE = 16000
         private const val PLAYBACK_SAMPLE_RATE = 8000 // browser sends 8kHz for GSM uplink
+        // European ringback (ITU-T 425Hz) shifted 2 semitones down: 425 × 2^(-2/12) ≈ 379 Hz.
+        // 1s tone / 4s silence. Full cycle (tone + silence as zeroed PCM) burst-sent in one
+        // pass per cycle; browser schedules end-to-end with no gaps.
+        private const val RINGBACK_FREQ = 320.0  // ~3 semitones below EU 425Hz standard
+        private const val RINGBACK_AMPLITUDE = 0.20
+        private const val RINGBACK_TONE_MS = 1000
+        private const val RINGBACK_GAP_MS = 4000
+        private const val RINGBACK_EDGE_MS = 5
         @Volatile var micGain: Float = 1.0f
         @Volatile var playbackGain: Float = 0.7f
         // true = browser mic is uplink source (default); false = phone mic handles uplink natively
@@ -83,10 +92,77 @@ class AudioWebSocketHandler(
     }
 
     fun disconnect() {
+        stopRingback()
         wsConnection?.close()
         wsConnection = null
         stopAudioCapture()
         stopAudioPlayback()
+    }
+
+    // Streams a single sustained "tyyyyymmm" ringback to the WEBSITE over /ws/audio
+    // (dir=toBrowser) while the call is DIALING — phone plays nothing.
+    // Stopped on OFFHOOK (remote answers) or call end.
+    fun startRingback() {
+        if (ringbackJob?.isActive == true) return
+        val tone = buildRingbackTone()
+        val toneSamples = tone.size
+        val chunkSamples = 320
+        // delay() must cover tone + gap, not just gap. The burst is sent near-instantly,
+        // but the browser spends RINGBACK_TONE_MS playing it before the silence begins.
+        // Using only RINGBACK_GAP_MS caused the next burst to arrive while the tone was
+        // still playing, producing a double-beep with no real gap between cycles.
+        val cycleMs = (RINGBACK_TONE_MS + RINGBACK_GAP_MS).toLong()
+        log("📞 Ringback → website (${RINGBACK_FREQ}Hz, ${RINGBACK_TONE_MS}ms tone, ${RINGBACK_GAP_MS}ms gap, ${cycleMs}ms cycle)")
+        ringbackJob = scope.launch(Dispatchers.IO) {
+            try {
+                while (isActive) {
+                    var off = 0
+                    while (off + chunkSamples <= toneSamples) {
+                        sendPcmToBrowser(tone.copyOfRange(off, off + chunkSamples))
+                        off += chunkSamples
+                    }
+                    kotlinx.coroutines.delay(cycleMs)
+                }
+            } catch (_: kotlinx.coroutines.CancellationException) {
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Ringback error: ${e.message}")
+            }
+        }
+    }
+
+    // Builds only the tone portion as PCM16 (RINGBACK_TONE_MS). Silence is NOT included —
+    // the gap is handled by delay() in the loop so the browser queue goes empty and
+    // nextPlayTimeRef expires, letting it re-anchor cleanly for each new tone burst.
+    private fun buildRingbackTone(): ShortArray {
+        val toneSamples = (RINGBACK_TONE_MS * SAMPLE_RATE / 1000 / 320) * 320
+        val out = ShortArray(toneSamples)
+        val amplitude = Short.MAX_VALUE * RINGBACK_AMPLITUDE
+        val edge = (RINGBACK_EDGE_MS * SAMPLE_RATE / 1000).coerceAtLeast(1)
+        val w = 2.0 * Math.PI * RINGBACK_FREQ / SAMPLE_RATE
+        var phase = 0.0
+        for (i in 0 until toneSamples) {
+            val env = when {
+                i < edge -> i.toDouble() / edge
+                i > toneSamples - edge -> (toneSamples - i).toDouble() / edge
+                else -> 1.0
+            }
+            out[i] = (Math.sin(phase) * env * amplitude)
+                .toInt().coerceIn(Short.MIN_VALUE.toInt(), Short.MAX_VALUE.toInt()).toShort()
+            phase += w; if (phase > 2.0 * Math.PI) phase -= 2.0 * Math.PI
+        }
+        return out
+    }
+
+    fun stopRingback() {
+        ringbackJob?.cancel()
+        ringbackJob = null
+    }
+
+    private fun sendPcmToBrowser(pcm: ShortArray) {
+        val bytes = ByteArray(pcm.size * 2)
+        ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().put(pcm)
+        val base64 = Base64.encodeToString(bytes, Base64.NO_WRAP)
+        wsConnection?.sendAudioChunk(audio = base64, seq = seqTx++, sampleRate = SAMPLE_RATE, codec = "pcm16")
     }
 
     private fun handleAudioPacket(packet: org.json.JSONObject) {
@@ -470,6 +546,7 @@ class AudioWebSocketHandler(
 
     fun setCallActive(active: Boolean) {
         isCallActive = active
+        if (active) stopRingback()
         Log.d(TAG, "WebSocket call state: $active")
     }
 
