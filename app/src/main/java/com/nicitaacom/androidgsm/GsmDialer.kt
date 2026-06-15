@@ -132,9 +132,21 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
             }
             val uri = Uri.parse("tel:$number")
 
-            // MIUI sdm660: passing ANY PhoneAccountHandle causes "Phone is null / OUT_OF_SERVICE".
-            // Let MIUI resolve the SIM itself via empty Bundle — call connects. (Iteration 6)
-            telecomManager.placeCall(uri, Bundle())
+            // On dual-SIM MIUI, an empty Bundle causes SELECT_PHONE_ACCOUNT → CANCELED (the
+            // system waits for a SIM picker that never gets answered, so the call never connects).
+            // Fix: embed the handle via EXTRA_PHONE_ACCOUNT_HANDLE inside the Bundle — different
+            // from placeCall's 3-arg form with a handle (which causes OUT_OF_SERVICE on sdm660).
+            // Priority: use the handle matching simAccountId if provided, else the user's default
+            // outgoing account, else fall back to the first available account.
+            val extras = Bundle()
+            val handle = resolvePhoneAccountHandle(telecomManager, simAccountId, simComponentName)
+            if (handle != null) {
+                extras.putParcelable(TelecomManager.EXTRA_PHONE_ACCOUNT_HANDLE, handle)
+                log("GsmDialer: using PhoneAccount handle ${handle.id}")
+            } else {
+                log("GsmDialer: no handle resolved, placing call without account (MIUI fallback)")
+            }
+            telecomManager.placeCall(uri, extras)
             log("GsmDialer: placeCall() dispatched to GSM modem for $number")
             return true
         } catch (exception: Exception) {
@@ -143,6 +155,23 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
             return false
         }
     }
+    @Suppress("MissingPermission")
+    private fun resolvePhoneAccountHandle(
+        telecomManager: TelecomManager,
+        simAccountId: String?,
+        simComponentName: String?
+    ): android.telecom.PhoneAccountHandle? {
+        val accounts = telecomManager.callCapablePhoneAccounts
+        if (!simAccountId.isNullOrBlank() && !simComponentName.isNullOrBlank()) {
+            val match = accounts.firstOrNull { h ->
+                h.id == simAccountId && h.componentName.flattenToString() == simComponentName
+            }
+            if (match != null) return match
+        }
+        telecomManager.getDefaultOutgoingPhoneAccount("tel")?.let { return it }
+        return accounts.firstOrNull()
+    }
+
     fun endCall() {
         // Primary path: disconnect the actual Call object held by GsmInCallService — same path
         // as the on-screen hang-up button. TelecomManager.endCall() is unreliable on this MIUI

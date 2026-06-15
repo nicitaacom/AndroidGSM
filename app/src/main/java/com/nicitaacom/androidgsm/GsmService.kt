@@ -344,7 +344,7 @@ class GsmService : Service() {
 
     private fun stopTestMode() {
         isTestAudioActive = false
-        MainActivity.setStatus("Status: Ready", false)
+        MainActivity.setStatus("Status: Inactive", false)
         audioWsHandlerRef.handler?.stopAudioCapture()
         audioWsHandlerRef.handler?.stopAudioPlayback()
         audioWsHandlerRef.handler?.disconnect()
@@ -387,7 +387,7 @@ class GsmService : Service() {
 
     private fun stopServiceMode() {
         isServiceAudioActive = false
-        MainActivity.setStatus("Status: Ready", false)
+        MainActivity.setStatus("Status: Inactive", false)
         Thread { cmdWsClient?.sendEvent("SERVICE_STOPPED", emptyMap()) }.start()
         try {
             audioWsHandlerRef.handler?.stopAudioCapture()

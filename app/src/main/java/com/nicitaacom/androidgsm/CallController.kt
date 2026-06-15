@@ -2,6 +2,8 @@ package com.nicitaacom.androidgsm
 
 import android.content.Context
 import android.media.AudioManager
+import android.os.Build
+import java.util.concurrent.atomic.AtomicBoolean
 
 // Mutable holder so CallController can create/null the handler across threads without
 // passing it back to GsmService on every call.
@@ -38,7 +40,13 @@ class CallController(
     @Volatile var isCallActive: Boolean = false
         private set
 
-    // Called from GsmService.onCreate to wire up the two GsmDialer callbacks.
+    // Guards the call-connected audio setup so it runs exactly once per call, no matter which
+    // "remote answered" signal arrives first: TelephonyManager OFFHOOK (fires for most numbers)
+    // or Telecom Call.STATE_ACTIVE (the only signal that fires for MIUI service numbers like
+    // 3311, where OFFHOOK never comes). Reset at the start of each call + on teardown.
+    private val callConnectedHandled = AtomicBoolean(false)
+
+    // Called from GsmService.onCreate to wire up the dialer + InCallService callbacks.
     fun wireDialerCallbacks(gsmDialer: GsmDialer) {
         // Single call-ended callback set once. Owns all teardown.
         gsmDialer.setCallEndedCallback {
@@ -46,68 +54,87 @@ class CallController(
             teardownCall()
         }
 
-        // Single call-connected callback set once. Owns all audio setup.
-        // handleCallStarted must NOT override this — doing so per-call caused duplicate
-        // teardown paths and triple CALL_ENDED events.
-        gsmDialer.setCallConnectedCallback {
-            setCallActive(true)
-            log("📞 OFFHOOK — call connected, setting up audio")
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            am.mode = AudioManager.MODE_IN_CALL
-            am.isSpeakerphoneOn = true
-            val maxVoiceVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
-            am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoiceVol, 0)
+        // Both "remote answered" signals route into onCallConnected(), which self-guards against
+        // running twice. OFFHOOK alone is unreliable on this MIUI build for some numbers, so
+        // STATE_ACTIVE (delivered via GsmInCallService) is wired as the authoritative fallback.
+        gsmDialer.setCallConnectedCallback { onCallConnected("OFFHOOK") }
+        GsmInCallService.onCallActive = { onCallConnected("STATE_ACTIVE") }
 
-            Thread {
-                try {
-                    // Remote answered — stop the website ringback tone; real downlink audio takes over.
-                    audioWsHandlerRef.handler?.stopRingback()
-
-                    val captureEnabled = RootUtils.enableIncallMusicCapture()
-                    log("📞 Incall capture path: $captureEnabled")
-                    Thread.sleep(300)
-
-                    val wsUrl = config.BACKEND_URL
-                        ?.replace("http://", "ws://")
-                        ?.replace("https://", "wss://")
-                        ?.removeSuffix("/") + "/ws/audio"
-
-                    // The audio WS was already opened in handleCallStarted (for ringback). Reuse it
-                    // if still connected — avoids a reconnect gap. Only create fresh if missing/dead.
-                    if (audioWsHandlerRef.handler?.isWsConnected != true) {
-                        audioWsHandlerRef.handler?.disconnect()
-                        audioWsHandlerRef.handler = AudioWebSocketHandler(context, config, log = log) { }
-                        audioWsHandlerRef.handler?.connect(wsUrl, config.BACKEND_BEARER ?: "", config.DEVICE_TOKEN ?: "")
-                    }
-
-                    // Wait for WS to actually open before starting capture — blind sleep(300) was
-                    // not enough on slow networks and caused all tinycap chunks to be silently dropped.
-                    val wsDeadline = System.currentTimeMillis() + 5000
-                    while (audioWsHandlerRef.handler?.isWsConnected != true && System.currentTimeMillis() < wsDeadline) {
-                        Thread.sleep(100)
-                    }
-                    if (audioWsHandlerRef.handler?.isWsConnected != true) {
-                        log("❌ Audio WS failed to connect after 5s — call audio will not work")
-                    } else {
-                        log("✅ Audio WS connected")
-                    }
-
-                    audioWsHandlerRef.handler?.setCallActive(true)
-                    audioWsHandlerRef.handler?.startAudioCapture()
-                    val amMute = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                    amMute.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
-                    RootUtils.mutePhoneSpeaker()
-                    // Uplink injection via Incall_Music mixer is NOT used — MIUI CAF kernel
-                    // blocks slot 1 (VoiceMMode2) ELEM_WRITE silently. Instead, startAudioPlayback()
-                    // writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX PCM device).
-                    audioWsHandlerRef.handler?.startAudioPlayback()
-                    cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
-                    log("📞 CALL_CONNECTED sent to backend")
-                } catch (error: Exception) {
-                    log("ERROR in CALL_CONNECTED callback: ${error.message}")
-                }
-            }.start()
+        // Authoritative "call ended" signal. Telecom's onCallRemoved fires the INSTANT the call
+        // ends — far faster/more reliable than MIUI's PhoneStateListener IDLE (which can lag ~10s
+        // on this build, leaving downlink audio playing after hang-up). teardownCall() self-guards
+        // against double-run, so the later IDLE event is a harmless no-op.
+        GsmInCallService.onCallEnded = {
+            if (isCallActive || audioWsHandlerRef.handler != null) {
+                log("📴 Call removed (Telecom) — tearing down audio immediately")
+                teardownCall()
+            }
         }
+    }
+
+    // Sets up call audio exactly once per call, triggered by whichever remote-answered signal
+    // fires first (OFFHOOK or STATE_ACTIVE). Later signals are ignored via callConnectedHandled.
+    // handleCallStarted must NOT re-wire this — doing setup per-call caused duplicate teardown
+    // paths and triple CALL_ENDED events.
+    private fun onCallConnected(source: String) {
+        if (!callConnectedHandled.compareAndSet(false, true)) {
+            log("📞 Call-connected ($source) ignored — audio already set up this call")
+            return
+        }
+        setCallActive(true)
+        log("📞 $source — call connected, setting up audio")
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        am.mode = AudioManager.MODE_IN_CALL
+        // Do NOT force isSpeakerphoneOn=true here — it overrides the HAL's USB-C mic routing.
+        // tinycap reads ALSA card 0 device 0 directly and doesn't need speakerphone at Java level.
+        val maxVoiceVol = am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
+        am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, maxVoiceVol, 0)
+
+        Thread {
+            try {
+                // Remote answered — stop the website ringback tone; real downlink audio takes over.
+                audioWsHandlerRef.handler?.stopRingback()
+
+                val captureEnabled = RootUtils.enableIncallMusicCapture()
+                log("📞 Incall capture path: $captureEnabled")
+                Thread.sleep(300)
+
+                val wsUrl = audioWsUrl()
+
+                // The audio WS was already opened in handleCallStarted (for ringback). Reuse it
+                // if still connected — avoids a reconnect gap. Only create fresh if missing/dead.
+                if (audioWsHandlerRef.handler?.isWsConnected != true) {
+                    audioWsHandlerRef.handler?.disconnect()
+                    audioWsHandlerRef.handler = AudioWebSocketHandler(context, config, log = log) { }
+                    audioWsHandlerRef.handler?.connect(wsUrl, config.BACKEND_BEARER ?: "", config.DEVICE_TOKEN ?: "")
+                }
+
+                // Wait for WS to actually open before starting capture — blind sleep(300) was
+                // not enough on slow networks and caused all tinycap chunks to be silently dropped.
+                val wsDeadline = System.currentTimeMillis() + 5000
+                while (audioWsHandlerRef.handler?.isWsConnected != true && System.currentTimeMillis() < wsDeadline) {
+                    Thread.sleep(100)
+                }
+                if (audioWsHandlerRef.handler?.isWsConnected != true) {
+                    log("❌ Audio WS failed to connect after 5s — call audio will not work")
+                } else {
+                    log("✅ Audio WS connected")
+                }
+
+                audioWsHandlerRef.handler?.setCallActive(true)
+                audioWsHandlerRef.handler?.startAudioCapture()
+                am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, 0, 0)
+                RootUtils.mutePhoneSpeaker()
+                // Uplink injection via Incall_Music mixer is NOT used — MIUI CAF kernel
+                // blocks slot 1 (VoiceMMode2) ELEM_WRITE silently. Instead, startAudioPlayback()
+                // writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX PCM device).
+                audioWsHandlerRef.handler?.startAudioPlayback()
+                cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
+                log("📞 CALL_CONNECTED sent to backend")
+            } catch (error: Exception) {
+                log("ERROR in CALL_CONNECTED callback: ${error.message}")
+            }
+        }.start()
     }
 
     // Single teardown path for call end — called from GsmDialer callback only.
@@ -115,14 +142,16 @@ class CallController(
     // Marked internal so GsmService can call it from the PhoneStateListener safety net.
     internal fun teardownCall() {
         setCallActive(false)
-        AudioWebSocketHandler.useBrowserMicUplink = true  // reset for next call
+        callConnectedHandled.set(false)  // clear so the next call's connect signal is honored
+        AudioWebSocketHandler.useBrowserMicUplink = false  // reset to working PHONE/headset uplink
         onMicSourceReset()
-        log("📴 Call ended (IDLE) — tearing down audio")
+        log("📴 Call ended — tearing down audio")
         try {
             RootUtils.disableIncallMusicCapture()
             RootUtils.disableIncallMusicInjection()
             RootUtils.unmutePhoneSpeaker()
             val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) am.clearCommunicationDevice()
             am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL), 0)
             am.isSpeakerphoneOn = false
             am.mode = AudioManager.MODE_NORMAL
@@ -161,6 +190,7 @@ class CallController(
             val simComponentName = data["simComponentName"] as? String
             log("Starting call to: $number (sim=$simAccountId)")
             RootUtils.mutePhoneSpeaker()
+            callConnectedHandled.set(false)  // arm for this call's OFFHOOK / STATE_ACTIVE signal
             setCallActive(true)
             // GsmDialer callbacks (set once in wireDialerCallbacks) handle OFFHOOK and IDLE — do NOT
             // override setCallConnectedCallback here; doing so per-call created duplicate
@@ -198,10 +228,7 @@ class CallController(
     private fun startRingbackToWebsite() {
         Thread {
             try {
-                val wsUrl = config.BACKEND_URL
-                    ?.replace("http://", "ws://")
-                    ?.replace("https://", "wss://")
-                    ?.removeSuffix("/") + "/ws/audio"
+                val wsUrl = audioWsUrl()
 
                 audioWsHandlerRef.handler?.disconnect()
                 val handler = AudioWebSocketHandler(context, config, log = log) { }
@@ -272,4 +299,10 @@ class CallController(
         isCallActive = active
         onCallActiveChanged(active)
     }
+
+    private fun audioWsUrl(): String =
+        config.BACKEND_URL
+            ?.replace("http://", "ws://")
+            ?.replace("https://", "wss://")
+            ?.removeSuffix("/") + "/ws/audio"
 }

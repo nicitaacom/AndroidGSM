@@ -251,10 +251,10 @@ class MainActivity : AppCompatActivity() {
             !meetsMinAndroid -> "Status: Android 10+ required"
             !hasInternetConnection -> "Status: No Internet"
             !hasRequiredPermissions -> "Status: Waiting for permissions"
-            isTestAudioActive -> "Status: Test Audio Active"
-            isServiceAudioActive -> "Status: Service Active"
+            isTestAudioActive -> "Status: Test Active"
+            isServiceAudioActive -> "Status: Ready"
             !hasSimAvailable -> "Status: No SIM"
-            else -> "Status: Not Active"
+            else -> "Status: Inactive"
         }
         val color = when {
             isError -> R.color.error_red
@@ -546,9 +546,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     fun updateMicSourceButton(useBrowser: Boolean) {
-        micSourceToggleButton.text = if (useBrowser) "MIC: BROWSER" else "MIC: PHONE"
+        // PHONE = working call uplink (headset/hardware mic). BROWSER = website-mic inject,
+        // which is disabled (kernel-panic path) — so it's the one shown as a warning, not PHONE.
+        micSourceToggleButton.text = if (useBrowser) "MIC: BROWSER ⚠" else "MIC: PHONE ✓"
         micSourceToggleButton.setBackgroundColor(
-            ContextCompat.getColor(this, if (useBrowser) R.color.brand_green else R.color.error_red)
+            ContextCompat.getColor(this, if (useBrowser) R.color.error_red else R.color.brand_green)
         )
     }
 

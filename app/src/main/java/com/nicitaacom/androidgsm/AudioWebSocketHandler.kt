@@ -70,8 +70,9 @@ class AudioWebSocketHandler(
         private const val RINGBACK_EDGE_MS = 5
         @Volatile var micGain: Float = 1.0f
         @Volatile var playbackGain: Float = 0.7f
-        // true = browser mic is uplink source (default); false = phone mic handles uplink natively
-        @Volatile var useBrowserMicUplink: Boolean = true
+        // true = browser-mic inject (DISABLED, kernel-panic path — see [[tinyplay-kernel-panic]]);
+        // false = phone/headset mic handles uplink natively (WORKING). Default to the working one.
+        @Volatile var useBrowserMicUplink: Boolean = false
         private const val CHANNEL_IN = AudioFormat.CHANNEL_IN_MONO
         private const val CHANNEL_OUT = AudioFormat.CHANNEL_OUT_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
@@ -107,12 +108,12 @@ class AudioWebSocketHandler(
         val tone = buildRingbackTone()
         val toneSamples = tone.size
         val chunkSamples = 320
-        // delay() must cover tone + gap, not just gap. The burst is sent near-instantly,
-        // but the browser spends RINGBACK_TONE_MS playing it before the silence begins.
-        // Using only RINGBACK_GAP_MS caused the next burst to arrive while the tone was
-        // still playing, producing a double-beep with no real gap between cycles.
-        val cycleMs = (RINGBACK_TONE_MS + RINGBACK_GAP_MS).toLong()
-        log("📞 Ringback → website (${RINGBACK_FREQ}Hz, ${RINGBACK_TONE_MS}ms tone, ${RINGBACK_GAP_MS}ms gap, ${cycleMs}ms cycle)")
+        // 20ms per chunk at 16kHz (320 samples). Pacing chunks at real-time rate keeps
+        // nextPlayTimeRef on the browser from advancing too far ahead — all 50 chunks sent
+        // instantly caused the browser to schedule 1s of audio then sit idle for 4s, but
+        // re-anchor jitter made the gap audibly shorter than intended.
+        val chunkMs = (chunkSamples * 1000L / SAMPLE_RATE) // 20ms
+        log("📞 Ringback → website (${RINGBACK_FREQ}Hz, ${RINGBACK_TONE_MS}ms tone, ${RINGBACK_GAP_MS}ms gap, paced ${chunkMs}ms/chunk)")
         ringbackJob = scope.launch(Dispatchers.IO) {
             try {
                 while (isActive) {
@@ -120,8 +121,11 @@ class AudioWebSocketHandler(
                     while (off + chunkSamples <= toneSamples) {
                         sendPcmToBrowser(tone.copyOfRange(off, off + chunkSamples))
                         off += chunkSamples
+                        kotlinx.coroutines.delay(chunkMs)
                     }
-                    kotlinx.coroutines.delay(cycleMs)
+                    // Gap: just wait — browser queue drains naturally, nextPlayTimeRef falls
+                    // behind ctx.currentTime, and the next tone burst re-anchors cleanly.
+                    kotlinx.coroutines.delay(RINGBACK_GAP_MS.toLong())
                 }
             } catch (_: kotlinx.coroutines.CancellationException) {
             } catch (e: Exception) {
@@ -131,8 +135,7 @@ class AudioWebSocketHandler(
     }
 
     // Builds only the tone portion as PCM16 (RINGBACK_TONE_MS). Silence is NOT included —
-    // the gap is handled by delay() in the loop so the browser queue goes empty and
-    // nextPlayTimeRef expires, letting it re-anchor cleanly for each new tone burst.
+    // chunks are paced at 20ms/chunk (real-time), then RINGBACK_GAP_MS delay before next burst.
     private fun buildRingbackTone(): ShortArray {
         val toneSamples = (RINGBACK_TONE_MS * SAMPLE_RATE / 1000 / 320) * 320
         val out = ShortArray(toneSamples)
@@ -432,12 +435,18 @@ class AudioWebSocketHandler(
             log("🔊 WebSocket: Starting playback...")
 
             if (isCallActive) {
-                // Call mode: write browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2).
-                // The Incall_Music Audio Mixer injection (MultiMedia1 → voice TX) is blocked by
-                // the MIUI CAF kernel — slot 1 (VoiceMMode2) ELEM_WRITE is silently ignored.
-                // Direct PCM write to pcmC0D19p bypasses the mixer entirely and injects audio
-                // straight into the active VoiceMMode2 TX uplink. Confirmed working via tinyplay.
-                startCallUplinkPcmWriter()
+                // ⛔ DISABLED — this path PANICS THE KERNEL and reboots the phone.
+                // Spawning `tinyplay -d 19` to host-PCM-write into the live VoiceMMode2 TX
+                // device tears down the btfm_slim SLIMbus channel (`slim_control_ch failed
+                // ret[-107]`), leaving the DSP/ION buffer unmapped; the next tinyplay write
+                // hits an unmapped address → "Unable to handle kernel paging request" →
+                // Kernel BUG → "Kernel panic - not syncing: Fatal exception" → watchdog reboot.
+                // Confirmed on hardware 2026-06-02 (ramoops: Process tinyplay panics CPU0).
+                // This is the firmware/kernel uplink DEAD END from CLAUDE.md / [[uplink-kernel-block]]:
+                // software TX injection into a carrier CS call is firmware-blocked. The hardware
+                // mic (MIC: PHONE) is the only working CS uplink. Do NOT re-enable without a
+                // VoIP/SIP leg or BT-HFP path — never the host-PCM tinyplay tap on a live call.
+                log("ℹ️ Call uplink: browser-mic host-PCM inject disabled (kernel-panic safe). Using hardware mic.")
                 return
             }
 
