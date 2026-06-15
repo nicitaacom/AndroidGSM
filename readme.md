@@ -149,7 +149,7 @@ These are the same firmware-blessed mic path the Pi plan uses — just with you 
 next to the phone instead of a Pi bridging your laptop audio over the internet.
 
 **What still works as-is:** downlink (remote → website via tinycap on MultiMedia1),
-and `placeCall` with no PhoneAccountHandle. Full history below under
+and `placeCall` with `EXTRA_PHONE_ACCOUNT_HANDLE` in Bundle. Full history below under
 "Browser mic uplink" / "Iterations to use website's mic" (kept for the record).
 
 ---
@@ -196,6 +196,13 @@ adb shell am force-stop com.nicitaacom.androidgsm \
 
 # Live logs
 adb logcat -s GSM:D AudioWebSocket:D WebSocketAudio:D CmdWS:D RootUtils:D
+```
+
+## To take a screenshot (so you don't transfer it via USB)
+
+```bash
+adb exec-out screencap -p 2>/dev/null | convert - -resize 360x -quality 70 /tmp/gsm_small.jpg && echo "jpg: $(wc -c < /tmp/gsm_small.jpg) bytes"
+
 ```
 
 ## In-app setup (first run)
@@ -302,8 +309,10 @@ CommandWebSocketClient  Persistent WS to /ws/cmd. Stays connected always.
                           always carry current audio mode state.
 
 GsmDialer               Registers TelephonyCallback (API 31+) or PhoneStateListener.
-                        Places calls via TelecomManager.placeCall() with PhoneAccountHandle
-                        for correct SIM routing on dual-SIM devices.
+                        Places calls via TelecomManager.placeCall(uri, bundle) where bundle
+                        contains EXTRA_PHONE_ACCOUNT_HANDLE — resolves to simAccountId match,
+                        then default outgoing account, then first available SIM. The 3-arg
+                        placeCall form and empty Bundle both fail on this MIUI build.
                         OFFHOOK → starts audio; IDLE → stops audio + sends CALL_ENDED.
 
 AudioWebSocketHandler   WS duplex audio (/ws/audio).
@@ -576,16 +585,26 @@ subId string, not ICCID → still `chosenPhone=null`. Fix attempt: build handle 
 Result: `handle.id="1"` → wrong SIM → `chosenPhone=null`. Fix: `maxByOrNull { it.simSlotIndex }`
 to pick the SIM in the highest slot index (slot 1 = active).
 
-**Iteration 6 — no PhoneAccountHandle at all (WORKING)**
+**Iteration 6 — no PhoneAccountHandle at all**
 Passing ANY handle causes `TelephonyConnectionService.getPhoneForAccount` to fail on this MIUI
 build regardless of what id is used. Solution: pass empty `Bundle()` with no handle — MIUI
-resolves the SIM itself. Call connects. ✅
+resolves the SIM itself. Call connects for single-SIM scenario. ✅ (single SIM) ❌ (dual-SIM)
 
-**Dual-SIM caveat:** the `simAccountId`/`simComponentName` from the frontend are now ignored
-when no handle is explicitly provided. Dual-SIM SIM selection from the frontend is broken until
-a working way to pass a handle for a specific SIM is found on this MIUI build.
+**Dual-SIM problem with iteration 6:** on a 2-SIM device, an empty Bundle causes Telecom to
+enter `SELECT_PHONE_ACCOUNT` state (waiting for a SIM picker). Our `InCallService` never
+answers the picker, so the call sits in `SELECT_PHONE_ACCOUNT` for the full "call duration"
+then is CANCELED. `mCallState` stays 0 (IDLE), no ADSP voice path is created, tinycap
+captures silence. Confirmed via `dumpsys telecom`: call stuck at `SELECT_PHONE_ACCOUNT → DISCONNECTED`.
 
-**Current status: call connects. Dual-SIM selection disabled.**
+**Iteration 7 — embed handle via `EXTRA_PHONE_ACCOUNT_HANDLE` in Bundle (WORKING)** ✅
+The 3-arg `placeCall(uri, Bundle, PhoneAccountHandle)` form fails (iteration 4–5). But putting
+the handle *inside* the Bundle as `EXTRA_PHONE_ACCOUNT_HANDLE` is different — it uses the same
+2-arg `placeCall(uri, extras)` form and MIUI resolves it correctly.
+`resolvePhoneAccountHandle()` priority: matching `simAccountId`/`simComponentName` → user's
+default outgoing account → first available account. Call reaches the modem, ADSP voice path
+is created, downlink audio flows.
+
+**Current status: call connects. Dual-SIM selection from frontend works.**
 
 ---
 
