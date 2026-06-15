@@ -414,6 +414,7 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
             isTestActive: isTestActiveRef.current,
             prev: { service: prevService, test: prevTest },
           })
+          queueMicrotask(() => useGSM.getState().setIsServiceActive(isServiceActiveRef.current))
         }
 
         statusFailureCountRef.current = 0
@@ -982,6 +983,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
     sendCommand("SET_GAIN", { playbackGain: value })
   }
 
+  const startService = () => {
+    useGSM.getState().setIsServiceActive(true)
+    sendCommand("START_SERVICE")
+  }
+  const stopService = () => {
+    useGSM.getState().setIsServiceActive(false)
+    sendCommand("STOP_SERVICE")
+  }
+
   const fetchLogs = async (): Promise<string[]> => {
     try {
       const res = await fetch("/api/gsm/logs", { cache: "no-store" })
@@ -1001,6 +1011,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
     fetchLogs,
     setMicGain,
     setPlaybackGain,
+    startService,
+    stopService,
     isTestAudioActiveRef,
     isServiceActiveRef,
     isTestActiveRef,
