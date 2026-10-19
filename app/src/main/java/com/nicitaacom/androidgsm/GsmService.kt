@@ -14,6 +14,7 @@ import android.os.PowerManager
 import android.telephony.PhoneStateListener
 import android.telephony.TelephonyManager
 import androidx.core.app.NotificationCompat
+import java.lang.ref.WeakReference
 
 class GsmService : Service() {
 
@@ -61,12 +62,21 @@ class GsmService : Service() {
         const val EXTRA_MIC_SOURCE = "mic_source"
         const val ACTION_CALL_CONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_CONNECTED"
         const val ACTION_CALL_DISCONNECTED_BROADCAST = "com.nicitaacom.androidgsm.ACTION_CALL_DISCONNECTED"
+
+        // SmsReceiver (a manifest receiver, no handle to the service) reports a STOP reply through here - the phone's
+        // own list already blocks the number, this only lets outreach-tool's user DB learn it (section 3.4)
+        private var instance: WeakReference<GsmService>? = null
+        fun notifySmsOptOut(smsToNumber: String, replyText: String) {
+            val service = instance?.get() ?: return
+            service.cmdWsClient?.sendEvent("SMS_OPT_OUT", mapOf("smsToNumber" to smsToNumber, "replyText" to replyText))
+        }
     }
 
     override fun onCreate() {
         super.onCreate()
         try {
             AppContextHolder.ctx = applicationContext
+            instance = WeakReference(this)
             log("GsmService: onCreate called")
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -267,6 +277,7 @@ class GsmService : Service() {
         }.apply { isDaemon = true; start() }.join(1000)
         unregisterPhoneStateListener()
         if (smsControllerLazy.isInitialized()) smsController.release()
+        instance = null
         wakeLock?.let { if (it.isHeld) it.release() }
         gsmDialer?.cleanup()
         gsmDialer = null

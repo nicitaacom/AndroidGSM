@@ -8,8 +8,9 @@
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
 
-    <!-- Permission for the SMS blast (outreach-tool /dbr) - SEND_SMS command over /ws/cmd -->
+    <!-- Permissions for the SMS blast (outreach-tool /dbr) - SEND_SMS command over /ws/cmd, STOP replies (SmsReceiver) -->
     <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
 
     <!-- Permissions for audio capture and routing -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -118,6 +119,12 @@
         <receiver android:name=".BootReceiver" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        <!-- a STOP reply -> the phone's own opt-out list + SMS_OPT_OUT over /ws/cmd; only the system may send this broadcast -->
+        <receiver android:name=".SmsReceiver" android:exported="true" android:permission="android.permission.BROADCAST_SMS">
+            <intent-filter>
+                <action android:name="android.provider.Telephony.SMS_RECEIVED" />
             </intent-filter>
         </receiver>
 

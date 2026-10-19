@@ -77,6 +77,11 @@ class SmsController(
             sendResult(requestId, false, "SEND_SMS permission not granted")
             return
         }
+        // the phone's own STOP list - "opted out" is the reason the lambda matches (plan-01-dbr-initial-arch section 7)
+        if (SmsOptOutList.contains(context, smsToNumber)) {
+            sendResult(requestId, false, "opted out")
+            return
+        }
         if (pendingParts.containsKey(requestId)) {
             log("SEND_SMS $requestId ignored: already sending")
             return
