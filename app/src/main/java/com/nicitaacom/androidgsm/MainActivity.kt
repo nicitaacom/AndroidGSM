@@ -441,7 +441,8 @@ class MainActivity : AppCompatActivity() {
             Manifest.permission.RECORD_AUDIO,
             Manifest.permission.READ_PHONE_STATE,
             Manifest.permission.ANSWER_PHONE_CALLS,
-            Manifest.permission.MODIFY_AUDIO_SETTINGS
+            Manifest.permission.MODIFY_AUDIO_SETTINGS,
+            Manifest.permission.SEND_SMS
         )
         val missing = required.filter { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }
         hasRequiredPermissions = missing.isEmpty()

@@ -39,6 +39,9 @@ class GsmService : Service() {
             log = log
         )
     }
+    // SEND_SMS (outreach-tool /dbr SMS blast) - lazy so a service that never sends an SMS registers no receiver
+    private val smsControllerLazy = lazy { SmsController(context = this, cmdWsClient = { cmdWsClient }, log = log) }
+    private val smsController: SmsController by smsControllerLazy
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -263,6 +266,7 @@ class GsmService : Service() {
             try { cmdWsClient?.disconnect() } catch (_: Exception) {}
         }.apply { isDaemon = true; start() }.join(1000)
         unregisterPhoneStateListener()
+        if (smsControllerLazy.isInitialized()) smsController.release()
         wakeLock?.let { if (it.isHeld) it.release() }
         gsmDialer?.cleanup()
         gsmDialer = null
@@ -413,6 +417,7 @@ class GsmService : Service() {
                 "CALL_STARTED" -> callController.handleCallStarted(data, gsmDialer)
                 "CALL_ENDED" -> callController.handleCallEnded(gsmDialer)
                 "SEND_DTMF" -> callController.handleSendDtmf(data)
+                "SEND_SMS" -> smsController.handleSendSms(data)
                 "AUDIO_CHUNK" -> { /* legacy path — audio flows over /ws/audio, not /ws/cmd */ }
                 "SET_GAIN" -> {
                     val mic = (data["micGain"] as? Number)?.toFloat()
