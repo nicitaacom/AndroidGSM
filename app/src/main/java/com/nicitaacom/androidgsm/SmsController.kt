@@ -43,6 +43,9 @@ class SmsController(
 
     // requestId -> parts still waiting for their sent result; the first failed part fails the whole SMS
     private val pendingParts = ConcurrentHashMap<String, AtomicInteger>()
+    // one PendingIntent request code per part, never reused - two in-flight requests with equal hash codes would
+    // otherwise share one PendingIntent (FLAG_UPDATE_CURRENT) and the result would name the wrong requestId
+    private val requestCodeCounter = AtomicInteger(0)
     private val mainHandler = Handler(Looper.getMainLooper())
     @Volatile private var isReceiverRegistered = false
 
@@ -135,13 +138,13 @@ class SmsController(
         isReceiverRegistered = true
     }
 
-    // explicit (own package) so the not-exported receiver gets it; one request code per part so the extras stay apart
+    // explicit (own package) so the not-exported receiver gets it; a fresh request code per part so the extras stay apart
     private fun sentPendingIntent(requestId: String, partIndex: Int): PendingIntent {
         val intent = Intent(ACTION_SMS_SENT).setPackage(context.packageName)
             .putExtra(EXTRA_REQUEST_ID, requestId)
             .putExtra(EXTRA_PART_INDEX, partIndex)
         val pendingIntentFlags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        return PendingIntent.getBroadcast(context, requestId.hashCode() * 31 + partIndex, intent, pendingIntentFlags)
+        return PendingIntent.getBroadcast(context, requestCodeCounter.incrementAndGet(), intent, pendingIntentFlags)
     }
 
     // the PhoneAccountHandle id (SIM_LIST "id") is the subscription id on most builds and the ICCID on older ones -
