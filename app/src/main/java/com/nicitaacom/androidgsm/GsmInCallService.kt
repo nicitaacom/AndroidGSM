@@ -19,11 +19,20 @@ class GsmInCallService : InCallService() {
                 // (e.g. service numbers like 3311) — it never fires. STATE_ACTIVE from the
                 // Telecom Call object is the authoritative "remote answered" signal.
                 onCallActive?.invoke()
-                // Route call audio to the Bluetooth headset so the HEADSET MIC becomes the
-                // call uplink (firmware-blessed HFP path). Without this the route stays on
-                // EARPIECE and the remote hears the faint phone earpiece mic instead of the
-                // headphone. See memory [[bt-hfp-uplink-works]].
-                routeToBluetoothIfAvailable()
+                // ⛔ DISABLED — routeToBluetoothIfAvailable() ends the downlink to the browser.
+                // STATE_ACTIVE fires shortly AFTER OFFHOOK (already confirmed elsewhere in this
+                // file as lagging on this MIUI build). By the time it fires, onCallConnected()
+                // has already opened VOC_REC_DL and started tinycap against the EARPIECE route.
+                // Switching CallAudioState to BLUETOOTH moves the whole call onto the SCO/HFP
+                // link, off the on-chip codec's EARPIECE voice path that VOC_REC_DL taps — so
+                // tinycap keeps running but captures only silence from then on. Symptom: browser
+                // hears ~2-3s of real downlink audio (the OFFHOOK window) then silence, even
+                // though the call itself stays live. Hearing the remote party matters more than
+                // BT-uplink quality — the operator needs the downlink to run the call at all.
+                // Hardware mic (MIC: PHONE) already works fine as uplink without BT. Re-enable
+                // only after confirming VOC_REC_DL still captures over a live BT SCO route on
+                // real hardware.
+                // routeToBluetoothIfAvailable()
             }
         }
     }
@@ -66,12 +75,16 @@ class GsmInCallService : InCallService() {
     // feedback loop (setAudioRoute itself triggers another onCallAudioStateChanged).
     override fun onCallAudioStateChanged(audioState: CallAudioState) {
         super.onCallAudioStateChanged(audioState)
-        if (audioState.route == CallAudioState.ROUTE_BLUETOOTH) return
-        val btAvailable = (audioState.supportedRouteMask and CallAudioState.ROUTE_BLUETOOTH) != 0
-        if (currentCall?.state == Call.STATE_ACTIVE && btAvailable) {
-            setAudioRoute(CallAudioState.ROUTE_BLUETOOTH)
-            MainActivity.log("🎧 BT headset available mid-call — routing call audio to it")
-        }
+        // ⛔ DISABLED — same reason as routeToBluetoothIfAvailable() above: forcing the route to
+        // BLUETOOTH moves the call off the EARPIECE path that VOC_REC_DL/tinycap taps, so the
+        // browser downlink goes to silence. Left inert (not deleted) so it is easy to compare
+        // against once VOC_REC_DL-over-BT-SCO is confirmed working on real hardware.
+        // if (audioState.route == CallAudioState.ROUTE_BLUETOOTH) return
+        // val btAvailable = (audioState.supportedRouteMask and CallAudioState.ROUTE_BLUETOOTH) != 0
+        // if (currentCall?.state == Call.STATE_ACTIVE && btAvailable) {
+        //     setAudioRoute(CallAudioState.ROUTE_BLUETOOTH)
+        //     MainActivity.log("🎧 BT headset available mid-call — routing call audio to it")
+        // }
     }
 
     override fun onCallAdded(call: Call) {
