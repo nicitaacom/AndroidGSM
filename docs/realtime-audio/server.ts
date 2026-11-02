@@ -54,6 +54,20 @@ function serverLog(...args: any[]) {
 
 // One browser listener + one android uplink per device (single-user assumption)
 const browserByDevice = new Map<string, WebSocket>()
+
+// The same call event straight over the browser's audio WS, next to the Pusher event - Pusher delivery is not
+// guaranteed (2026-11-02: the phone's CALL_CONNECTED reached this server, the browser never saw the Pusher event,
+// so its "answered" - the call timer, the mic, the music panel's "keep music on answer at" - never lit)
+function forwardToBrowser(deviceToken: string, type: 'gsm:call-connected' | 'gsm:call-ended') {
+  const browserPeer = browserByDevice.get(deviceToken)
+  if (browserPeer?.readyState !== WebSocket.OPEN) return
+  try {
+    browserPeer.send(JSON.stringify({ type, deviceToken, timestamp: new Date().toISOString() }))
+    serverLog(`[ws/audio] ${type} forwarded directly to browser for ${deviceToken}`)
+  } catch (err) {
+    console.error(`❌ [ws/audio] failed to forward ${type} to browser: ${err}`)
+  }
+}
 const androidByDevice = new Map<string, WebSocket>()
 
 // Debounce gsm:device-connected — only fire once per 5 min per device to save Pusher quota
@@ -572,22 +586,13 @@ wsCmd.on('connection', (ws, req) => {
         case 'CALL_CONNECTED':
           serverLog(`📞 [ws/cmd] CALL_CONNECTED: ${tok}`)
           safeTrigger('gsm-calls', 'gsm:call-connected', { deviceToken: tok, timestamp: new Date().toISOString() })
+          forwardToBrowser(tok, 'gsm:call-connected')
           break
-        case 'CALL_ENDED': {
+        case 'CALL_ENDED':
           serverLog(`❌ [ws/cmd] CALL_ENDED: ${tok}`)
           safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken: tok, timestamp: new Date().toISOString() })
-          // Also push directly over the browser audio WS — Pusher delivery is not guaranteed
-          const browserPeer = browserByDevice.get(tok)
-          if (browserPeer?.readyState === WebSocket.OPEN) {
-            try {
-              browserPeer.send(JSON.stringify({ type: 'gsm:call-ended', deviceToken: tok, timestamp: new Date().toISOString() }))
-              serverLog(`[ws/audio] gsm:call-ended forwarded directly to browser for ${tok}`)
-            } catch (err) {
-              console.error(`❌ [ws/audio] failed to forward call-ended to browser: ${err}`)
-            }
-          }
+          forwardToBrowser(tok, 'gsm:call-ended')
           break
-        }
         case 'TEST_AUDIO_STARTED': {
           serverLog(`🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
           const devTas = connectedDevices.get(tok); if (devTas) { devTas.isTestActive = true; devTas.isServiceActive = false }

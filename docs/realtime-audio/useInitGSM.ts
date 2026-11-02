@@ -131,6 +131,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
   const isServiceActiveRef = useRef(false)
   const isTestActiveRef = useRef(false)
   const triggerCallEndedRef = useRef<() => void>(() => {})
+  // the answer, callable from the WS direct frame (effect 4) - set inside effect 2 next to the Pusher binding
+  const onCallConnectedRef = useRef<(deviceToken: string) => void>(() => {})
   const micGainRef = useRef(1.0)
   const playbackGainRef = useRef(1.0)
 
@@ -491,6 +493,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
     const onCallConnected = (eventData: GsmCallsEvent) => {
       const tok = deviceTokenRef.current
       if (!tok || eventData?.deviceToken !== tok) return
+      // the answer arrives twice - the Pusher event and the server's direct WS frame (effect 4) - the second is a no-op
+      if (useCallingSetupStore.getState().isConnected) return
       setIsCalling(false)
       setIsConnected(true)
       console.info("[gsm/call-connected] fired", { deviceToken: tok })
@@ -522,6 +526,8 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       }
       tryStartMic(15) // 15 × 200ms = 3s max wait
     }
+
+    onCallConnectedRef.current = token => onCallConnected({ deviceToken: token })
 
     // Call ended or rejected
     const onCallEnded = (eventData: GsmCallsEvent) => {
@@ -687,6 +693,15 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
       ws.onmessage = ev => {
         try {
           const pkt = JSON.parse(ev.data)
+
+          // Control frame: the server forwarded gsm:call-connected directly over WS (Pusher bypass) - the answer.
+          // 2026-11-02: the Pusher event never reached this page, so "answered" (the timer, the mic, the music's
+          // "keep music on answer at") never lit although the phone had sent CALL_CONNECTED
+          if (pkt.type === "gsm:call-connected" && pkt.deviceToken === deviceToken) {
+            console.info("[gsm/ws] call-connected received via WS direct", { deviceToken })
+            onCallConnectedRef.current(pkt.deviceToken)
+            return
+          }
 
           // Control frame: server forwarded gsm:call-ended directly over WS (Pusher bypass)
           if (pkt.type === "gsm:call-ended" && pkt.deviceToken === deviceToken) {
