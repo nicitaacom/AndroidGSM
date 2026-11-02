@@ -392,6 +392,16 @@ class CallController(
         RootUtils.unmutePhoneSpeaker()
     }
 
+    // The song during a call: AudioService keeps a music level per output, and the call link's own entry was
+    // 10 of 15 - some 14 dB under the call itself, so the music came through quiet at "100%" (2026-11-02:
+    // "its volume is lower even if I have 100%"). Max here, so the browser's percent is the only control and
+    // 100% is as loud as the call. Written while the call link is the music's output, it is that link's entry
+    // only - the music link between calls keeps the level the operator set on the phone.
+    private fun liftMusicOnCallLink() {
+        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, max, 0)
+    }
+
     private fun restoreVoiceVolume() {
         if (voiceVolumeBeforeCall < 0) return
         setVoiceVolume(voiceVolumeBeforeCall)
@@ -435,6 +445,7 @@ class CallController(
                 // it rings with music on, the website lowers that gain to its "ringing while music plays" percent
                 val level = headsetVoiceVolume(AudioWebSocketHandler.playbackGain)
                 setVoiceVolume(level)
+                liftMusicOnCallLink()
                 RootUtils.mutePhoneSpeaker()
                 log("🎧 Headset carries the browser-driven call at voice volume $level/$maxVoiceVolume — phone itself quiet")
             }
