@@ -186,7 +186,9 @@ class AudioWebSocketHandler(
                 seqRx = seq
             }
 
-            if (seq % 50L == 0L) Log.d(TAG, "WS-RX audio chunk seq=$seq")
+            // every 500th chunk: at every 50th this uid was logd's chattiest and its lines were the first
+            // pruned ("chatty ... expire"), so a call's own log was gone before it could be read
+            if (seq % 500L == 0L) Log.d(TAG, "WS-RX audio chunk seq=$seq")
             playAudioChunk(audio, seq)
         } catch (exception: Exception) {
             Log.e(TAG, "❌ Error handling audio packet: ${exception.message}")
@@ -305,7 +307,7 @@ class AudioWebSocketHandler(
                 // Send raw PCM bytes — no HPF/gain processing for downlink voice
                 val base64Audio = Base64.encodeToString(buffer, 0, offset, Base64.NO_WRAP)
                 wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-                if (seq % 50L == 0L) {
+                if (seq % 500L == 0L) {
                     val shorts = ShortArray(offset / 2)
                     ByteBuffer.wrap(buffer, 0, offset).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(shorts)
                     Log.d(TAG, "tinycap-SEND seq=$seq rms=${String.format("%.4f", rms(shorts, shorts.size))}")
@@ -415,7 +417,7 @@ class AudioWebSocketHandler(
                     val base64Audio = Base64.encodeToString(byteBuffer, Base64.NO_WRAP)
                     val seq = seqTx++
                     wsConnection?.sendAudioChunk(audio = base64Audio, seq = seq, sampleRate = SAMPLE_RATE, codec = "pcm16")
-                    if (seq % 50L == 0L) Log.d(TAG, "WS-SEND audio chunk seq=$seq rms=${String.format("%.6f", rms(buffer, read))}")
+                    if (seq % 500L == 0L) Log.d(TAG, "WS-SEND audio chunk seq=$seq rms=${String.format("%.6f", rms(buffer, read))}")
                     chunkCount++
                 } else if (read < 0) {
                     Log.e(TAG, "❌ Read error: $read")
