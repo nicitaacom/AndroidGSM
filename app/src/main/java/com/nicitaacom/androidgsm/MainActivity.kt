@@ -65,7 +65,9 @@ class MainActivity : AppCompatActivity() {
 
     companion object {
         private const val PERMISSION_REQUEST_CODE = 100
-        private const val TAG = "GSM"
+        // not "GSM": MIUI's logd drops that tag outright (a `log -t GSM` probe never shows up), so every
+        // service line sent through log() was missing from logcat until 2026-11-02
+        private const val TAG = "GsmGateway"
         private var instance: WeakReference<MainActivity>? = null
 
         fun log(message: String) {

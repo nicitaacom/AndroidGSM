@@ -60,7 +60,8 @@ Routed by `role` query param:
 ## Deploy workflow
 
 - APK build command: `adb shell am force-stop com.nicitaacom.androidgsm ; ./gradlew clean assembleDebug && adb install -r $(ls -t app/build/outputs/apk/debug/*.apk | head -n1) && adb shell am start -n com.nicitaacom.androidgsm/.MainActivity`
-- Logcat command: `adb logcat -s CmdWS:D GSM:D GsmDialer:D AudioWebSocket:D RootUtils:D *:S`
+- Logcat command: `adb logcat -s CmdWS:D GsmGateway:D GsmDialer:D AudioWebSocket:D RootUtils:D *:S` - `GsmGateway` is MainActivity.log's tag (every service line: CallController, MusicPlayer, "Unhandled command"). It was `GSM` until 2026-11-02: MIUI's logd drops that tag outright, so none of those lines ever reached logcat.
+- Before a test call: `adb logcat -c && adb logcat -G 32M` - the default 8 MiB buffer prunes the chattiest uid first, and during a call that is this app.
 - **Never list a deploy step the user has already confirmed deployed.** Only mention pending items.
 - `docs/` files must be manually copied to their real repos (`gsm-outreach-tool` for server.ts, frontend repo for useInitGSM.ts). Ask the user to confirm after each deploy before marking done.
 
