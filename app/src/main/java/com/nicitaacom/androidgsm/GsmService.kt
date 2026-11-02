@@ -66,6 +66,13 @@ class GsmService : Service() {
         // SmsReceiver (a manifest receiver, no handle to the service) reports a STOP reply through here - the phone's
         // own list already blocks the number, this only lets outreach-tool's user DB learn it (section 3.4)
         private var instance: WeakReference<GsmService>? = null
+
+        // Live mode of the running service. The service outlives the screen (foreground, auto-started
+        // on boot), so a MainActivity created or reopened later must pull these instead of starting
+        // from false — that showed "Inactive" on the phone while outreach-tool already saw "Ready".
+        val serviceActive: Boolean get() = instance?.get()?.isServiceAudioActive == true
+        val testActive: Boolean get() = instance?.get()?.isTestAudioActive == true
+
         fun notifySmsOptOut(smsToNumber: String, replyText: String) {
             val service = instance?.get() ?: return
             service.cmdWsClient?.sendEvent("SMS_OPT_OUT", mapOf("smsToNumber" to smsToNumber, "replyText" to replyText))
@@ -311,7 +318,7 @@ class GsmService : Service() {
             stopServiceMode()
         }
         isTestAudioActive = true
-        MainActivity.setStatus("Status: Test Audio Active", true)
+        MainActivity.notifyTestActive(true)
 
         val baseUrl = config?.BACKEND_URL
         val bearerToken = config?.BACKEND_BEARER
@@ -359,7 +366,7 @@ class GsmService : Service() {
 
     private fun stopTestMode() {
         isTestAudioActive = false
-        MainActivity.setStatus("Status: Inactive", false)
+        MainActivity.notifyTestActive(false)
         audioWsHandlerRef.handler?.stopAudioCapture()
         audioWsHandlerRef.handler?.stopAudioPlayback()
         audioWsHandlerRef.handler?.disconnect()
@@ -385,7 +392,9 @@ class GsmService : Service() {
         }
 
         isServiceAudioActive = true
-        MainActivity.setStatus("Status: Service Active", true)
+        // notify*, not a raw status text: it also sets the Activity's own flag, so its next
+        // updateStatus() (resume, network change) keeps "Ready" instead of falling back to "Inactive".
+        MainActivity.notifyServiceActive(true)
         Thread {
             val deadline = System.currentTimeMillis() + 10000
             while (System.currentTimeMillis() < deadline) {
@@ -402,7 +411,7 @@ class GsmService : Service() {
 
     private fun stopServiceMode() {
         isServiceAudioActive = false
-        MainActivity.setStatus("Status: Inactive", false)
+        MainActivity.notifyServiceActive(false)
         Thread { cmdWsClient?.sendEvent("SERVICE_STOPPED", emptyMap()) }.start()
         try {
             audioWsHandlerRef.handler?.stopAudioCapture()

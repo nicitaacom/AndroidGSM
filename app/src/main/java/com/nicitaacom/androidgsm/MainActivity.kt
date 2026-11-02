@@ -73,21 +73,9 @@ class MainActivity : AppCompatActivity() {
             instance?.get()?.addLog(message)
         }
 
-        fun setStatus(text: String, active: Boolean) {
-            instance?.get()?.runOnUiThread {
-                val activity = instance?.get() ?: return@runOnUiThread
-                activity.statusTextView.text = text
-                activity.statusTextView.setTextColor(
-                    ContextCompat.getColor(
-                        activity,
-                        if (active) R.color.brand_green else R.color.text_secondary
-                    )
-                )
-            }
-        }
-
-        // Called by GsmService when START_SERVICE/STOP_SERVICE arrives over WebSocket,
-        // so MainActivity.isServiceAudioActive stays in sync and onResume doesn't reset the UI.
+        // Called by GsmService whenever SERVICE mode starts/stops (boot auto-start, START_SERVICE /
+        // STOP_SERVICE over WebSocket), so MainActivity.isServiceAudioActive stays in sync and
+        // updateStatus() derives the text from the real flag instead of a one-off string.
         fun notifyServiceActive(active: Boolean) {
             instance?.get()?.runOnUiThread {
                 val activity = instance?.get() ?: return@runOnUiThread
@@ -239,6 +227,11 @@ class MainActivity : AppCompatActivity() {
         if (hasPhoneStatePermission()) {
             try { loadSimSelection() } catch (_: Exception) {}
         }
+        // GsmService outlives this screen: it auto-starts on boot and keeps running when the Activity
+        // is closed. A reopened Activity starts with both flags false, so pull the live mode first —
+        // otherwise the phone said "Inactive" while outreach-tool already showed "Ready" (2026-11-02).
+        isServiceAudioActive = GsmService.serviceActive
+        isTestAudioActive = GsmService.testActive
         updateStatus()
         // Backup trigger — guarded by defaultDialerPromptShown, won't re-show after grant/deny
         window.decorView.post { promptDefaultDialerIfNeeded() }
