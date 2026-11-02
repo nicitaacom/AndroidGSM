@@ -5,6 +5,7 @@ import android.media.AudioManager
 import android.os.Build
 import android.telecom.CallAudioState
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.roundToInt
 
 // Mutable holder so CallController can create/null the handler across threads without
 // passing it back to GsmService on every call.
@@ -381,10 +382,28 @@ class CallController(
         voiceVolumeBeforeCall = -1
     }
 
+    // SET_GAIN playbackGain (the website's slider, 0..4, 0.7 by default) as a voice volume step: 1.0 and above
+    // is the max, never below step 1 so a headset is not left silent by a slider at 0.
+    private fun headsetVoiceVolume(playbackGain: Float): Int =
+        (maxVoiceVolume * playbackGain.coerceIn(0f, 1f)).roundToInt().coerceAtLeast(1)
+
+    // Wired to GsmService's SET_GAIN: the website moved "Playback Vol", or its ringing percent kicked in, during a
+    // browser-driven call - the headset level follows at once. Blocks on su - its own thread.
+    fun onPlaybackGainChanged() {
+        if (!browserDrivenCall) return
+        Thread {
+            try {
+                applyPhoneAudibility()
+            } catch (e: Exception) {
+                log("ERROR applying the playback gain: ${e.message}")
+            }
+        }.start()
+    }
+
     // Phone-side audibility of a browser-driven call, from Telecom's real route, not a mirror flag:
     //  - loudspeaker: the operator turned it on — fully audible
-    //  - a headset paired to the phone (Bluetooth / wired): it carries the call at the operator's
-    //    own volume, the phone's earpiece + loudspeaker stay muted
+    //  - a headset paired to the phone (Bluetooth / wired): it carries the call at the website's
+    //    "Playback Vol", the phone's earpiece + loudspeaker stay muted
     //  - earpiece: quiet, audio to the frontend only
     // A manual call is left alone — Telecom's own route handling is the whole job there. Blocks on
     // su — call from a background thread.
@@ -396,9 +415,12 @@ class CallController(
                 log("🔊 Phone audible — loudspeaker on during a browser-driven call")
             }
             CallAudioState.ROUTE_BLUETOOTH, CallAudioState.ROUTE_WIRED_HEADSET -> {
-                setVoiceVolume(if (voiceVolumeBeforeCall > 0) voiceVolumeBeforeCall else maxVoiceVolume)
+                // the headset's call volume follows the website's "Playback Vol" (SET_GAIN playbackGain); while
+                // it rings with music on, the website lowers that gain to its "ringing while music plays" percent
+                val level = headsetVoiceVolume(AudioWebSocketHandler.playbackGain)
+                setVoiceVolume(level)
                 RootUtils.mutePhoneSpeaker()
-                log("🎧 Headset carries the browser-driven call — phone itself quiet")
+                log("🎧 Headset carries the browser-driven call at voice volume $level/$maxVoiceVolume — phone itself quiet")
             }
             else -> {
                 setPhoneQuiet()

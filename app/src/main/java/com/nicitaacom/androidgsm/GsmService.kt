@@ -467,6 +467,9 @@ class GsmService : Service() {
                     if (mic != null) AudioWebSocketHandler.micGain = mic.coerceIn(0f, 4f)
                     if (playback != null) AudioWebSocketHandler.playbackGain = playback.coerceIn(0f, 4f)
                     log("🎚️ Gain: mic=${mic} playback=${playback}")
+                    // on a browser-driven call a headset paired to the phone takes its call volume from
+                    // playbackGain - the website's "Playback Vol", or its "ringing while music plays" percent
+                    if (playback != null) callController.onPlaybackGainChanged()
                 }
                 "SET_MIC_SOURCE" -> {
                     val source = data["source"] as? String
