@@ -556,6 +556,15 @@ wsCmd.on('connection', (ws, req) => {
 
       // Only forward state-change events to browser via Pusher — not heartbeats
       switch (eventType) {
+        case 'MUSIC_STOPPED': {
+          // the phone stopped the music panel's song on its own (slow_internet / error / service_restart) -
+          // outreach-tool's useSubscribeToMusicStopped pauses the music site and shows the toast (plan-03).
+          // Own channel: gsm-calls is unsubscribed by the dialer when /dialer unmounts, the music panel is not.
+          const reason = typeof data?.reason === 'string' ? data.reason : 'unknown'
+          serverLog(`🎵 [ws/cmd] MUSIC_STOPPED: ${tok} (${reason})`)
+          safeTrigger('gsm-music', 'gsm:music-stopped', { deviceToken: tok, reason, timestamp: new Date().toISOString() })
+          break
+        }
         case 'CONNECTED_EXPLICIT':
           serverLog(`✅ [ws/cmd] device-connected: ${tok}`)
           safeTrigger('gsm-devices', 'gsm:device-connected', { deviceToken: tok, timestamp: new Date().toISOString() })

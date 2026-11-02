@@ -43,6 +43,12 @@ class GsmService : Service() {
     // SEND_SMS (outreach-tool /dbr SMS blast) - lazy so a service that never sends an SMS registers no receiver
     private val smsControllerLazy = lazy { SmsController(context = this, cmdWsClient = { cmdWsClient }, log = log) }
     private val smsController: SmsController by smsControllerLazy
+    // MUSIC_* (outreach-tool's music panel, plan-03) - lazy so a service that never plays music holds no player.
+    // A stop the phone decided on its own goes back as MUSIC_STOPPED so the browser pauses its music site.
+    private val musicPlayerLazy = lazy {
+        MusicPlayer(log) { reason -> cmdWsClient?.sendEvent("MUSIC_STOPPED", mapOf("reason" to reason)) }
+    }
+    private val musicPlayer: MusicPlayer by musicPlayerLazy
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -272,6 +278,8 @@ class GsmService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        // before the cmd channel closes below, so the browser learns the music died with the service (best effort)
+        if (musicPlayerLazy.isInitialized()) musicPlayer.stop("service_restart")
         try {
             audioWsHandlerRef.handler?.stopAudioCapture()
             audioWsHandlerRef.handler?.stopAudioPlayback()
@@ -438,6 +446,20 @@ class GsmService : Service() {
                 "CALL_ENDED" -> callController.handleCallEnded(gsmDialer)
                 "SEND_DTMF" -> callController.handleSendDtmf(data)
                 "SEND_SMS" -> smsController.handleSendSms(data)
+                "MUSIC_PLAY" -> {
+                    val songUrl = data["songUrl"] as? String
+                    if (songUrl.isNullOrBlank()) log("MUSIC_PLAY ignored: missing songUrl")
+                    else musicPlayer.play(
+                        songUrl = songUrl,
+                        positionSec = (data["positionSec"] as? Number)?.toDouble() ?: 0.0,
+                        volumePercent = (data["volumePercent"] as? Number)?.toInt() ?: 100,
+                        title = data["title"] as? String ?: ""
+                    )
+                }
+                "MUSIC_PAUSE" -> musicPlayer.pause()
+                "MUSIC_SEEK" -> musicPlayer.seek((data["positionSec"] as? Number)?.toDouble() ?: 0.0)
+                "MUSIC_VOLUME" -> musicPlayer.setVolume((data["percent"] as? Number)?.toInt() ?: 100)
+                "MUSIC_STOP" -> musicPlayer.stop(reason = null)
                 "AUDIO_CHUNK" -> { /* legacy path — audio flows over /ws/audio, not /ws/cmd */ }
                 "SET_GAIN" -> {
                     val mic = (data["micGain"] as? Number)?.toFloat()
