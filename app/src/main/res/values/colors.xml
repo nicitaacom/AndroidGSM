@@ -15,4 +15,6 @@
     <color name="error_red_dark">#B91F1B</color>
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
+    <color name="toggle_idle">#26FFFFFF</color>
+    <color name="toggle_pressed">#40FFFFFF</color>
 </resources>

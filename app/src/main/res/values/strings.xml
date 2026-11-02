@@ -4,4 +4,6 @@
     <string name="answer_call">Answer call</string>
     <string name="decline_call">Decline call</string>
     <string name="end_call">End call</string>
+    <string name="mute_call">Mute</string>
+    <string name="speaker_call">Speaker</string>
 </resources>

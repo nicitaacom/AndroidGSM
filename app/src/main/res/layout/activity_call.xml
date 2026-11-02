@@ -127,6 +127,74 @@
             android:tint="@color/black" />
     </LinearLayout>
 
+    <!-- Mute / loudspeaker toggles — live call only (hidden while an incoming call rings). -->
+    <LinearLayout
+        android:id="@+id/inCallControls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginBottom="140dp"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical">
+
+            <ImageButton
+                android:id="@+id/muteButton"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:background="@drawable/action_toggle_background"
+                android:contentDescription="@string/mute_call"
+                android:padding="18dp"
+                android:scaleType="center"
+                android:src="@drawable/ic_mic_off"
+                android:tint="@color/toggle_icon_tint" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/mute_call"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <Space
+            android:layout_width="44dp"
+            android:layout_height="1dp" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:gravity="center_horizontal"
+            android:orientation="vertical">
+
+            <ImageButton
+                android:id="@+id/speakerButton"
+                android:layout_width="64dp"
+                android:layout_height="64dp"
+                android:background="@drawable/action_toggle_background"
+                android:contentDescription="@string/speaker_call"
+                android:padding="18dp"
+                android:scaleType="center"
+                android:src="@drawable/ic_volume_up"
+                android:tint="@color/toggle_icon_tint" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="@string/speaker_call"
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
     <ImageButton
         android:id="@+id/hangUpButton"
         android:layout_width="76dp"

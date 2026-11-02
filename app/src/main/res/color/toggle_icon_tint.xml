@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Icon tint for the in-call toggles: dark on the solid white "on" circle, white otherwise. -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:state_selected="true" android:color="@color/bg_dark" />
+    <item android:color="@color/white" />
+</selector>
