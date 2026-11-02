@@ -825,7 +825,11 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
   }
 
   const triggerCallEnded = () => {
-    endSoundRef.current?.play().catch(() => {})
+    // One end cue per call. The server fires gsm:call-ended more than once per hang-up (its own push from
+    // /api/commands, the phone's CALL_ENDED over Pusher, the same frame over the WS, the audio peer drop),
+    // and a website hang-up already played the cue on the click (handleHungUp) with hungUp() clearing the
+    // flag - so only the first end of a still-active call plays it; the state resets below stay idempotent.
+    if (isCallActiveRef.current) endSoundRef.current?.play().catch(() => {})
     isCallActiveRef.current = false
     setIsConnected(false)
     setIsCalling(false)
