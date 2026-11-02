@@ -3,6 +3,7 @@ package com.nicitaacom.androidgsm
 import android.content.Context
 import android.media.AudioManager
 import android.os.Build
+import android.telecom.CallAudioState
 import java.util.concurrent.atomic.AtomicBoolean
 
 // Mutable holder so CallController can create/null the handler across threads without
@@ -51,9 +52,17 @@ class CallController(
     // stays audible like in any dialer. Set in handleCallStarted, cleared in teardownCall.
     @Volatile private var browserDrivenCall = false
 
+    // The operator's voice-call volume at dial time, handed back after the call: a browser-driven
+    // call drives that volume itself (the floor while the phone is quiet, max around a cue).
+    // -1 = nothing captured (manual call).
+    @Volatile private var voiceVolumeBeforeCall = -1
+
     private val audioManager: AudioManager by lazy {
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
+
+    private val maxVoiceVolume: Int
+        get() = audioManager.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL)
 
     // Start / end cues (res/raw/start_call.mp3, end_call.mp3). Owned here, not by GsmInCallService,
     // because a browser-driven call has EAR_S/SPK muted + voice volume 0 from dial time and only
@@ -73,7 +82,7 @@ class CallController(
         // STATE_ACTIVE (delivered via GsmInCallService) is wired as the authoritative fallback.
         gsmDialer.setCallConnectedCallback { onCallConnected("OFFHOOK") }
         GsmInCallService.onCallActive = { onCallConnected("STATE_ACTIVE") }
-        GsmInCallService.onSpeakerToggled = { onPhoneSpeakerToggled() }
+        GsmInCallService.onAudioRouteChanged = { onPhoneRouteChanged() }
         GsmInCallService.onCallDisconnected = { onCallDisconnected() }
 
         // Authoritative "call ended" signal. Telecom's onCallRemoved fires the INSTANT the call
@@ -109,14 +118,14 @@ class CallController(
                 // Remote answered — stop the website ringback tone; real downlink audio takes over.
                 audioWsHandlerRef.handler?.stopRingback()
 
-                // "Call started" cue on the phone. A browser-driven call has had the EAR_S/SPK mixer
-                // muted since handleCallStarted — make the phone audible (max voice volume + mixer),
-                // let the whole clip play out, then mute the mixer again so the phone on the desk
-                // stays quiet (applyPhoneAudibility() settles volume + mixer below). A manual call
-                // keeps whatever volume the operator set. Blocking on the clip's own completion, not
-                // a fixed sleep: in-call playback starts late on this HAL and flipping the mixer
+                // "Call started" cue on the phone. A browser-driven call has been quiet since
+                // handleCallStarted — make the phone audible (max voice volume + mixer), let the
+                // whole clip play out, then mute the mixer again so the phone on the desk stays
+                // quiet (applyPhoneAudibility() settles volume + mixer below). A manual call keeps
+                // whatever volume the operator set. Blocking on the clip's own completion, not a
+                // fixed sleep: in-call playback starts late on this HAL and flipping the mixer
                 // mid-clip chopped the cue to a click.
-                if (browserDrivenCall) setPhoneAudible(true)
+                if (browserDrivenCall) liftQuietState()
                 callSounds.playBlocking(R.raw.start_call)
                 if (browserDrivenCall) RootUtils.mutePhoneSpeaker()
 
@@ -176,15 +185,15 @@ class CallController(
         log("📴 Call ended — tearing down audio")
         try {
             val am = audioManager
-            // Browser-driven call: the phone was quiet (mixer muted, voice volume 0), so make it
-            // audible FIRST and only then start the "call ended" cue. Started from STATE_DISCONNECTED
-            // into the mute (the old way) only its tail came through after the unmute — a click.
-            // The clip sounds while the capture teardown below runs; awaited before the mode reset
-            // so the route change does not cut it. A manual call keeps the operator's volume (the
-            // unmute is an idempotent safety net) and got its cue in onCallDisconnected() already.
-            // Like the start cue, only for a call that actually connected — busy / no answer gets
-            // no "ended" without a "started".
-            if (wasBrowserDriven) setPhoneAudible(true) else RootUtils.unmutePhoneSpeaker()
+            // Browser-driven call: the phone was quiet (mixer muted, voice volume at the floor), so
+            // make it audible FIRST and only then start the "call ended" cue. Started from
+            // STATE_DISCONNECTED into the mute (the old way) only its tail came through after the
+            // unmute — a click. The clip sounds while the capture teardown below runs; awaited before
+            // the mode reset so the route change does not cut it. A manual call keeps the operator's
+            // volume (the unmute is an idempotent safety net) and got its cue in onCallDisconnected()
+            // already. Like the start cue, only for a call that actually connected — busy / no
+            // answer gets no "ended" without a "started".
+            if (wasBrowserDriven) liftQuietState() else RootUtils.unmutePhoneSpeaker()
             if (wasBrowserDriven && wasConnected) callSounds.play(R.raw.end_call)
             RootUtils.disableIncallMusicCapture()
             RootUtils.disableIncallMusicInjection()
@@ -192,6 +201,9 @@ class CallController(
             // Every call: a manual call's cue (started in onCallDisconnected) may still be sounding
             // too, and the mode reset below would re-route it mid-clip. No-op when nothing plays.
             callSounds.awaitFinished()
+            // The cue is over — the operator's own voice volume comes back, not the cue's max, so
+            // the next call (manual, or this gateway's next ring) does not start at full blast.
+            restoreVoiceVolume()
             am.isSpeakerphoneOn = false
             am.mode = AudioManager.MODE_NORMAL
         } catch (_: Exception) {}
@@ -228,7 +240,12 @@ class CallController(
             val simAccountId = data["simAccountId"] as? String
             val simComponentName = data["simComponentName"] as? String
             log("Starting call to: $number (sim=$simAccountId)")
-            RootUtils.mutePhoneSpeaker()
+            voiceVolumeBeforeCall = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+            // Quiet from before the dial. Not enough on its own: the HAL rewrites the EAR_S/SPK mixer
+            // when it brings up the voice path for the route a moment later, which is how the phone
+            // rang along with the browser for the whole ringing phase — onPhoneRouteChanged() applies
+            // the state again once Telecom has settled that route.
+            setPhoneQuiet()
             callConnectedHandled.set(false)  // arm for this call's OFFHOOK / STATE_ACTIVE signal
             browserDrivenCall = true
             setCallActive(true)
@@ -257,13 +274,14 @@ class CallController(
     }
 
     // A browser dial that never left the phone: undo handleCallStarted's pre-dial state and tell the
-    // backend. Not teardownCall() — no audio path was opened yet. The mixer unmute matters: a manual
-    // call stays audible by design now, so it must not inherit the EAR_S/SPK mute armed for this one.
+    // backend. Not teardownCall() — no audio path was opened yet. The unmute + volume matter: a
+    // manual call stays audible by design now, so it must not inherit the quiet state armed here.
     private fun abortBrowserCall(reason: String) {
         log(reason)
         browserDrivenCall = false
         setCallActive(false)
         RootUtils.unmutePhoneSpeaker()
+        restoreVoiceVolume()
         audioWsHandlerRef.handler?.disconnect()
         cmdWsClient()?.sendEvent("CALL_ENDED", emptyMap())
     }
@@ -341,25 +359,52 @@ class CallController(
         }
     }
 
-    // Voice volume and the EAR_S/SPK mixer together: that pair is what "the phone is audible" means
+    private fun setVoiceVolume(level: Int) =
+        audioManager.setStreamVolume(AudioManager.STREAM_VOICE_CALL, level, 0)
+
+    // Voice volume and the EAR_S/SPK mixer together: that pair is what "the phone is quiet" means
     // for the gateway. Blocks on su — call from a background thread.
-    private fun setPhoneAudible(audible: Boolean) {
-        val am = audioManager
-        val volume = if (audible) am.getStreamMaxVolume(AudioManager.STREAM_VOICE_CALL) else 0
-        am.setStreamVolume(AudioManager.STREAM_VOICE_CALL, volume, 0)
-        if (audible) RootUtils.unmutePhoneSpeaker() else RootUtils.mutePhoneSpeaker()
+    private fun setPhoneQuiet() {
+        setVoiceVolume(0)
+        RootUtils.mutePhoneSpeaker()
     }
 
-    // Phone-side audibility of the live call. Only a browser-driven call is touched: quiet ("audio
-    // to frontend only") unless the in-call screen's loudspeaker is on — read from Telecom's real
-    // route, not a mirror flag. A manual call is left alone — Telecom's own route handling is the
-    // whole job there. Blocks on su — call from a background thread.
+    // The opposite, whatever the route — around a cue, and before the volume is handed back.
+    private fun liftQuietState() {
+        setVoiceVolume(maxVoiceVolume)
+        RootUtils.unmutePhoneSpeaker()
+    }
+
+    private fun restoreVoiceVolume() {
+        if (voiceVolumeBeforeCall < 0) return
+        setVoiceVolume(voiceVolumeBeforeCall)
+        voiceVolumeBeforeCall = -1
+    }
+
+    // Phone-side audibility of a browser-driven call, from Telecom's real route, not a mirror flag:
+    //  - loudspeaker: the operator turned it on — fully audible
+    //  - a headset paired to the phone (Bluetooth / wired): it carries the call at the operator's
+    //    own volume, the phone's earpiece + loudspeaker stay muted
+    //  - earpiece: quiet, audio to the frontend only
+    // A manual call is left alone — Telecom's own route handling is the whole job there. Blocks on
+    // su — call from a background thread.
     private fun applyPhoneAudibility() {
         if (!browserDrivenCall) return
-        val speakerOn = GsmInCallService.isSpeakerOn
-        setPhoneAudible(speakerOn)
-        log(if (speakerOn) "🔊 Phone audible — loudspeaker on during a browser-driven call"
-            else "🔇 Phone quiet — browser-driven call, audio to frontend only")
+        when (GsmInCallService.currentAudioState?.route) {
+            CallAudioState.ROUTE_SPEAKER -> {
+                liftQuietState()
+                log("🔊 Phone audible — loudspeaker on during a browser-driven call")
+            }
+            CallAudioState.ROUTE_BLUETOOTH, CallAudioState.ROUTE_WIRED_HEADSET -> {
+                setVoiceVolume(if (voiceVolumeBeforeCall > 0) voiceVolumeBeforeCall else maxVoiceVolume)
+                RootUtils.mutePhoneSpeaker()
+                log("🎧 Headset carries the browser-driven call — phone itself quiet")
+            }
+            else -> {
+                setPhoneQuiet()
+                log("🔇 Phone quiet — browser-driven call, audio to frontend only")
+            }
+        }
     }
 
     // Wired to GsmInCallService.onCallDisconnected (Telecom STATE_DISCONNECTED, just before
@@ -372,14 +417,23 @@ class CallController(
         callSounds.play(R.raw.end_call)
     }
 
-    // Wired to GsmInCallService.onSpeakerToggled — the route itself is already switched by Telecom.
-    private fun onPhoneSpeakerToggled() {
+    // Wired to GsmInCallService.onAudioRouteChanged — the first route of the call (what it rings on)
+    // and every switch after it (loudspeaker toggle, headset plugged in). Telecom has already switched
+    // the route; the HAL then rewrites its own EAR_S/SPK mixer path for the new device a moment
+    // later, which would undo a state applied at once — so it is applied after that window, and once
+    // more in case the HAL was slower. Each pass reads the live route, so a quick on-off-on settles
+    // on the real one.
+    private fun onPhoneRouteChanged() {
         if (!browserDrivenCall) return
         Thread {
             try {
-                applyPhoneAudibility()
+                for (delayMs in AUDIBILITY_REAPPLY_DELAYS_MS) {
+                    Thread.sleep(delayMs)
+                    if (!browserDrivenCall) return@Thread
+                    applyPhoneAudibility()
+                }
             } catch (e: Exception) {
-                log("ERROR applying loudspeaker toggle: ${e.message}")
+                log("ERROR applying the call route: ${e.message}")
             }
         }.start()
     }
@@ -394,4 +448,10 @@ class CallController(
             ?.replace("http://", "ws://")
             ?.replace("https://", "wss://")
             ?.removeSuffix("/") + "/ws/audio"
+
+    companion object {
+        // Waits between a route change and the audibility passes (see onPhoneRouteChanged): 0.5 s
+        // clears the HAL's own mixer write for the new device, the second pass at 2 s is the margin.
+        private val AUDIBILITY_REAPPLY_DELAYS_MS = longArrayOf(500, 1500)
+    }
 }

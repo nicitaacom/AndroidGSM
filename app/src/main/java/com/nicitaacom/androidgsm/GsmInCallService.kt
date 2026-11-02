@@ -115,15 +115,13 @@ class GsmInCallService : InCallService() {
         val previous = currentAudioState
         currentAudioState = audioState
         onAudioStateChanged?.invoke(audioState)
-        // Loudspeaker on/off is reported from HERE, once the route really changed, not from
-        // setLoudspeaker(): the HAL re-applies its own EAR_S/SPK mixer paths while switching, so a
-        // quiet-state re-apply fired at toggle time could land first and be undone by the switch.
-        // This also covers a route change made elsewhere (wired headset plugged in mid-call).
-        // `previous == null` is the first state of a call — the controller sets the quiet state
-        // itself in onCallConnected, nothing to report yet.
-        if (previous != null && previous.isSpeakerRoute != audioState.isSpeakerRoute) {
-            onSpeakerToggled?.invoke()
-        }
+        // The route is reported from HERE, once it really changed, not from setLoudspeaker(): the HAL
+        // re-applies its own EAR_S/SPK mixer paths while switching, so a quiet-state re-apply fired at
+        // toggle time could land first and be undone by the switch. The first state of a call counts
+        // too — it is the route the call rings on, and the HAL brings up that voice path right after
+        // it, over any mute set before the dial. This also covers a route change made elsewhere
+        // (wired headset plugged in mid-call).
+        if (previous?.route != audioState.route) onAudioRouteChanged?.invoke()
         // ⛔ DISABLED — same reason as routeToBluetoothIfAvailable() above: forcing the route to
         // BLUETOOTH moves the call off the EARPIECE path that VOC_REC_DL/tinycap taps, so the
         // browser downlink goes to silence. Left inert (not deleted) so it is easy to compare
@@ -156,7 +154,7 @@ class GsmInCallService : InCallService() {
         call.unregisterCallback(callCallback)
         if (currentCall === call) currentCall = null
         // Drop the last call's mute/route so the next call's screen does not open with stale
-        // toggles and its first audio state is not mistaken for a loudspeaker change.
+        // toggles and its first audio state is reported as the fresh route it is.
         currentAudioState = null
         CallActivity.notifyEnded()
         // Authoritative, immediate "call ended" — tear audio down NOW instead of waiting for
@@ -175,10 +173,10 @@ class GsmInCallService : InCallService() {
         @Volatile var currentAudioState: CallAudioState? = null
             private set
         @Volatile var onAudioStateChanged: ((CallAudioState) -> Unit)? = null
-        // Set by CallController.wireDialerCallbacks() — lifts / re-applies the gateway's phone-side
-        // quiet state when the loudspeaker route flips during a browser-driven call. The new state
-        // is read back from isSpeakerOn, so no argument.
-        @Volatile var onSpeakerToggled: (() -> Unit)? = null
+        // Set by CallController.wireDialerCallbacks() — applies the gateway's phone-side audibility
+        // for the route a browser-driven call is on: its first route (the ringing phase) and every
+        // switch after it. The route is read back from currentAudioState, so no argument.
+        @Volatile var onAudioRouteChanged: (() -> Unit)? = null
         // Set by CallController.wireDialerCallbacks() — invoked on STATE_ACTIVE as a
         // reliable fallback for when TelephonyManager misses OFFHOOK (MIUI quirk).
         @Volatile var onCallActive: (() -> Unit)? = null
