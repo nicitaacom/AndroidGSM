@@ -18,9 +18,10 @@ class GsmInCallService : InCallService() {
             MainActivity.log("GsmInCallService: call state → $state")
             when (state) {
                 Call.STATE_ACTIVE -> {
-                    // TelephonyManager.CALL_STATE_OFFHOOK is unreliable on MIUI for some numbers
-                    // (e.g. service numbers like 3311) — it never fires. STATE_ACTIVE from the
-                    // Telecom Call object is the authoritative "remote answered" signal.
+                    // The answer. TelephonyManager's OFFHOOK is the dial of an outgoing call (and
+                    // never fires on MIUI for some numbers, e.g. service numbers like 3311) -
+                    // STATE_ACTIVE from the Telecom Call object is the one "remote answered" signal;
+                    // CallController sends CALL_CONNECTED to the browser from it.
                     onCallActive?.invoke()
                     // ⛔ DISABLED — routeToBluetoothIfAvailable() ends the downlink to the browser.
                     // STATE_ACTIVE fires shortly AFTER OFFHOOK (already confirmed elsewhere in this

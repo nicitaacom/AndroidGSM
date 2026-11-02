@@ -460,7 +460,8 @@ nextPlayTime += chunkDuration
    → TelecomManager.placeCall() with correct PhoneAccountHandle (dual-SIM aware)
    → Pusher: gsm:call-started → browser (shows "dialing" state)
 
-4. Carrier connects → TelephonyCallback fires OFFHOOK
+4. The call is dialing → TelephonyCallback fires OFFHOOK (OFFHOOK = dialing, active or on hold:
+   for an outgoing call it comes right after placeCall(), NOT at the answer)
    → GsmService sets MODE_IN_CALL + speakerphoneOn=true + STREAM_VOICE_CALL=max
    → AudioWebSocketHandler.connect() → /ws/audio
    → startAudioCapture() → launches tinycap subprocess as root
@@ -468,8 +469,12 @@ nextPlayTime += chunkDuration
    → Thread.sleep(200) → RootUtils.enableIncallMusicInjection()
         set_mixer_ctl: Incall_Music Audio Mixer MM1/MM5 slots 0+1 = On
         mute hardware mic TX (VoiceMMode1_Tx/VoiceMMode2_Tx)
-   → CommandWebSocketClient.sendEvent("CALL_CONNECTED")
-   → server: Pusher gsm:call-connected → browser (starts audio playout)
+   → the ringback generated for the website stops; the network's own ringback now comes through tinycap
+
+4b. The other side answers → Telecom Call.STATE_ACTIVE (GsmInCallService; the only signal for MIUI
+   service numbers like 3311, where OFFHOOK never fires - then it also does step 4)
+   → CommandWebSocketClient.sendEvent("CALL_CONNECTED")   (from STATE_ACTIVE only, since 2026-11-02)
+   → server: Pusher gsm:call-connected → browser ("answered": call timer, mic, the music panel rules)
 
 5. Audio flows:
    DOWNLINK: tinycap → raw PCM16 → base64 → /ws/audio → server → browser AudioContext

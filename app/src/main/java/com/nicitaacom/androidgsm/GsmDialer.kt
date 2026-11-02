@@ -61,7 +61,7 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
                 onCallEnded?.invoke()
             }
             TelephonyManager.CALL_STATE_OFFHOOK -> {
-                log("📞 Call state: OFFHOOK (active)")
+                log("📞 Call state: OFFHOOK (dialing, active or on hold)")
                 onCallConnected?.invoke()
             }
             TelephonyManager.CALL_STATE_RINGING -> log("📞 Call state: RINGING")

@@ -42,11 +42,17 @@ class CallController(
     @Volatile var isCallActive: Boolean = false
         private set
 
-    // Guards the call-connected audio setup so it runs exactly once per call, no matter which
-    // "remote answered" signal arrives first: TelephonyManager OFFHOOK (fires for most numbers)
-    // or Telecom Call.STATE_ACTIVE (the only signal that fires for MIUI service numbers like
-    // 3311, where OFFHOOK never comes). Reset at the start of each call + on teardown.
+    // Guards the call audio setup so it happens once per call, whichever signal comes first:
+    // TelephonyManager OFFHOOK (the dial itself for an outgoing call - Android reports OFFHOOK the
+    // moment a call is dialing, not when it is answered; never at all for MIUI service numbers like
+    // 3311) or Telecom Call.STATE_ACTIVE (the answer). Reset at the start of each call + on teardown.
     private val callConnectedHandled = AtomicBoolean(false)
+
+    // CALL_CONNECTED to the browser goes out on STATE_ACTIVE only - it is the website's "answered"
+    // (its call timer, its mic, the music panel's "keep music on answer at", the end of its ringing
+    // gain). Sent on OFFHOOK it lit "answered" at the dial, so the website's ringing phase was 0 s
+    // long (2026-11-02: "ringing while music plays does nothing", the music paused at the dial).
+    private val callAnsweredSent = AtomicBoolean(false)
 
     // Browser-driven calls (CALL_STARTED over /ws/cmd) keep the phone itself quiet — the operator
     // listens in the browser (see applyPhoneAudibility). A call dialed or answered on the phone
@@ -78,11 +84,11 @@ class CallController(
             teardownCall()
         }
 
-        // Both "remote answered" signals route into onCallConnected(), which self-guards against
-        // running twice. OFFHOOK alone is unreliable on this MIUI build for some numbers, so
-        // STATE_ACTIVE (delivered via GsmInCallService) is wired as the authoritative fallback.
-        gsmDialer.setCallConnectedCallback { onCallConnected("OFFHOOK") }
-        GsmInCallService.onCallActive = { onCallConnected("STATE_ACTIVE") }
+        // Both signals route into onCallConnected(), which self-guards against a second pass. OFFHOOK
+        // comes at the dial of an outgoing call (and never for some MIUI numbers), STATE_ACTIVE at the
+        // answer: the audio setup takes the first of the two, CALL_CONNECTED waits for the answer.
+        gsmDialer.setCallConnectedCallback { onCallConnected(SOURCE_OFFHOOK) }
+        GsmInCallService.onCallActive = { onCallConnected(SOURCE_ANSWERED) }
         GsmInCallService.onAudioRouteChanged = { onPhoneRouteChanged() }
         GsmInCallService.onCallDisconnected = { onCallDisconnected() }
 
@@ -98,17 +104,18 @@ class CallController(
         }
     }
 
-    // Sets up call audio exactly once per call, triggered by whichever remote-answered signal
-    // fires first (OFFHOOK or STATE_ACTIVE). Later signals are ignored via callConnectedHandled.
-    // handleCallStarted must NOT re-wire this — doing setup per-call caused duplicate teardown
+    // Sets up call audio exactly once per call, triggered by whichever signal fires first (OFFHOOK at
+    // the dial, or STATE_ACTIVE at the answer). A later signal only gets to send CALL_CONNECTED, the
+    // answer. handleCallStarted must NOT re-wire this — doing setup per-call caused duplicate teardown
     // paths and triple CALL_ENDED events.
     private fun onCallConnected(source: String) {
         if (!callConnectedHandled.compareAndSet(false, true)) {
-            log("📞 Call-connected ($source) ignored — audio already set up this call")
+            log("📞 $source — audio already set up this call")
+            sendCallConnectedIfAnswered(source)
             return
         }
         setCallActive(true)
-        log("📞 $source — call connected, setting up audio")
+        log("📞 $source — setting up the call audio")
         val am = audioManager
         am.mode = AudioManager.MODE_IN_CALL
         // Do NOT force isSpeakerphoneOn=true here — it overrides the HAL's USB-C mic routing.
@@ -163,12 +170,19 @@ class CallController(
                 // blocks slot 1 (VoiceMMode2) ELEM_WRITE silently. Instead, startAudioPlayback()
                 // writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX PCM device).
                 audioWsHandlerRef.handler?.startAudioPlayback()
-                cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
-                log("📞 CALL_CONNECTED sent to backend")
+                sendCallConnectedIfAnswered(source)
             } catch (error: Exception) {
                 log("ERROR in CALL_CONNECTED callback: ${error.message}")
             }
         }.start()
+    }
+
+    // The browser's "answered" - once per call, and only from Telecom's STATE_ACTIVE: OFFHOOK is the dial.
+    private fun sendCallConnectedIfAnswered(source: String) {
+        if (source != SOURCE_ANSWERED) return
+        if (!callAnsweredSent.compareAndSet(false, true)) return
+        cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
+        log("📞 CALL_CONNECTED sent to backend ($source)")
     }
 
     // Single teardown path for call end — called from GsmDialer callback only.
@@ -179,6 +193,7 @@ class CallController(
         // Cleared so the next call's connect signal is honored; the old value says whether this
         // call ever connected (busy / no answer never did).
         val wasConnected = callConnectedHandled.getAndSet(false)
+        callAnsweredSent.set(false)
         val wasBrowserDriven = browserDrivenCall
         browserDrivenCall = false
         AudioWebSocketHandler.useBrowserMicUplink = false  // reset to working PHONE/headset uplink
@@ -248,6 +263,7 @@ class CallController(
             // the state again once Telecom has settled that route.
             setPhoneQuiet()
             callConnectedHandled.set(false)  // arm for this call's OFFHOOK / STATE_ACTIVE signal
+            callAnsweredSent.set(false)
             browserDrivenCall = true
             setCallActive(true)
             // GsmDialer callbacks (set once in wireDialerCallbacks) handle OFFHOOK and IDLE — do NOT
@@ -475,5 +491,8 @@ class CallController(
         // Waits between a route change and the audibility passes (see onPhoneRouteChanged): 0.5 s
         // clears the HAL's own mixer write for the new device, the second pass at 2 s is the margin.
         private val AUDIBILITY_REAPPLY_DELAYS_MS = longArrayOf(500, 1500)
+        // the two "call audio" signals - see callConnectedHandled / callAnsweredSent
+        private const val SOURCE_OFFHOOK = "OFFHOOK"
+        private const val SOURCE_ANSWERED = "STATE_ACTIVE"
     }
 }
