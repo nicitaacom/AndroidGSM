@@ -229,6 +229,11 @@ Android does NOT subscribe to Pusher. All Android↔backend communication goes o
 | Android heartbeats | `/ws/cmd` WebSocket | 0 Pusher msgs |
 | Audio | `/ws/audio` WebSocket | 0 Pusher msgs |
 
+Since 2026-11-02 the two events that drive the browser's call state, `gsm:call-connected` and `gsm:call-ended`, also
+go straight over the browser's `/ws/audio` socket as `{ type: "gsm:call-connected" | "gsm:call-ended", deviceToken }`
+(server `forwardToBrowser`). Pusher is the second road: on 2026-11-02 the phone's CALL_CONNECTED reached the server,
+Pusher fired, and the browser never saw it (Pusher's `/channels` listed no subscriber), so "answered" never lit there.
+
 ### Service lifecycle
 
 The phone app **never auto-starts SERVICE or TEST mode** on launch. GsmService starts as a
@@ -474,7 +479,8 @@ nextPlayTime += chunkDuration
 4b. The other side answers → Telecom Call.STATE_ACTIVE (GsmInCallService; the only signal for MIUI
    service numbers like 3311, where OFFHOOK never fires - then it also does step 4)
    → CommandWebSocketClient.sendEvent("CALL_CONNECTED")   (from STATE_ACTIVE only, since 2026-11-02)
-   → server: Pusher gsm:call-connected → browser ("answered": call timer, mic, the music panel rules)
+   → server: Pusher gsm:call-connected + the same frame straight over the browser's /ws/audio (forwardToBrowser)
+   → browser ("answered": call timer, mic, the music rules - "keep music on answer at")
 
 5. Audio flows:
    DOWNLINK: tinycap → raw PCM16 → base64 → /ws/audio → server → browser AudioContext
@@ -488,7 +494,7 @@ nextPlayTime += chunkDuration
    → RootUtils.unmutePhoneSpeaker()
    → AudioWebSocketHandler stops + disconnects
    → CommandWebSocketClient.sendEvent("CALL_ENDED")
-   → server: Pusher gsm:call-ended → browser (stops playout)
+   → server: Pusher gsm:call-ended + the same frame over the browser's /ws/audio → browser (stops playout)
 ```
 
 ## TEST mode flow
@@ -515,15 +521,45 @@ Frontend clicks STOP TEST:
 
 ## Gain control
 
-Mic gain and playback volume are controlled from the frontend — no phone UI sliders.
+Playback volume is controlled from the frontend — no phone UI sliders. There is no mic gain any more (2026-11-02):
+the browser mic never reaches the remote party on a GSM call (the firmware wall above), so it had nothing to act on.
 
 ```
-Frontend setMicGain(value) / setPlaybackGain(value):
-  → POST /api/gsm/commands { type: "SET_GAIN", data: { micGain: value } }
+Frontend setPlaybackGain(value)   ("Playback Vol", 0.7 by default)
+  → POST /api/gsm/commands { type: "SET_GAIN", data: { playbackGain: value } }
   → server sends SET_GAIN command over /ws/cmd
-  → GsmService.handleWsCommand("SET_GAIN")
-  → AudioWebSocketHandler applies gain to capture/playback path
+  → GsmService.handleWsCommand("SET_GAIN") → AudioWebSocketHandler.playbackGain
+  → CallController.onPlaybackGainChanged() → applyPhoneAudibility(): on a Bluetooth / wired headset the voice volume
+    follows it (1.0 and above = max, never under step 1) - the headset is the call's output on a browser-driven call
+While it rings with music on, the frontend lowers the gain to its "ringing while music plays" percent and sends it
+again on the answer (useInitGSM effect 5b) - the ringback sits under the music in the headset.
 ```
+
+---
+
+## Music during a call (outreach-tool's music panel, 2026-11-02)
+
+The browser's music site plays muted inside outreach-tool and the phone plays the same song on the headphones
+paired to it: `MusicPlayer.kt`, an Android `MediaPlayer` streaming the song's signed link. Commands over `/ws/cmd`:
+`MUSIC_PLAY { songUrl, positionSec, volumePercent, title }` / `MUSIC_SEEK` / `MUSIC_PAUSE` / `MUSIC_VOLUME { percent }`
+/ `MUSIC_STOP`; the phone reports `MUSIC_STOPPED { reason }` when it stops on its own (no start in 5 s, 3 buffering
+stalls in 60 s, an error, a service restart) and never resumes by itself.
+
+What a call does to the song, all confirmed on the Redmi with a Bluetooth headset:
+
+| moment | what happens on the phone | why it is this way |
+|---|---|---|
+| between calls | A2DP (stereo), level = the browser's "volume" percent of the phone's media volume | ordinary media playback |
+| the dial (OFFHOOK) | the song moves onto the headset's call link (mono at phone-line quality, not a bug); `liftMusicOnCallLink()` sets the music stream to max there, so 100% is as loud as the call | Android keeps a music level per output and the call link's entry sat at 10/15, 14 dB under the call |
+| the ringing | the song keeps playing; the network ringback in the headset drops to the "ringing while music plays" percent of Playback Vol (voice volume) | the browser's effect 5b, only while `isCalling && !isConnected` |
+| the answer (Telecom STATE_ACTIVE) | `CALL_CONNECTED` → the browser's "keep music on answer at": 0 = `MUSIC_PAUSE`, N = `MUSIC_VOLUME N` | OFFHOOK is the dial, not the answer |
+| the hang-up | the browser resumes a pause it made / sends the "volume" percent again | - |
+
+Two things that looked like "the phone ignores the slider" and were not:
+- the player's usage: a `USAGE_MEDIA` player is muted by AudioService for the whole call (`PlaybackActivityMonitor:
+  call: muting piid`) - `MusicPlayer.kt` is `USAGE_ASSISTANCE_NAVIGATION_GUIDANCE`
+- the service's log tag was `GSM`, which this MIUI logd drops outright - every `MusicPlayer` line was invisible until
+  the tag became `GsmGateway`
 
 ---
 
@@ -779,12 +815,12 @@ Fixed: use named argument: `onAudioPacket = { packet -> handleAudioPacket(packet
 
 Android → server:
 ```json
-{ "type": "event", "eventType": "CONNECTED|SERVICE_STARTED|SERVICE_STOPPED|CALL_CONNECTED|CALL_ENDED|...", "deviceToken": "...", "data": { "isServiceActive": true, "isTestActive": false } }
+{ "type": "event", "eventType": "CONNECTED|SERVICE_STARTED|SERVICE_STOPPED|CALL_CONNECTED|CALL_ENDED|MUSIC_STOPPED|...", "deviceToken": "...", "data": { "isServiceActive": true, "isTestActive": false } }
 ```
 
 Server → Android:
 ```json
-{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN", "data": { "number": "...", "simAccountId": "...", "micGain": 1.0 } }
+{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN|MUSIC_PLAY|MUSIC_SEEK|MUSIC_PAUSE|MUSIC_VOLUME|MUSIC_STOP", "data": { "number": "...", "simAccountId": "...", "playbackGain": 0.7, "songUrl": "...", "positionSec": 0, "volumePercent": 100, "percent": 100 } }
 ```
 
 ## Audio format

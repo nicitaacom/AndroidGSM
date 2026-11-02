@@ -10,7 +10,7 @@ Goal: phone acts as a GSM gateway — browser can initiate calls through the pho
 ```
 Frontend (Next.js, Coolify on the VPS - its own Dockerfile, not Vercel)
   ↕ HTTP polling /api/gsm/status (every 2s)
-  ↕ Pusher (call events)
+  ↕ Pusher (call events; connected + ended also go straight over /ws/audio - forwardToBrowser)
   ↕ WebSocket /ws/audio (audio stream)
         ↕
 Backend (Node.js on VPS, Docker)
