@@ -7,8 +7,8 @@ import android.os.Looper
 
 /**
  * Plays the song link the browser's music panel sends (outreach-tool plan-03): the phone streams the
- * file itself and plays it on the headphones paired to it. USAGE_MEDIA, so during a live call it mixes
- * with the call at whatever volume the browser sets, and the call-audio rules in CallController stay
+ * file itself and plays it on the headphones paired to it. During a live call it is mixed into the
+ * call's own route at whatever volume the browser sets, and the call-audio rules in CallController stay
  * untouched. The browser is the remote: MUSIC_PLAY / MUSIC_PAUSE / MUSIC_SEEK / MUSIC_VOLUME /
  * MUSIC_STOP. The player never resumes on its own after a stop or a service restart.
  *
@@ -24,8 +24,13 @@ class MusicPlayer(private val log: GsmLogger, private val onStopped: (reason: St
     private var startTimeout: Runnable? = null
     private var volume = 1f
 
+    // Not USAGE_MEDIA: AudioService mutes every MEDIA / GAME player for the whole call, from Telecom's
+    // MODE_IN_CALL at the dial until MODE_NORMAL ("PlaybackActivityMonitor: call: muting piid" in the
+    // system log, 2026-11-02 - the song went silent the moment a call was placed, and MUSIC_VOLUME on
+    // the answer did not bring it back). Navigation guidance is routed like media (A2DP between calls,
+    // the call's own route during one) and is not on that mute list.
     private val attributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
         .build()
 
