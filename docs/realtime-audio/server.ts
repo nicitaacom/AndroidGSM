@@ -637,6 +637,14 @@ wsCmd.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     console.log(`ℹ️ [ws/cmd] android disconnected: ${deviceToken}`)
+    // The phone reconnects with the same deviceToken (a service restart, a reinstall over adb) and the NEW socket
+    // registers before the OLD one's close arrives here. Deleting by token alone threw the new socket away:
+    // heartbeats on it kept the device "Ready" on the website, while every command found no cmd socket and was
+    // dropped - no call, no music (2026-11-02, 17:37). Only the socket that is still registered may unregister.
+    if (androidCmdByDevice.get(deviceToken) !== ws) {
+      console.log(`ℹ️ [ws/cmd] stale socket closed, the newer one stays registered: ${deviceToken}`)
+      return
+    }
     androidCmdByDevice.delete(deviceToken)
     connectedDevices.delete(deviceToken)
   })
