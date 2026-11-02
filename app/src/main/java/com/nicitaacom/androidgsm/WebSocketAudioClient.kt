@@ -136,7 +136,8 @@ class WebSocketAudioClient(
             }
 
             ws?.send(packet.toString())
-            Log.d(TAG, "📤 Sent chunk seq=$seq, size=${audio.length}")
+            // every 500th chunk - one line per chunk made this uid logd's chattiest and its lines the first pruned
+            if (seq % 500L == 0L) Log.d(TAG, "📤 Sent chunk seq=$seq, size=${audio.length}")
 
         } catch (e: Exception) {
             Log.e(TAG, "❌ Send error: ${e.message}")
