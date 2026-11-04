@@ -44,9 +44,14 @@ class GsmService : Service() {
     private val smsControllerLazy = lazy { SmsController(context = this, cmdWsClient = { cmdWsClient }, log = log) }
     private val smsController: SmsController by smsControllerLazy
     // MUSIC_* (outreach-tool's music panel, plan-03) - lazy so a service that never plays music holds no player.
-    // A stop the phone decided on its own goes back as MUSIC_STOPPED so the browser pauses its music site.
+    // A stop the phone decided on its own goes back as MUSIC_STOPPED so the browser pauses its music site;
+    // drops on the headphones go back as MUSIC_DROPS so the browser can offer a reboot.
     private val musicPlayerLazy = lazy {
-        MusicPlayer(log) { reason -> cmdWsClient?.sendEvent("MUSIC_STOPPED", mapOf("reason" to reason)) }
+        MusicPlayer(
+            log,
+            onStopped = { reason -> cmdWsClient?.sendEvent("MUSIC_STOPPED", mapOf("reason" to reason)) },
+            onDrops = { cmdWsClient?.sendEvent("MUSIC_DROPS", emptyMap()) },
+        )
     }
     private val musicPlayer: MusicPlayer by musicPlayerLazy
 

@@ -17,8 +17,13 @@ import android.os.Looper
  * buffering stalls within STALL_WINDOW_MS -> stop and report MUSIC_STOPPED { reason } to the browser,
  * which pauses the music site and shows the toast. He presses play again when he wants.
  */
-class MusicPlayer(private val log: GsmLogger, private val onStopped: (reason: String) -> Unit) {
+class MusicPlayer(
+    private val log: GsmLogger,
+    private val onStopped: (reason: String) -> Unit,
+    onDrops: () -> Unit,
+) {
     private var player: MediaPlayer? = null
+    private val dropWatcher = BluetoothDropWatcher(log, onDrops)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stallTimesMs = ArrayDeque<Long>()
     private var startTimeout: Runnable? = null
@@ -49,6 +54,7 @@ class MusicPlayer(private val log: GsmLogger, private val onStopped: (reason: St
                 if (startMs > 0) prepared.seekTo(startMs)
                 prepared.setVolume(volume, volume)
                 prepared.start()
+                dropWatcher.start()
                 log("🎵 MusicPlayer: playing \"$title\" from ${positionSec.toInt()} s at $volumePercent%")
             }
             mp.setOnInfoListener { _, what, _ ->
@@ -76,6 +82,7 @@ class MusicPlayer(private val log: GsmLogger, private val onStopped: (reason: St
         try {
             val mp = player ?: return
             if (mp.isPlaying) mp.pause()
+            dropWatcher.stop()
             log("🎵 MusicPlayer: paused")
         } catch (e: IllegalStateException) {
             log("🎵 MusicPlayer: pause ignored: ${e.message}")
@@ -139,6 +146,7 @@ class MusicPlayer(private val log: GsmLogger, private val onStopped: (reason: St
 
     private fun releasePlayer() {
         cancelStartTimeout()
+        dropWatcher.stop()
         stallTimesMs.clear()
         try { player?.release() } catch (_: Exception) {}
         player = null
