@@ -58,7 +58,7 @@ const browserByDevice = new Map<string, WebSocket>()
 // The same call event straight over the browser's audio WS, next to the Pusher event - Pusher delivery is not
 // guaranteed (2026-11-02: the phone's CALL_CONNECTED reached this server, the browser never saw the Pusher event,
 // so its "answered" - the call timer, the mic, the music panel's "keep music on answer at" - never lit)
-function forwardToBrowser(deviceToken: string, type: 'gsm:call-connected' | 'gsm:call-ended') {
+function forwardToBrowser(deviceToken: string, type: 'gsm:call-connected' | 'gsm:call-ended' | 'gsm:music-drops') {
   const browserPeer = browserByDevice.get(deviceToken)
   if (browserPeer?.readyState !== WebSocket.OPEN) return
   try {
@@ -581,9 +581,9 @@ wsCmd.on('connection', (ws, req) => {
         }
         case 'MUSIC_DROPS':
           // the phone's Bluetooth keeps reporting link trouble while the song plays = 50-100 ms pauses on the
-          // headphones; outreach-tool shows "Experiencing interruptions? [reboot phone]" (a reboot cleared it 04.11.2026)
+          // headphones; outreach-tool's /dialer shows "Experiencing interruptions? [reboot phone]" - over the audio WS only
           serverLog(`🎧 [ws/cmd] MUSIC_DROPS: ${tok}`)
-          safeTrigger('gsm-music', 'gsm:music-drops', { deviceToken: tok, timestamp: new Date().toISOString() })
+          forwardToBrowser(tok, 'gsm:music-drops')
           break
         case 'CONNECTED_EXPLICIT':
           serverLog(`✅ [ws/cmd] device-connected: ${tok}`)

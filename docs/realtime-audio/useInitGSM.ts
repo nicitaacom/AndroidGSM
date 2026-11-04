@@ -710,6 +710,13 @@ export const useInitGSM = (dtmfTimeoutRef: RefObject<NodeJS.Timeout | null>, end
             return
           }
 
+          // Control frame: the phone's MUSIC_DROPS (pauses on the headphones) -> the music widget's
+          // "Experiencing interruptions? [reboot phone]"
+          if (pkt.type === "gsm:music-drops" && pkt.deviceToken === deviceToken) {
+            useMusicStore.getState().setHasMusicDrops(true)
+            return
+          }
+
           if (pkt.deviceToken !== deviceToken || pkt.dir !== "toBrowser") return
           if (!pkt.audio) return
 
