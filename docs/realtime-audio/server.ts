@@ -579,6 +579,12 @@ wsCmd.on('connection', (ws, req) => {
           safeTrigger('gsm-music', 'gsm:music-stopped', { deviceToken: tok, reason, timestamp: new Date().toISOString() })
           break
         }
+        case 'MUSIC_DROPS':
+          // the phone's Bluetooth keeps reporting link trouble while the song plays = 50-100 ms pauses on the
+          // headphones; outreach-tool shows "Experiencing interruptions? [reboot phone]" (a reboot cleared it 04.11.2026)
+          serverLog(`🎧 [ws/cmd] MUSIC_DROPS: ${tok}`)
+          safeTrigger('gsm-music', 'gsm:music-drops', { deviceToken: tok, timestamp: new Date().toISOString() })
+          break
         case 'CONNECTED_EXPLICIT':
           serverLog(`✅ [ws/cmd] device-connected: ${tok}`)
           safeTrigger('gsm-devices', 'gsm:device-connected', { deviceToken: tok, timestamp: new Date().toISOString() })
