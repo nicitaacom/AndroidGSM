@@ -465,6 +465,7 @@ class GsmService : Service() {
                 "MUSIC_SEEK" -> musicPlayer.seek((data["positionSec"] as? Number)?.toDouble() ?: 0.0)
                 "MUSIC_VOLUME" -> musicPlayer.setVolume((data["percent"] as? Number)?.toInt() ?: 100)
                 "MUSIC_STOP" -> musicPlayer.stop(reason = null)
+                "REBOOT_PHONE" -> rebootPhone()
                 "AUDIO_CHUNK" -> { /* legacy path — audio flows over /ws/audio, not /ws/cmd */ }
                 "SET_GAIN" -> {
                     val mic = (data["micGain"] as? Number)?.toFloat()
@@ -514,6 +515,20 @@ class GsmService : Service() {
             log("FATAL: Uncaught exception in handleCommand: ${e.message}")
             e.printStackTrace()
         }
+    }
+
+    // for outreach-tool's "Experiencing interruptions? [reboot phone]" (parked, plan-03) - on 04.11.2026 a reboot cleared
+    // the drops on the headphones. Never during a call. BootReceiver starts the gateway again only after a reboot asked
+    // for here - MIUI drops that broadcast anyway, the way past it is a Magisk boot script (plan-04 "Start on boot")
+    private fun rebootPhone() {
+        if (callController.isCallActive) {
+            log("REBOOT_PHONE ignored: a call is active")
+            return
+        }
+        BootReceiver.markStartAfterReboot(this)
+        if (musicPlayerLazy.isInitialized()) musicPlayer.stop(reason = null)
+        log("🔁 REBOOT_PHONE: rebooting, the gateway starts again after boot")
+        Thread { RootUtils.rebootPhone() }.start()
     }
 
     private fun handleWsCommand(type: String, data: org.json.JSONObject) {

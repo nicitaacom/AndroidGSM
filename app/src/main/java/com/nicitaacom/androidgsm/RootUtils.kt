@@ -122,6 +122,16 @@ object RootUtils {
     fun grantAudioOutputCapture(context: Context): Boolean =
         grantPermission(context.packageName, "android.permission.CAPTURE_AUDIO_OUTPUT")
 
+    // svc power reboot - the system's own shutdown path, same as holding the power key
+    fun rebootPhone() {
+        try {
+            val (exitCode, output) = runSuCommand("svc power reboot")
+            if (exitCode != 0) Log.e(TAG, "❌ Reboot failed (exit=$exitCode, output=$output)")
+        } catch (exception: Exception) {
+            Log.e(TAG, "❌ Reboot error: ${exception.message}")
+        }
+    }
+
     // Tap GSM call downlink into MultiMedia1 capture stream via set_mixer_ctl.
     // 'MultiMedia1 Mixer VOC_REC_DL' is a 2-slot BOOL control (slot 0 = VoiceMMode1,
     // slot 1 = VoiceMMode2). tinymix cannot set slot 1 on MIUI sdm660 due to a broken
