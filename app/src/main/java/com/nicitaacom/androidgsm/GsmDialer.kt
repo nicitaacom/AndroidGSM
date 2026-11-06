@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.os.PowerManager
 import android.telecom.TelecomManager
 import android.telephony.PhoneStateListener
+import android.telephony.SubscriptionManager
 import android.telephony.TelephonyCallback
 import android.telephony.TelephonyManager
 import android.util.Log
@@ -77,12 +78,20 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
     }
 
 
-    // Returns a list of call-capable SIM accounts: [{id, label, simSlotIndex}]
+    // Returns a list of call-capable SIM accounts: [{id, componentName, label, simSlotIndex, number}]
     @Suppress("MissingPermission")
     fun getSimAccounts(): List<Map<String, Any>> {
         if (!hasPermission(Manifest.permission.READ_PHONE_STATE)) return emptyList()
         return try {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
+            // the SIM's own number per slot ("" on a SIM that reports none) - the laptop shows it under the carrier label,
+            // two "Telekom.de" SIMs read the same without it (06.11.2026)
+            val numberBySlot = try {
+                val subscriptionManager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
+                subscriptionManager.activeSubscriptionInfoList?.associate { it.simSlotIndex to (it.number ?: "") } ?: emptyMap()
+            } catch (e: Exception) {
+                emptyMap<Int, String>()
+            }
             telecomManager.callCapablePhoneAccounts.mapIndexedNotNull { idx, handle ->
                 try {
                     val account = telecomManager.getPhoneAccount(handle)
@@ -90,7 +99,13 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
                     val simSlot = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                         account?.extras?.getInt("simSlotIndex", idx) ?: idx
                     } else idx
-                    mapOf("id" to handle.id, "componentName" to handle.componentName.flattenToString(), "label" to label, "simSlotIndex" to simSlot)
+                    mapOf(
+                        "id" to handle.id,
+                        "componentName" to handle.componentName.flattenToString(),
+                        "label" to label,
+                        "simSlotIndex" to simSlot,
+                        "number" to (numberBySlot[simSlot] ?: "")
+                    )
                 } catch (e: Exception) { null }
             }
         } catch (e: Exception) {
