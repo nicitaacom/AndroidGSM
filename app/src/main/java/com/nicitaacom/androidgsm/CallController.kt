@@ -112,6 +112,10 @@ class CallController(
     // answer. handleCallStarted must NOT re-wire this — doing setup per-call caused duplicate teardown
     // paths and triple CALL_ENDED events.
     private fun onCallConnected(source: String) {
+        // the answer: the generated ringback stops here and only here - OFFHOOK is the dial, and while the
+        // generated tone plays the downlink chunks (the network's own ringback) are held back, so the
+        // website hears one "tyyy" at one volume (plan-05 task 13)
+        if (source == SOURCE_ANSWERED) audioWsHandlerRef.handler?.stopRingback()
         if (!callConnectedHandled.compareAndSet(false, true)) {
             log("📞 $source — audio already set up this call")
             sendCallConnectedIfAnswered(source)
@@ -126,8 +130,6 @@ class CallController(
 
         Thread {
             try {
-                // Remote answered — stop the website ringback tone; real downlink audio takes over.
-                audioWsHandlerRef.handler?.stopRingback()
 
                 // "Call started" cue on the phone. A browser-driven call has been quiet since
                 // handleCallStarted — make the phone audible (max voice volume + mixer), let the
@@ -308,8 +310,8 @@ class CallController(
     }
 
     // Opens the audio WS (if needed) during dialing and streams a ringback tone to the website.
-    // Runs on its own thread so it doesn't block command handling. OFFHOOK stops the ringback;
-    // teardownCall() disconnects the handler if the call never connects.
+    // Runs on its own thread so it doesn't block command handling. The answer (STATE_ACTIVE) stops
+    // the ringback; teardownCall() disconnects the handler if the call never connects.
     private fun startRingbackToWebsite() {
         Thread {
             try {
@@ -324,11 +326,11 @@ class CallController(
                 while (handler.isWsConnected != true && System.currentTimeMillis() < deadline) {
                     Thread.sleep(100)
                 }
-                // Only start the tone if the call hasn't already connected (race with fast OFFHOOK).
-                if (handler.isWsConnected && isCallActive) {
+                // Only start the tone if the call is still on and not yet answered (race with a fast answer).
+                if (handler.isWsConnected && isCallActive && !callAnsweredSent.get()) {
                     handler.startRingback()
                 } else {
-                    log("⚠️ Ringback skipped (wsConnected=${handler.isWsConnected}, callActive=$isCallActive)")
+                    log("⚠️ Ringback skipped (wsConnected=${handler.isWsConnected}, callActive=$isCallActive, answered=${callAnsweredSent.get()})")
                 }
             } catch (e: Exception) {
                 log("ERROR starting ringback to website: ${e.message}")

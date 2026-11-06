@@ -105,8 +105,8 @@ class AudioWebSocketHandler(
     }
 
     // Streams a single sustained "tyyyyymmm" ringback to the WEBSITE over /ws/audio
-    // (dir=toBrowser) while the call is DIALING — phone plays nothing.
-    // Stopped on OFFHOOK (remote answers) or call end.
+    // (dir=toBrowser) from the dial until the answer — phone plays nothing.
+    // Stopped on STATE_ACTIVE (remote answers) or call end.
     fun startRingback() {
         if (ringbackJob?.isActive == true) return
         val tone = buildRingbackTone()
@@ -309,6 +309,10 @@ class AudioWebSocketHandler(
                 if (offset == 0) continue
 
                 teeSink?.let { sink -> runCatching { sink.write(buffer, 0, offset) } }
+
+                // while the generated ringback plays, the downlink (the network's own ringback at the quiet
+                // voice volume) stays on the phone - one "tyyy" reaches the website, not two
+                if (ringbackJob?.isActive == true) continue
 
                 // Send raw PCM bytes — no HPF/gain processing for downlink voice
                 val base64Audio = Base64.encodeToString(buffer, 0, offset, Base64.NO_WRAP)
@@ -561,9 +565,10 @@ class AudioWebSocketHandler(
         return buf.array()
     }
 
+    // the generated ringback outlives this flag: it plays until the answer (CallController.onCallConnected
+    // STATE_ACTIVE) - the call-active flag flips at OFFHOOK, which is the dial
     fun setCallActive(active: Boolean) {
         isCallActive = active
-        if (active) stopRingback()
         Log.d(TAG, "WebSocket call state: $active")
     }
 

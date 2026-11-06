@@ -473,10 +473,13 @@ nextPlayTime += chunkDuration
    → Thread.sleep(200) → RootUtils.enableIncallMusicInjection()
         set_mixer_ctl: Incall_Music Audio Mixer MM1/MM5 slots 0+1 = On
         mute hardware mic TX (VoiceMMode1_Tx/VoiceMMode2_Tx)
-   → the ringback generated for the website stops; the network's own ringback now comes through tinycap
+   → the ringback generated for the website keeps playing; tinycap runs but its chunks are held back while
+     the generated tone plays (since 06.11.2026 - before, the network's own ringback came through at the quiet
+     voice volume on top of the generated one: a 2nd "tyyy" 10x lower)
 
 4b. The other side answers → Telecom Call.STATE_ACTIVE (GsmInCallService; the only signal for MIUI
    service numbers like 3311, where OFFHOOK never fires - then it also does step 4)
+   → the generated ringback stops, the downlink chunks flow to the browser
    → CommandWebSocketClient.sendEvent("CALL_CONNECTED")   (from STATE_ACTIVE only, since 2026-11-02)
    → server: gsm:call-connected frame straight over the browser's /ws/audio (forwardToBrowser)
    → browser ("answered": call timer, mic, the music rules - "keep music on answer at")
