@@ -260,6 +260,25 @@ class MainActivity : AppCompatActivity() {
         statusTextView.setTextColor(ContextCompat.getColor(this, color))
     }
 
+    // MIUI keeps BOOT_COMPLETED from an app whose Autostart switch is off, so BootReceiver never runs after a reboot.
+    // The switch lives in MIUI's Security screen (no API turns it on) - this opens that screen once, the rest is one tap.
+    private fun askAutostartOnMiuiOnce() {
+        val prefs = getSharedPreferences("app_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("autostart_asked", false)) return
+        val autostartScreen = Intent().setClassName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+        if (autostartScreen.resolveActivity(packageManager) == null) return
+        AlertDialog.Builder(this)
+            .setTitle("Autostart after a reboot")
+            .setMessage("Turn Autostart on for this dialer - the gateway then comes back on its own after every reboot, no need to open it by hand.")
+            .setPositiveButton("Open") { _, _ ->
+                prefs.edit { putBoolean("autostart_asked", true) }
+                addLog("Opening MIUI Autostart - turn the switch on for this dialer")
+                startActivity(autostartScreen)
+            }
+            .setNegativeButton("Later", null)
+            .show()
+    }
+
     private fun requestBatteryOptimizationExemption() {
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         if (!powerManager.isIgnoringBatteryOptimizations(packageName)) {
@@ -327,6 +346,7 @@ class MainActivity : AppCompatActivity() {
                 try { loadSimSelection() } catch (error: Exception) { addLog("SIM load error: ${error.message}") }
                 startService(pendingAllowStartWithoutSim)
                 pendingAllowStartWithoutSim = false
+                askAutostartOnMiuiOnce()
             } else {
                 hasRequiredPermissions = false
                 pendingAllowStartWithoutSim = false
@@ -449,6 +469,7 @@ class MainActivity : AppCompatActivity() {
             if (hasPhoneStatePermission()) loadSimSelection()
             // Start the service process so WS cmd connects — SERVICE/TEST controlled by frontend
             startService()
+            askAutostartOnMiuiOnce()
         }
     }
 
