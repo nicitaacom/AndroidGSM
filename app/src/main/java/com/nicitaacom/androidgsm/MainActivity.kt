@@ -32,6 +32,8 @@ import androidx.core.content.ContextCompat
 import androidx.core.content.edit
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.net.toUri
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import java.lang.ref.WeakReference
 import java.text.SimpleDateFormat
 import java.util.*
@@ -43,6 +45,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusTextView: TextView
     private lateinit var versionTextView: TextView
     private lateinit var micSourceToggleButton: Button
+    private lateinit var scanConfigButton: Button
     private var hasSimAvailable = true
     private var hasInternetConnection = true
     private var hasRequiredPermissions = false
@@ -61,6 +64,20 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
             val granted = result.resultCode == RESULT_OK
             addLog(if (granted) "✅ Default dialer GRANTED" else "❌ Default dialer DENIED (resultCode=${result.resultCode})")
+        }
+
+    // the QR from /dialer's gear menu (plan-05 task 4): its json goes to ConfigStore, then the service restarts so
+    // ConfigReader reads the scanned BACKEND_URL + BACKEND_BEARER (the userId) and /ws/cmd reconnects as that user
+    private val scanConfigLauncher: ActivityResultLauncher<ScanOptions> =
+        registerForActivityResult(ScanContract()) { result ->
+            val qrText = result.contents
+            if (qrText == null) { addLog("Scan cancelled"); return@registerForActivityResult }
+            val scanned = ConfigStore.parse(qrText)
+            if (scanned == null) { addLog("❌ Not a config QR - open /dialer's gear menu on the laptop and scan that one"); return@registerForActivityResult }
+            ConfigStore.insert(this, scanned)
+            addLog("✅ Config scanned: ${scanned.backendUrl} as ${scanned.bearer.take(8)}… - restarting the service")
+            stopService(Intent(this, GsmService::class.java))
+            startService(allowWithoutSim = true)
         }
 
     companion object {
@@ -128,11 +145,22 @@ class MainActivity : AppCompatActivity() {
         statusTextView = findViewById(R.id.statusTextView)
         versionTextView = findViewById(R.id.versionTextView)
         micSourceToggleButton = findViewById(R.id.micSourceToggleButton)
+        scanConfigButton = findViewById(R.id.scanConfigButton)
         versionTextView.text = "outreach-tool.com | v.${BuildConfig.VERSION_NAME}"
         evaluateVersionFreshness()
 
         copyLogsButton.setOnClickListener {
             copyLastLogsToClipboard()
+        }
+
+        scanConfigButton.setOnClickListener {
+            scanConfigLauncher.launch(
+                ScanOptions()
+                    .setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                    .setPrompt("Scan the QR from /dialer's gear menu")
+                    .setBeepEnabled(false)
+                    .setOrientationLocked(true)
+            )
         }
 
         micSourceToggleButton.setOnClickListener {

@@ -14,37 +14,19 @@ data class Config(
 
 class ConfigReader {
     companion object {
+        // the scanned config first (ConfigStore, plan-05 task 4), the json in assets only when nothing was scanned
         fun readConfig(context: Context): Config {
-            val inputStream = try {
-                context.assets.open("androidgsm.config.json")
-            } catch (e: Exception) {
-                val msg = "CONFIG ERROR: androidgsm.config.json not found in assets.\n" +
-                    "Copy androidgsm.config.example.json → androidgsm.config.json and fill in your values, then rebuild."
-                MainActivity.log(msg)
-                throw e
-            }
-
-            val jsonString = inputStream.bufferedReader().use { it.readText() }
-            val json = JSONObject(jsonString)
-
-            val missing = listOf("BACKEND_URL", "BACKEND_BEARER")
-                .filter { key -> json.optString(key).isBlank() || json.optString(key).startsWith("your-") || json.optString(key) == "xxxx" }
-
-            if (missing.isNotEmpty()) {
-                val msg = "CONFIG ERROR: placeholder values detected for: ${missing.joinToString()}\n" +
-                    "Edit androidgsm.config.json with real credentials and rebuild."
-                MainActivity.log(msg)
-                throw IllegalStateException(msg)
-            }
-
             val deviceName = "${Build.MANUFACTURER}_${Build.MODEL}"
                 .replace(Regex("[^a-zA-Z0-9_-]"), "_")
 
-            val config = Config(
-                BACKEND_URL = json.getString("BACKEND_URL").trimEnd('/'),
-                DEVICE_TOKEN = deviceName,
-                BACKEND_BEARER = json.getString("BACKEND_BEARER")
-            )
+            val scanned = ConfigStore.select(context)
+            val config = if (scanned != null) {
+                MainActivity.log("Config: scanned from /dialer (bearer ${scanned.bearer.take(8)}…)")
+                Config(BACKEND_URL = scanned.backendUrl, DEVICE_TOKEN = deviceName, BACKEND_BEARER = scanned.bearer)
+            } else {
+                MainActivity.log("Config: androidgsm.config.json (nothing scanned yet - [SCAN CONFIG] reads the QR from /dialer's gear menu)")
+                readJsonConfig(context, deviceName)
+            }
 
             // Ping backend once to verify URL is reachable
             Thread {
@@ -68,6 +50,36 @@ class ConfigReader {
             }.start()
 
             return config
+        }
+
+        private fun readJsonConfig(context: Context, deviceName: String): Config {
+            val inputStream = try {
+                context.assets.open("androidgsm.config.json")
+            } catch (e: Exception) {
+                val msg = "CONFIG ERROR: androidgsm.config.json not found in assets.\n" +
+                    "Scan the QR from /dialer's gear menu, or copy androidgsm.config.example.json → androidgsm.config.json and rebuild."
+                MainActivity.log(msg)
+                throw e
+            }
+
+            val jsonString = inputStream.bufferedReader().use { it.readText() }
+            val json = JSONObject(jsonString)
+
+            val missing = listOf("BACKEND_URL", "BACKEND_BEARER")
+                .filter { key -> json.optString(key).isBlank() || json.optString(key).startsWith("your-") || json.optString(key) == "xxxx" }
+
+            if (missing.isNotEmpty()) {
+                val msg = "CONFIG ERROR: missing in androidgsm.config.json: ${missing.joinToString()}\n" +
+                    "Scan the QR from /dialer's gear menu ([SCAN CONFIG] above) - it holds both."
+                MainActivity.log(msg)
+                throw IllegalStateException(msg)
+            }
+
+            return Config(
+                BACKEND_URL = json.getString("BACKEND_URL").trimEnd('/'),
+                DEVICE_TOKEN = deviceName,
+                BACKEND_BEARER = json.getString("BACKEND_BEARER")
+            )
         }
     }
 }

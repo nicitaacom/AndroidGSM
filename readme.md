@@ -162,21 +162,22 @@ chmod +x install-android-sdk.sh
 source ~/.zshrc
 ```
 
-## Config (required before first build)
+## Config
+
+Since 06.11.2026 the phone reads its config from a QR code: on the laptop open /dialer -> the gear menu -> the QR
+(`BACKEND_URL` = the VPS, `BACKEND_BEARER` = the signed-in user's userId) -> on the phone tap **SCAN CONFIG** -> the
+service restarts as that user. The scan lives in SharedPreferences (`ConfigStore.kt`) and wins over the json below.
+
+A build without a scan reads `app/src/main/assets/androidgsm.config.json` instead (a dev shortcut):
 
 ```bash
 cp app/src/main/assets/androidgsm.config.example.json app/src/main/assets/androidgsm.config.json
 ```
 
-Edit `app/src/main/assets/androidgsm.config.json`:
-
 ```json
 {
   "BACKEND_URL": "https://your-backend.com",
-  "BACKEND_BEARER": "your-secret-token",
-  "PUSHER_KEY": "your-pusher-key",
-  "PUSHER_CLUSTER": "eu",
-  "DEVICE_TOKEN": ""
+  "BACKEND_BEARER": "<your userId>"
 }
 ```
 

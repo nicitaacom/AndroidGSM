@@ -136,6 +136,7 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.coroutines.core)
     implementation(libs.coroutines.android)
+    implementation(libs.zxing.android.embedded)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

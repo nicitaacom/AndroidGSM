@@ -133,7 +133,7 @@ class GsmService : Service() {
 
             try {
                 config = ConfigReader.readConfig(this)
-                log("GsmService: Config loaded — ${config?.BACKEND_URL} device=${config?.DEVICE_TOKEN}")
+                log("GsmService: Config loaded — ${config?.BACKEND_URL} device=${config?.DEVICE_TOKEN} bearer=${config?.BACKEND_BEARER?.take(8)}…")
 
                 // PhoneStateListener: safety net for IDLE only (no audio-mode changes — those are
                 // owned by the GsmDialer callbacks below to avoid fighting each other).
