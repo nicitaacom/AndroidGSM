@@ -5,7 +5,6 @@ import cors from 'cors'
 import bodyParser from 'body-parser'
 import http from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
-import Pusher from 'pusher'
 import * as dotenv from 'dotenv'
 
 dotenv.config()
@@ -15,14 +14,6 @@ const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8080)
 
 const FRONTEND_PORT = process.env.FRONTEND_PORT || 3000
 const FRONTEND_URL = process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : `http://localhost:${FRONTEND_PORT}`
-
-const pusher = new Pusher({
-  appId: process.env.PUSHER_APP_ID!,
-  key: process.env.PUSHER_KEY!,
-  secret: process.env.PUSHER_SECRET!,
-  cluster: process.env.PUSHER_CLUSTER!,
-  useTLS: true,
-})
 
 interface SimAccount {
   id: string
@@ -52,34 +43,54 @@ function serverLog(...args: any[]) {
   console.log(...args)
 }
 
-// One browser listener + one android uplink per device (single-user assumption)
-const browserByDevice = new Map<string, WebSocket>()
-
-// The same call event straight over the browser's audio WS, next to the Pusher event - Pusher delivery is not
-// guaranteed (2026-11-02: the phone's CALL_CONNECTED reached this server, the browser never saw the Pusher event,
-// so its "answered" - the call timer, the mic, the music panel's "keep music on answer at" - never lit)
-function forwardToBrowser(deviceToken: string, type: 'gsm:call-connected' | 'gsm:call-ended' | 'gsm:music-drops') {
-  const browserPeer = browserByDevice.get(deviceToken)
-  if (browserPeer?.readyState !== WebSocket.OPEN) return
-  try {
-    browserPeer.send(JSON.stringify({ type, deviceToken, timestamp: new Date().toISOString() }))
-    serverLog(`[ws/audio] ${type} forwarded directly to browser for ${deviceToken}`)
-  } catch (err) {
-    console.error(`❌ [ws/audio] failed to forward ${type} to browser: ${err}`)
-  }
-}
+// every browser socket of the phone (2 tabs of the website = 2 sockets) + one android uplink per device
+const browserByDevice = new Map<string, Set<WebSocket>>()
 const androidByDevice = new Map<string, WebSocket>()
 
-// Debounce gsm:device-connected — only fire once per 5 min per device to save Pusher quota
-const CONNECTED_DEBOUNCE_MS = 5 * 60 * 1000
-const lastConnectedPusherFire = new Map<string, number>()
+type BrowserEvent =
+  | 'gsm:device-connected'
+  | 'gsm:call-started'
+  | 'gsm:call-connected'
+  | 'gsm:call-ended'
+  | 'gsm:test-audio-started'
+  | 'gsm:test-audio-stopped'
+  | 'gsm:music-stopped'
+  | 'gsm:music-drops'
+  | 'gsm:sms-opt-out'
 
-async function safeTrigger(channel: string, event: string, data: object) {
-  try {
-    await pusher.trigger(channel, event, data)
-  } catch (err: any) {
-    console.error(`❌ [pusher] trigger failed (${channel}/${event}): ${err?.message ?? err}`)
+// one frame to every open browser socket of the phone - returns how many got it
+function sendToBrowsers(deviceToken: string, frame: string) {
+  let sent = 0
+  for (const peer of browserByDevice.get(deviceToken) ?? []) {
+    if (peer.readyState !== WebSocket.OPEN) continue
+    try {
+      peer.send(frame)
+      sent++
+    } catch (err) {
+      console.error('❌ [ws/audio] failed to send to browser peer', { deviceToken, err: String(err) })
+    }
   }
+  return sent
+}
+
+// a phone -> browser event over the browser's own /ws/audio socket - the one road, the audio already runs on it
+function forwardToBrowser(deviceToken: string, type: BrowserEvent, data: object = {}) {
+  const sent = sendToBrowsers(deviceToken, JSON.stringify({ type, deviceToken, ...data, timestamp: new Date().toISOString() }))
+  serverLog(`[ws/audio] ${type} forwarded to ${sent} browser socket(s) for ${deviceToken}`)
+}
+
+// SMS blast (outreach-tool /dbr): POST /api/sms/send waits for the phone's own SMS_SENT / SMS_FAILED for its requestId
+const SMS_SEND_TIMEOUT_MS = 30_000
+type SmsSendResult = { sent: true } | { sent: false; reason: string }
+const pendingSms = new Map<string, { resolve: (result: SmsSendResult) => void; timer: NodeJS.Timeout }>()
+
+function resolvePendingSms(requestId: unknown, result: SmsSendResult) {
+  if (typeof requestId !== 'string') return
+  const pending = pendingSms.get(requestId)
+  if (!pending) return
+  clearTimeout(pending.timer)
+  pendingSms.delete(requestId)
+  pending.resolve(result)
 }
 
 const app = express()
@@ -145,7 +156,7 @@ app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     connectedDevices: connectedDevices.size,
-    wsBrowserPeers: browserByDevice.size,
+    wsBrowserPeers: [...browserByDevice.values()].reduce((n, peers) => n + peers.size, 0),
     wsAndroidPeers: androidByDevice.size,
     uptime: process.uptime(),
     timestamp: new Date().toISOString(),
@@ -231,22 +242,13 @@ app.post('/api/events', async (req, res) => {
 
   switch (type) {
     case 'CONNECTED':
-    case 'CONNECTED_EXPLICIT': {
-      const now = Date.now()
-      const last = lastConnectedPusherFire.get(deviceToken) ?? 0
-      const forced = type === 'CONNECTED_EXPLICIT'
-      if (forced || now - last >= CONNECTED_DEBOUNCE_MS) {
-        lastConnectedPusherFire.set(deviceToken, now)
-        await safeTrigger('gsm-devices', 'gsm:device-connected', { deviceToken, timestamp: new Date().toISOString() })
-        serverLog(`✅ [api/events] CONNECTED pusher fired for ${deviceToken}${forced ? ' (explicit)' : ''}`)
-      } else {
-        serverLog(`⏭️ [api/events] CONNECTED debounced for ${deviceToken} (next in ${Math.round((CONNECTED_DEBOUNCE_MS - (now - last)) / 1000)}s)`)
-      }
+      // heartbeat — lastSeen already updated above, nothing goes to the browser
       break
-    }
+    case 'CONNECTED_EXPLICIT':
+      serverLog(`✅ [api/events] device-connected: ${deviceToken}`)
+      forwardToBrowser(deviceToken, 'gsm:device-connected')
+      break
     case 'DISCONNECTED':
-      // Clear debounce so reconnect fires immediately next time
-      lastConnectedPusherFire.delete(deviceToken)
       connectedDevices.delete(deviceToken)
       console.log(`📴 [api/events] DISCONNECTED ${deviceToken}`)
       break
@@ -280,52 +282,54 @@ app.post('/api/events', async (req, res) => {
     }
     case 'CALL_STARTED':
       serverLog(`📞 [api/events] CALL_STARTED to ${data?.number}`)
-      await safeTrigger('gsm-calls', 'gsm:call-started', { deviceToken, number: data?.number, timestamp: new Date().toISOString() })
+      forwardToBrowser(deviceToken, 'gsm:call-started', { number: data?.number })
       break
     case 'CALL_CONNECTED':
       serverLog(`✅ [api/events] CALL_CONNECTED - call is being answered`)
-      await safeTrigger('gsm-calls', 'gsm:call-connected', { deviceToken, timestamp: new Date().toISOString() })
+      forwardToBrowser(deviceToken, 'gsm:call-connected')
       break
     case 'CALL_ENDED':
       serverLog(`❌ [api/events] CALL_ENDED`)
-      await safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken, timestamp: new Date().toISOString() })
+      forwardToBrowser(deviceToken, 'gsm:call-ended')
       break
     case 'DTMF_SENT':
       console.log(`🔢 [api/events] DTMF sent: ${data?.digit}`)
-      await sendCommand(deviceToken, 'SEND_DTMF', data)
+      sendCommand(deviceToken, 'SEND_DTMF', data)
       break
     case 'TEST_AUDIO_STARTED':
       serverLog(`🎧 [api/events] TEST_AUDIO_STARTED device=${deviceToken}`)
-      await safeTrigger('gsm-calls', 'gsm:test-audio-started', { deviceToken, timestamp: new Date().toISOString() })
+      forwardToBrowser(deviceToken, 'gsm:test-audio-started')
       break
     case 'TEST_AUDIO_STOPPED':
       serverLog(`🛑 [api/events] TEST_AUDIO_STOPPED device=${deviceToken}`)
-      await safeTrigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken, timestamp: new Date().toISOString() })
+      forwardToBrowser(deviceToken, 'gsm:test-audio-stopped')
+      break
+    case 'SMS_SENT':
+      resolvePendingSms(data?.requestId, { sent: true })
+      break
+    case 'SMS_FAILED':
+      resolvePendingSms(data?.requestId, { sent: false, reason: String(data?.reason ?? 'failed') })
+      break
+    case 'SMS_OPT_OUT':
+      // the phone's STOP receiver - outreach-tool /dbr (the browser) runs its opt-out route from this event
+      serverLog(`🛑 [api/events] SMS_OPT_OUT from ${data?.smsToNumber}`)
+      forwardToBrowser(deviceToken, 'gsm:sms-opt-out', { smsToNumber: data?.smsToNumber, replyText: data?.replyText ?? '' })
       break
     case 'AUDIO_CHUNK': {
-      // Route audio to browser WebSocket peer (primary path — no Pusher cost)
-      const browserPeer = browserByDevice.get(deviceToken)
-      if (browserPeer?.readyState === WebSocket.OPEN) {
-        try {
-          browserPeer.send(
-            JSON.stringify({
-              role: 'android',
-              deviceToken,
-              dir: 'toBrowser',
-              codec: data?.codec || 'pcm16',
-              seq: data?.seq,
-              ts: data?.ts,
-              sampleRate: data?.sampleRate || 16000,
-              audio: data?.audio,
-            }),
-          )
-        } catch (err) {
-          console.error('❌ [api/events/audio] failed to send to browser ws peer', String(err))
-        }
-      } else {
-        // Pusher fallback only when no WS peer — avoid if possible to save quota
-        console.warn(`⚠️ [ws/audio] no browser peer, dropping chunk (Pusher fallback disabled to save quota)`)
-      }
+      const sent = sendToBrowsers(
+        deviceToken,
+        JSON.stringify({
+          role: 'android',
+          deviceToken,
+          dir: 'toBrowser',
+          codec: data?.codec || 'pcm16',
+          seq: data?.seq,
+          ts: data?.ts,
+          sampleRate: data?.sampleRate || 16000,
+          audio: data?.audio,
+        }),
+      )
+      if (!sent) console.warn(`⚠️ [ws/audio] no browser peer, dropping chunk`)
       break
     }
     default:
@@ -358,69 +362,70 @@ app.post('/api/commands', async (req, res) => {
 
   if (commands.type !== 'SET_GAIN' && commands.type !== 'AUDIO_CHUNK') serverLog('ℹ️ [api/commands] accepted', { deviceToken, type: commands.type })
 
-  // Fire Pusher immediately for call state commands so the frontend UI updates
-  // without waiting for Android to echo the event back over WebSocket.
+  // the call state reaches the browser at once - no wait for the phone to echo the event back over /ws/cmd
   if (commands.type === 'CALL_ENDED') {
-    await safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken, timestamp: new Date().toISOString() })
-    serverLog(`✅ [api/commands] gsm:call-ended pushed immediately for ${deviceToken}`)
+    forwardToBrowser(deviceToken, 'gsm:call-ended')
   } else if (commands.type === 'CALL_STARTED' || commands.type === 'MAKE_CALL') {
-    await safeTrigger('gsm-calls', 'gsm:call-started', { deviceToken, number: commands.data?.number, timestamp: new Date().toISOString() })
-    serverLog(`✅ [api/commands] gsm:call-started pushed immediately for ${deviceToken}`)
+    forwardToBrowser(deviceToken, 'gsm:call-started', { number: commands.data?.number })
   }
 
-  await sendCommand(deviceToken, commands.type, commands.data || {})
+  sendCommand(deviceToken, commands.type, commands.data || {})
   res.json({ success: true })
 })
 
-app.post('/pusher/auth', (req, res) => {
-  console.log('ℹ️ [pusher/auth] request received')
-  if (!authOk(req.headers.authorization)) {
-    const incoming = extractBearerToken(req.headers.authorization)
-    const expected = (BACKEND_AUTH_KEY || "").trim()
-    console.log('❌ [pusher/auth] unauthorized', {
-      incomingToken: incoming,
-      incomingLen: incoming.length,
-      expectedToken: expected,
-      expectedLen: expected.length,
-      rawAuthorization: req.headers.authorization,
-    })
-    return res.status(401).json({ error: 'Unauthorized' })
+// One SMS through the phone's SIM - the VM-sendScheduledSMS lambda calls this per scheduled_sms row (requestId = its
+// idName) and marks the row sent / failed from the answer. The phone's result is the radio's own sent-intent result.
+app.post('/api/sms/send', async (req, res) => {
+  if (!authOk(req.headers.authorization)) return res.status(401).json({ error: 'Unauthorized' })
+
+  const { deviceToken, simAccountId, simComponentName, smsToNumber, smsBody, requestId } = req.body ?? {}
+  if (!deviceToken || !smsToNumber || !smsBody || !requestId) {
+    return res.status(400).json({ error: 'Missing deviceToken, smsToNumber, smsBody or requestId' })
   }
 
-  const { socket_id, channel_name } = req.body
-  if (!socket_id || !channel_name) {
-    console.log('❌ [pusher/auth] missing params')
-    return res.status(400).json({ error: 'Missing params' })
+  const cmdWs = androidCmdByDevice.get(deviceToken)
+  if (cmdWs?.readyState !== WebSocket.OPEN) {
+    serverLog(`📴 [api/sms/send] ${requestId}: phone offline (${deviceToken})`)
+    const offline: SmsSendResult = { sent: false, reason: 'phone offline' }
+    return res.json(offline)
+  }
+  if (pendingSms.has(requestId)) {
+    const repeated: SmsSendResult = { sent: false, reason: 'already sending' }
+    return res.json(repeated)
   }
 
-  console.log('✅ [pusher/auth] authorized', { channel_name })
+  // the phone resolves the SIM by subscription id first, then by this slot - read from its own SIM_LIST entry
+  const simSlotIndex = connectedDevices.get(deviceToken)?.sims?.find(sim => sim.id === simAccountId)?.simSlotIndex ?? null
 
-  const authResponse = pusher.authorizeChannel(socket_id, channel_name)
-  res.json(authResponse)
+  const result = await new Promise<SmsSendResult>(resolve => {
+    const timer = setTimeout(() => {
+      pendingSms.delete(requestId)
+      resolve({ sent: false, reason: 'timeout' })
+    }, SMS_SEND_TIMEOUT_MS)
+    pendingSms.set(requestId, { resolve, timer })
+    sendCommand(deviceToken, 'SEND_SMS', { requestId, smsToNumber, smsBody, simAccountId, simComponentName, simSlotIndex })
+  })
+  serverLog(`📲 [api/sms/send] ${requestId} -> ${smsToNumber}: ${result.sent ? 'sent' : result.reason}`)
+  res.json(result)
 })
 
-// Android command WebSocket peers: deviceToken -> WebSocket
-// Used by /ws/cmd for persistent command delivery without Pusher
+// Android command WebSocket peers: deviceToken -> WebSocket (/ws/cmd)
 const androidCmdByDevice = new Map<string, WebSocket>()
 
-// Deliver a command to the Android device over /ws/cmd (preferred) or Pusher fallback
-async function sendCommand(deviceToken: string, type: string, data: any = {}) {
+// Deliver a command to the Android device over /ws/cmd - no cmd socket = the phone is offline, the command is dropped
+function sendCommand(deviceToken: string, type: string, data: any = {}) {
+  const isLogged = type !== 'AUDIO_CHUNK' && type !== 'SET_GAIN'
   const cmdWs = androidCmdByDevice.get(deviceToken)
-  if (cmdWs?.readyState === WebSocket.OPEN) {
-    try {
-      cmdWs.send(JSON.stringify({ type: 'command', cmdType: type, data, timestamp: new Date().toISOString() }))
-      if (type !== 'AUDIO_CHUNK' && type !== 'SET_GAIN') serverLog(`✅ [ws/cmd] command sent to android: ${type}`)
-      return
-    } catch (err) {
-      console.error(`❌ [ws/cmd] failed to send command: ${err}`)
-    }
+  if (cmdWs?.readyState !== WebSocket.OPEN) {
+    if (isLogged) serverLog(`📴 [ws/cmd] no cmd socket for ${deviceToken}, ${type} dropped`)
+    return
   }
-  // Fallback to Pusher if WS not available
-  await safeTrigger(`private-device-${deviceToken}`, 'command', {
-    type,
-    data,
-    timestamp: new Date().toISOString(),
-  })
+  try {
+    cmdWs.send(JSON.stringify({ type: 'command', cmdType: type, data, timestamp: new Date().toISOString() }))
+    if (isLogged) serverLog(`✅ [ws/cmd] command sent to android: ${type}`)
+  } catch (err) {
+    console.error(`❌ [ws/cmd] failed to send command: ${err}`)
+  }
 }
 
 const server = http.createServer(app)
@@ -492,7 +497,11 @@ wss.on('connection', (ws, req) => {
         console.log('ℹ️ [ws/audio] register', { role, deviceToken, dir })
       }
 
-      if (role === 'browser') browserByDevice.set(deviceToken, ws)
+      if (role === 'browser') {
+        const peers = browserByDevice.get(deviceToken) ?? new Set<WebSocket>()
+        peers.add(ws)
+        browserByDevice.set(deviceToken, peers)
+      }
       if (role === 'android') androidByDevice.set(deviceToken, ws)
 
       // Relay with sequence/timestamp untouched (receiver jitter buffer uses these)
@@ -507,14 +516,8 @@ wss.on('connection', (ws, req) => {
         }
         // No android peer → silently drop. Browser is told via gsm:call-ended to stop the mic.
       } else if (dir === 'toBrowser') {
-        const peer = browserByDevice.get(deviceToken)
-        if (peer?.readyState === WebSocket.OPEN) {
-          try {
-            peer.send(JSON.stringify(msg))
-          } catch (err) {
-            console.error('❌ [ws/audio] failed to send to browser peer', { deviceToken, err: String(err) })
-          }
-        }
+        // the audio reaches every browser socket of the phone too - only /dialer opens one today, so that is 1 tab
+        sendToBrowsers(deviceToken, JSON.stringify(msg))
       }
     } catch (err) {
       console.error('❌ [ws/audio] unexpected error processing message', { err: String(err), raw: msg })
@@ -523,15 +526,18 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     console.log('ℹ️ [ws/audio] disconnected')
-    for (const [k, v] of browserByDevice) if (v === ws) browserByDevice.delete(k)
-    // When the Android audio peer drops, the call audio path is dead — tell the browser
+    for (const [k, peers] of browserByDevice) {
+      peers.delete(ws)
+      if (!peers.size) browserByDevice.delete(k)
+    }
+    // When the Android audio peer drops, the call audio path is gone — the browser gets gsm:call-ended
     // so the UI exits the in-call state even if the cmd-WS CALL_ENDED event was lost
-    // (Pusher hiccups, MIUI killing the cmd thread, etc).
+    // (MIUI stopping the cmd thread, etc).
     for (const [k, v] of androidByDevice) {
       if (v === ws) {
         androidByDevice.delete(k)
         serverLog(`[ws/audio] android audio peer dropped, firing gsm:call-ended for ${k}`)
-        safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken: k, timestamp: new Date().toISOString() })
+        forwardToBrowser(k, 'gsm:call-ended')
       }
     }
   })
@@ -568,15 +574,14 @@ wsCmd.on('connection', (ws, req) => {
       // CONNECTED is the 8s heartbeat — silence it to keep logs readable
       if (eventType !== 'CONNECTED') serverLog(`📱 [ws/cmd] event: ${eventType} from ${tok}`)
 
-      // Only forward state-change events to browser via Pusher — not heartbeats
+      // only state-change events go to the browser — not heartbeats
       switch (eventType) {
         case 'MUSIC_STOPPED': {
-          // the phone stopped the music panel's song on its own (slow_internet / error / service_restart) -
-          // outreach-tool's useSubscribeToMusicStopped pauses the music site and shows the toast (plan-03).
-          // Own channel: gsm-calls is unsubscribed by the dialer when /dialer unmounts, the music panel is not.
+          // the phone stopped the song on its own (slow_internet / error / service_restart) -
+          // outreach-tool's useSubscribeToMusicStopped pauses the music site and shows the toast (plan-03)
           const reason = typeof data?.reason === 'string' ? data.reason : 'unknown'
           serverLog(`🎵 [ws/cmd] MUSIC_STOPPED: ${tok} (${reason})`)
-          safeTrigger('gsm-music', 'gsm:music-stopped', { deviceToken: tok, reason, timestamp: new Date().toISOString() })
+          forwardToBrowser(tok, 'gsm:music-stopped', { reason })
           break
         }
         case 'MUSIC_DROPS':
@@ -587,28 +592,26 @@ wsCmd.on('connection', (ws, req) => {
           break
         case 'CONNECTED_EXPLICIT':
           serverLog(`✅ [ws/cmd] device-connected: ${tok}`)
-          safeTrigger('gsm-devices', 'gsm:device-connected', { deviceToken: tok, timestamp: new Date().toISOString() })
+          forwardToBrowser(tok, 'gsm:device-connected')
           break
         case 'CALL_CONNECTED':
           serverLog(`📞 [ws/cmd] CALL_CONNECTED: ${tok}`)
-          safeTrigger('gsm-calls', 'gsm:call-connected', { deviceToken: tok, timestamp: new Date().toISOString() })
           forwardToBrowser(tok, 'gsm:call-connected')
           break
         case 'CALL_ENDED':
           serverLog(`❌ [ws/cmd] CALL_ENDED: ${tok}`)
-          safeTrigger('gsm-calls', 'gsm:call-ended', { deviceToken: tok, timestamp: new Date().toISOString() })
           forwardToBrowser(tok, 'gsm:call-ended')
           break
         case 'TEST_AUDIO_STARTED': {
           serverLog(`🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
           const devTas = connectedDevices.get(tok); if (devTas) { devTas.isTestActive = true; devTas.isServiceActive = false }
-          safeTrigger('gsm-calls', 'gsm:test-audio-started', { deviceToken: tok, timestamp: new Date().toISOString() })
+          forwardToBrowser(tok, 'gsm:test-audio-started')
           break
         }
         case 'TEST_AUDIO_STOPPED': {
           serverLog(`🛑 [ws/cmd] TEST_AUDIO_STOPPED: ${tok}`)
           const devTasp = connectedDevices.get(tok); if (devTasp) devTasp.isTestActive = false
-          safeTrigger('gsm-calls', 'gsm:test-audio-stopped', { deviceToken: tok, timestamp: new Date().toISOString() })
+          forwardToBrowser(tok, 'gsm:test-audio-stopped')
           break
         }
         case 'SERVICE_STARTED': {
@@ -635,8 +638,18 @@ wsCmd.on('connection', (ws, req) => {
           } catch (e) { console.error('SIM_LIST parse error', e) }
           break
         }
+        case 'SMS_SENT':
+          resolvePendingSms(data?.requestId, { sent: true })
+          break
+        case 'SMS_FAILED':
+          resolvePendingSms(data?.requestId, { sent: false, reason: String(data?.reason ?? 'failed') })
+          break
+        case 'SMS_OPT_OUT':
+          serverLog(`🛑 [ws/cmd] SMS_OPT_OUT from ${data?.smsToNumber}`)
+          forwardToBrowser(tok, 'gsm:sms-opt-out', { smsToNumber: data?.smsToNumber, replyText: data?.replyText ?? '' })
+          break
         case 'CONNECTED':
-          // heartbeat — lastSeen already updated above, no Pusher trigger needed
+          // heartbeat — lastSeen already updated above, nothing goes to the browser
           break
         default:
           console.log(`⚠️ [ws/cmd] unknown event: ${eventType}`)

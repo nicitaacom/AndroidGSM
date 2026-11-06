@@ -1,7 +1,7 @@
 # Android GSM Gateway
 
 Android foreground service that exposes **real GSM calls** to a browser via
-**WebSocket** (audio + commands) + **Pusher** (browser-side call state events only).
+**WebSocket** (audio + commands + browser-side call state frames). No Pusher since 06.11.2026.
 
 Phone = modem. Backend = brain. Frontend controls service lifecycle.
 
@@ -216,23 +216,22 @@ adb exec-out screencap -p 2>/dev/null | convert - -resize 360x -quality 70 /tmp/
 
 ## Architecture
 
-### Pusher usage (minimal — browser only)
+### Call state to the browser (no Pusher since 06.11.2026)
 
-Pusher is used **only** to push call state events to the browser (5–10 messages per call).
-Android does NOT subscribe to Pusher. All Android↔backend communication goes over WebSocket.
+Every phone -> browser event goes over the browser's own `/ws/audio` socket as a frame
+`{ type: "gsm:<event>", deviceToken, ...data, timestamp }` (server `forwardToBrowser`, to every browser socket of the
+phone). Android never used Pusher. All Android↔backend communication goes over WebSocket.
 
-| What | Where | Cost |
-|------|-------|------|
-| Call state (started/connected/ended) | Pusher → browser | ~6 msgs/call |
-| Device ready state | Pusher → browser | 1 msg/connect (debounced 5min) |
-| Android commands (CALL_STARTED, CALL_ENDED, START_SERVICE, etc.) | `/ws/cmd` WebSocket | 0 Pusher msgs |
-| Android heartbeats | `/ws/cmd` WebSocket | 0 Pusher msgs |
-| Audio | `/ws/audio` WebSocket | 0 Pusher msgs |
+| What | Where |
+|------|-------|
+| Call state (started/connected/ended), device ready state (CONNECTED_EXPLICIT), MUSIC_STOPPED, SMS_OPT_OUT | `/ws/audio` frame → browser |
+| Android commands (CALL_STARTED, CALL_ENDED, START_SERVICE, etc.) | `/ws/cmd` WebSocket |
+| Android heartbeats | `/ws/cmd` WebSocket |
+| Audio | `/ws/audio` WebSocket |
 
-Since 2026-11-02 the two events that drive the browser's call state, `gsm:call-connected` and `gsm:call-ended`, also
-go straight over the browser's `/ws/audio` socket as `{ type: "gsm:call-connected" | "gsm:call-ended", deviceToken }`
-(server `forwardToBrowser`). Pusher is the second road: on 2026-11-02 the phone's CALL_CONNECTED reached the server,
-Pusher fired, and the browser never saw it (Pusher's `/channels` listed no subscriber), so "answered" never lit there.
+Until 06.11.2026 the same events also went to Pusher, which was the road that did not work: on 02.11.2026 the phone's
+CALL_CONNECTED reached the server, Pusher fired, and the browser never saw it (Pusher's `/channels` listed no
+subscriber), so "answered" never lit there - the `/ws/audio` frame did reach it.
 
 ### Service lifecycle
 
@@ -463,7 +462,7 @@ nextPlayTime += chunkDuration
    → RootUtils.enableIncallMusicCapture()  (opens VOC_REC_DL mixer)
    → GsmDialer.startCall(number, simAccountId, simComponentName)
    → TelecomManager.placeCall() with correct PhoneAccountHandle (dual-SIM aware)
-   → Pusher: gsm:call-started → browser (shows "dialing" state)
+   → server: gsm:call-started frame over the browser's /ws/audio (forwardToBrowser) → browser (shows "dialing" state)
 
 4. The call is dialing → TelephonyCallback fires OFFHOOK (OFFHOOK = dialing, active or on hold:
    for an outgoing call it comes right after placeCall(), NOT at the answer)
@@ -479,7 +478,7 @@ nextPlayTime += chunkDuration
 4b. The other side answers → Telecom Call.STATE_ACTIVE (GsmInCallService; the only signal for MIUI
    service numbers like 3311, where OFFHOOK never fires - then it also does step 4)
    → CommandWebSocketClient.sendEvent("CALL_CONNECTED")   (from STATE_ACTIVE only, since 2026-11-02)
-   → server: Pusher gsm:call-connected + the same frame straight over the browser's /ws/audio (forwardToBrowser)
+   → server: gsm:call-connected frame straight over the browser's /ws/audio (forwardToBrowser)
    → browser ("answered": call timer, mic, the music rules - "keep music on answer at")
 
 5. Audio flows:
@@ -494,7 +493,7 @@ nextPlayTime += chunkDuration
    → RootUtils.unmutePhoneSpeaker()
    → AudioWebSocketHandler stops + disconnects
    → CommandWebSocketClient.sendEvent("CALL_ENDED")
-   → server: Pusher gsm:call-ended + the same frame over the browser's /ws/audio → browser (stops playout)
+   → server: gsm:call-ended frame over the browser's /ws/audio → browser (stops playout)
 ```
 
 ## TEST mode flow
@@ -507,14 +506,14 @@ Frontend clicks START TEST:
   → AudioWebSocketHandler (callActive=false) → /ws/audio
   → startAudioPlayback() + startAudioCapture() (uses mic, not tinycap)
   → CommandWebSocketClient.sendEvent("TEST_AUDIO_STARTED")
-    → server: Pusher gsm:test-audio-started → browser
+    → server: gsm:test-audio-started frame over the browser's /ws/audio → browser
       → browser starts mic capture + audio playout
         → bidirectional PCM16 audio over /ws/audio
 
 Frontend clicks STOP TEST:
   → POST /api/gsm/commands { type: "STOP_TEST" }
   → GsmService stops test audio, sends TEST_AUDIO_STOPPED
-  → server: Pusher gsm:test-audio-stopped → browser
+  → server: gsm:test-audio-stopped frame over the browser's /ws/audio → browser
 ```
 
 ---
@@ -962,7 +961,7 @@ adb shell "su -c '/data/data/com.nicitaacom.androidgsm/files/set_mixer_ctl 0 \"I
 
 ```
 docs/realtime-audio/
-  server.ts              Express + WebSocket server (VPS). Handles /ws/audio, /ws/cmd, Pusher triggers.
+  server.ts              Express + WebSocket server (VPS). Handles /ws/audio, /ws/cmd, state frames to the browser.
                          Circular log buffer (200 lines). GET /api/logs, POST /api/commands.
   useInitGSM.ts          React hook: device discovery, Pusher events, WebSocket audio,
                          call/hangup/DTMF, SIM picker, service/test control, gain, logs.
