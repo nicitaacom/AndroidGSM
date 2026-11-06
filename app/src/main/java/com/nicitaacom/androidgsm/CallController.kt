@@ -76,6 +76,9 @@ class CallController(
     // this class may lift that around a clip — a clip started into the mute is just a click.
     private val callSounds = CallSounds(context, log)
 
+    // plan-06 task 1: records 10 s + 10 s of an answered call two ways, only while RUN_TEST is armed
+    private val recorderTest = CallRecorderTest(context, audioWsHandlerRef, log)
+
     // Called from GsmService.onCreate to wire up the dialer + InCallService callbacks.
     fun wireDialerCallbacks(gsmDialer: GsmDialer) {
         // Single call-ended callback set once. Owns all teardown.
@@ -183,6 +186,7 @@ class CallController(
         if (!callAnsweredSent.compareAndSet(false, true)) return
         cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
         log("📞 CALL_CONNECTED sent to backend ($source)")
+        recorderTest.runOnce()
     }
 
     // Single teardown path for call end — called from GsmDialer callback only.

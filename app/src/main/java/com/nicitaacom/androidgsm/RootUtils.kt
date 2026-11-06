@@ -154,6 +154,23 @@ object RootUtils {
         }
     }
 
+    // The uplink half of the same tap (plan-06 task 1 test only): with VOC_REC_UL on, the MultiMedia1 capture
+    // stream holds both sides of the call - the operator's own voice included.
+    fun enableIncallUplinkCapture(): Boolean {
+        val s0 = setMixerElem("MultiMedia1 Mixer VOC_REC_UL", 0, 1)
+        val s1 = setMixerElem("MultiMedia1 Mixer VOC_REC_UL", 1, 1)
+        return (s0 && s1).also { ok ->
+            if (ok) Log.d(TAG, "✅ VOC_REC_UL slots 0+1 enabled (GSM uplink capture open)")
+            else Log.e(TAG, "❌ VOC_REC_UL enable partial: slot0=$s0 slot1=$s1")
+        }
+    }
+
+    fun disableIncallUplinkCapture() {
+        setMixerElem("MultiMedia1 Mixer VOC_REC_UL", 0, 0)
+        setMixerElem("MultiMedia1 Mixer VOC_REC_UL", 1, 0)
+        Log.d(TAG, "✅ VOC_REC_UL slots 0+1 disabled")
+    }
+
     fun dumpMixerControls(): String {
         val (_, output) = runSuCommand("tinymix")
         return output

@@ -36,6 +36,10 @@ class AudioWebSocketHandler(
 ) {
     private var audioRecord: AudioRecord? = null
     private var tinycapProcess: Process? = null
+
+    // plan-06 task 1 test: a copy of every tinycap chunk goes here while set (CallRecorderTest); a write
+    // error on it is swallowed so the browser's stream never stops because of the file
+    @Volatile var teeSink: java.io.OutputStream? = null
     private var uplinkPcmProcess: Process? = null
     @Volatile private var ringbackJob: Job? = null
     @Volatile private var audioTrack: AudioTrack? = null
@@ -303,6 +307,8 @@ class AudioWebSocketHandler(
                     offset += n
                 }
                 if (offset == 0) continue
+
+                teeSink?.let { sink -> runCatching { sink.write(buffer, 0, offset) } }
 
                 // Send raw PCM bytes — no HPF/gain processing for downlink voice
                 val base64Audio = Base64.encodeToString(buffer, 0, offset, Base64.NO_WRAP)
