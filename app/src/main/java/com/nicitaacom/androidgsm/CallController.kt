@@ -94,6 +94,8 @@ class CallController(
         GsmInCallService.onCallActive = { onCallConnected(SOURCE_ANSWERED) }
         GsmInCallService.onAudioRouteChanged = { onPhoneRouteChanged() }
         GsmInCallService.onCallDisconnected = { onCallDisconnected() }
+        GsmInCallService.onIncomingCall = { number -> onIncomingCall(number) }
+        GsmInCallService.onIncomingCallEnded = { onIncomingCallEnded() }
 
         // Authoritative "call ended" signal. Telecom's onCallRemoved fires the INSTANT the call
         // ends — far faster/more reliable than MIUI's PhoneStateListener IDLE (which can lag ~10s
@@ -294,6 +296,54 @@ class CallController(
             log("FATAL ERROR in handleCallStarted: ${e.message}")
             e.printStackTrace()
         }
+    }
+
+    // an incoming call rings - the laptop's card shows "Incoming · <number>" with [Answer] [Decline] (plan-05 task 7)
+    private fun onIncomingCall(number: String) {
+        log("📲 Incoming call from ${number.ifBlank { "hidden number" }}")
+        cmdWsClient()?.sendEvent("INCOMING_CALL", mapOf("number" to number))
+    }
+
+    // the call that rang next to an active one went away - the laptop drops its "Incoming" line, the active call stays
+    private fun onIncomingCallEnded() {
+        log("📲 The waiting call went away")
+        cmdWsClient()?.sendEvent("INCOMING_CALL_ENDED", emptyMap())
+    }
+
+    // [Answer] on the laptop: the ringing call becomes a browser-driven one - the phone stays quiet and the audio goes
+    // to the laptop like an outgoing call's; Telecom's STATE_ACTIVE then runs onCallConnected(SOURCE_ANSWERED).
+    // Answered on the phone itself it stays a manual, audible call (edge case 7)
+    fun handleAnswerCall() {
+        if (isCallActive) {
+            log("ANSWER_CALL ignored: a call is on - the laptop offers [Decline] only for a waiting call")
+            return
+        }
+        if (!GsmInCallService.hasRingingCall) {
+            log("ANSWER_CALL ignored: no ringing call")
+            return
+        }
+        voiceVolumeBeforeCall = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+        callConnectedHandled.set(false)
+        callAnsweredSent.set(false)
+        browserDrivenCall = true
+        setCallActive(true)
+        Thread {
+            try {
+                setPhoneQuiet()
+                if (GsmInCallService.answerRingingCall()) log("📲 Incoming call answered from the laptop")
+                else abortBrowserCall("ANSWER_CALL: the ringing call went away - syncing CALL_ENDED state")
+            } catch (error: Exception) {
+                abortBrowserCall("ERROR answering the call: ${error.message}")
+            }
+        }.start()
+    }
+
+    // [Decline] on the laptop - the ringing call, alone or waiting next to an active one
+    fun handleDeclineCall() {
+        Thread {
+            val rejected = GsmInCallService.rejectRingingCall()
+            log(if (rejected) "📲 Incoming call declined from the laptop" else "DECLINE_CALL ignored: no ringing call")
+        }.start()
     }
 
     // A browser dial that never left the phone: undo handleCallStarted's pre-dial state and tell the

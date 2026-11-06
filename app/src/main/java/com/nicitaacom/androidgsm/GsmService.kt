@@ -449,6 +449,8 @@ class GsmService : Service() {
             when (normalizedType) {
                 "CALL_STARTED" -> callController.handleCallStarted(data, gsmDialer)
                 "CALL_ENDED" -> callController.handleCallEnded(gsmDialer)
+                "ANSWER_CALL" -> callController.handleAnswerCall()
+                "DECLINE_CALL" -> callController.handleDeclineCall()
                 "SEND_DTMF" -> callController.handleSendDtmf(data)
                 "SEND_SMS" -> smsController.handleSendSms(data)
                 "MUSIC_PLAY" -> {

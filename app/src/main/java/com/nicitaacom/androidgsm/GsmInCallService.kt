@@ -4,6 +4,7 @@ import android.content.Intent
 import android.telecom.Call
 import android.telecom.CallAudioState
 import android.telecom.InCallService
+import android.telecom.VideoProfile
 
 // The one "is the loudspeaker on" check, shared by the service, the controller and the call screen.
 internal val CallAudioState.isSpeakerRoute: Boolean get() = route == CallAudioState.ROUTE_SPEAKER
@@ -137,12 +138,17 @@ class GsmInCallService : InCallService() {
 
     override fun onCallAdded(call: Call) {
         super.onCallAdded(call)
-        currentCall = call
+        val number = call.details?.handle?.schemeSpecificPart ?: ""
+        val isRinging = call.state == Call.STATE_RINGING
+        // a call that rings while another is on (call waiting) stays apart from the active one: its end must not
+        // tear the active call's audio down (plan-05 task 7, edge case 5)
+        if (isRinging && currentCall != null && currentCall !== call) ringingCall = call else currentCall = call
         call.registerCallback(callCallback)
         MainActivity.log("GsmInCallService: Call attached — DTMF available")
+        // the laptop shows "Incoming · <number>" with [Answer] [Decline] (plan-05 task 7)
+        if (isRinging) onIncomingCall?.invoke(number)
 
         // Launch call screen — system requires default dialer to show call UI
-        val number = call.details?.handle?.schemeSpecificPart ?: ""
         val intent = Intent(this, CallActivity::class.java).apply {
             putExtra("number", number)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
@@ -153,6 +159,13 @@ class GsmInCallService : InCallService() {
     override fun onCallRemoved(call: Call) {
         super.onCallRemoved(call)
         call.unregisterCallback(callCallback)
+        // the waiting call went away (she gave up, or DECLINE_CALL) - the active call is untouched
+        if (ringingCall === call) {
+            ringingCall = null
+            onIncomingCallEnded?.invoke()
+            MainActivity.log("GsmInCallService: the waiting call detached")
+            return
+        }
         if (currentCall === call) currentCall = null
         // Drop the last call's mute/route so the next call's screen does not open with stale
         // toggles and its first audio state is reported as the fresh route it is.
@@ -169,6 +182,18 @@ class GsmInCallService : InCallService() {
         @Volatile private var instance: GsmInCallService? = null
         @Volatile var currentCall: Call? = null
             private set
+        // the call ringing next to an active one (call waiting) - null at idle, where the ringing call IS currentCall
+        @Volatile private var ringingCall: Call? = null
+        // Set by CallController.wireDialerCallbacks() - an incoming call rings (its number, "" when hidden), and the
+        // waiting call went away; the laptop's card follows both (plan-05 task 7)
+        @Volatile var onIncomingCall: ((String) -> Unit)? = null
+        @Volatile var onIncomingCallEnded: (() -> Unit)? = null
+
+        private val ringingNow: Call? get() = (ringingCall ?: currentCall)?.takeIf { it.state == Call.STATE_RINGING }
+        val hasRingingCall: Boolean get() = ringingNow != null
+        // ANSWER_CALL / DECLINE_CALL from the laptop - false = nothing rings any more
+        fun answerRingingCall(): Boolean = ringingNow?.let { it.answer(VideoProfile.STATE_AUDIO_ONLY); true } ?: false
+        fun rejectRingingCall(): Boolean = ringingNow?.let { it.reject(false, null); true } ?: false
         // Latest CallAudioState from Telecom (mute flag + route) so the call screen can draw its
         // toggles from the real state, including a route change made elsewhere (headset plugged in).
         @Volatile var currentAudioState: CallAudioState? = null
