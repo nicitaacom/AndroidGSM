@@ -23,6 +23,8 @@ interface SimAccount {
   componentName: string
   label: string
   simSlotIndex: number
+  // the SIM's own number, '' when the phone sends none - the browser shows it under the carrier label
+  number: string
 }
 
 interface DeviceInfo {
@@ -291,6 +293,7 @@ app.post('/api/events', async (req, res) => {
             componentName: pairs.componentName ?? '',
             label: pairs.label ?? `SIM ${(Number(pairs.simSlotIndex) ?? 0) + 1}`,
             simSlotIndex: Number(pairs.simSlotIndex ?? 0),
+            number: pairs.number ?? '',
           }
         })
         const device = connectedDevices.get(key)
@@ -687,7 +690,13 @@ wsCmd.on('connection', (ws, req) => {
             const sims = matches.map(m => {
               const pairs: Record<string, string> = {}
               m[1].split(', ').forEach((p: string) => { const eq = p.indexOf('='); if (eq > 0) pairs[p.slice(0, eq).trim()] = p.slice(eq + 1).trim() })
-              return { id: pairs.id ?? '', componentName: pairs.componentName ?? '', label: pairs.label ?? 'SIM', simSlotIndex: Number(pairs.simSlotIndex ?? 0) }
+              return {
+                id: pairs.id ?? '',
+                componentName: pairs.componentName ?? '',
+                label: pairs.label ?? 'SIM',
+                simSlotIndex: Number(pairs.simSlotIndex ?? 0),
+                number: pairs.number ?? '',
+              }
             })
             const dev = connectedDevices.get(tokKey)
             if (dev) dev.sims = sims
