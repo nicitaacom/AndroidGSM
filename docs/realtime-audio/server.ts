@@ -64,6 +64,8 @@ type BrowserEvent =
   | 'gsm:call-ended'
   | 'gsm:incoming-call'
   | 'gsm:incoming-call-ended'
+  | 'gsm:call-report'
+  | 'gsm:call-log'
   | 'gsm:test-audio-started'
   | 'gsm:test-audio-stopped'
   | 'gsm:music-stopped'
@@ -644,6 +646,17 @@ wsCmd.on('connection', (ws, req) => {
           // the call that rang next to an active one went away - the active call stays
           serverLog(bearer, `📲 [ws/cmd] INCOMING_CALL_ENDED: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:incoming-call-ended')
+          break
+        case 'CALL_REPORT':
+          // the row of the call that just ended, from the phone's own call log (plan-05 task 8):
+          // { id, number, type, startedAt, talkSec } - or { error } when the phone has no call log access
+          serverLog(bearer, `📒 [ws/cmd] CALL_REPORT ${data?.type ?? ''} ${data?.number || data?.error || ''}: ${tok}`)
+          forwardToBrowser(bearer, tok, 'gsm:call-report', data ?? {})
+          break
+        case 'CALL_LOG':
+          // the phone's newest call log rows, the answer to the laptop's GET_CALL_LOG (plan-05 task 9): { rows } or { error }
+          serverLog(bearer, `📒 [ws/cmd] CALL_LOG ${Array.isArray(data?.rows) ? data.rows.length + ' rows' : data?.error ?? ''}: ${tok}`)
+          forwardToBrowser(bearer, tok, 'gsm:call-log', data ?? {})
           break
         case 'TEST_AUDIO_STARTED': {
           serverLog(bearer, `🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
