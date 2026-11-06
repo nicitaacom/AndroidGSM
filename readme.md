@@ -498,6 +498,41 @@ nextPlayTime += chunkDuration
    → AudioWebSocketHandler stops + disconnects
    → CommandWebSocketClient.sendEvent("CALL_ENDED")
    → server: gsm:call-ended frame over the browser's /ws/audio → browser (stops playout)
+   → CallController.reportCall (every call, a manual one too): polls the phone's own call log up to 3 s for the
+     row started at or after Telecom added the call → CALL_REPORT { id, number, type, startedAt, talkSec }
+     → server: gsm:call-report → the browser's "Recent Calls" row (her number, the talk time) - plan-05 task 8
+```
+
+## Incoming call (plan-05 task 7, 06.11.2026)
+
+```
+1. She dials the SIM → GsmInCallService.onCallAdded with Call.STATE_RINGING
+   → CallController.onIncomingCall(number) → CommandWebSocketClient.sendEvent("INCOMING_CALL", { number })
+   → server: gsm:incoming-call { number } to every tab of the user ("" = hidden number)
+   → the laptop's card: "Incoming · +49..." [Answer] [Decline] - on /dialer and at the bottom-right of every other page
+
+2. [Answer] on the laptop → POST /api/gsm/commands ANSWER_CALL → /ws/cmd ANSWER_CALL
+   → CallController.handleAnswerCall: the pre-dial state of a browser-driven call (voice volume captured, phone quiet,
+     callConnectedHandled + callAnsweredSent reset) → GsmInCallService.answerRingingCall (Call.answer)
+   → Telecom STATE_ACTIVE → onCallConnected(SOURCE_ANSWERED) → the same audio setup as an outgoing call's step 4 + 4b
+   → the browser sent { type: "audio-owner" } on its socket before ANSWER_CALL, so her voice goes to that tab
+   Answered on the phone itself → a manual, audible call (browserDrivenCall stays false)
+
+3. [Decline] → DECLINE_CALL → handleDeclineCall → GsmInCallService.rejectRingingCall (Call.reject)
+   → onCallRemoved → CALL_ENDED + CALL_REPORT type "rejected"; she gives up first → the same road, type "missed"
+
+4. She rings while a call is on (call waiting): onCallAdded keeps the active call as currentCall and holds the new one
+   as ringingCall; its end sends INCOMING_CALL_ENDED (never CALL_ENDED) so the active call's audio stays up.
+   The laptop offers [Decline] only - no hold / switch in plan-05.
+```
+
+## Call log on open (plan-05 task 9)
+
+```
+the browser's socket opens → POST /api/gsm/commands GET_CALL_LOG { limit: 50 } (once per session)
+   → /ws/cmd GET_CALL_LOG → CallController.handleGetCallLog → CallLogReader.select(50) (CallLog.Calls, newest first)
+   → CALL_LOG { rows } → server: gsm:call-log → the browser inserts them (the same id twice = one row)
+   no READ_CALL_LOG → CALL_LOG { error } / CALL_REPORT { error } - the browser shows "allow it in Android settings"
 ```
 
 ## TEST mode flow
@@ -818,12 +853,12 @@ Fixed: use named argument: `onAudioPacket = { packet -> handleAudioPacket(packet
 
 Android → server:
 ```json
-{ "type": "event", "eventType": "CONNECTED|SERVICE_STARTED|SERVICE_STOPPED|CALL_CONNECTED|CALL_ENDED|MUSIC_STOPPED|...", "deviceToken": "...", "data": { "isServiceActive": true, "isTestActive": false } }
+{ "type": "event", "eventType": "CONNECTED|SERVICE_STARTED|SERVICE_STOPPED|CALL_CONNECTED|CALL_ENDED|INCOMING_CALL|INCOMING_CALL_ENDED|CALL_REPORT|CALL_LOG|MUSIC_STOPPED|SMS_OPT_OUT|...", "deviceToken": "...", "data": { "isServiceActive": true, "isTestActive": false } }
 ```
 
 Server → Android:
 ```json
-{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN|MUSIC_PLAY|MUSIC_SEEK|MUSIC_PAUSE|MUSIC_VOLUME|MUSIC_STOP", "data": { "number": "...", "simAccountId": "...", "playbackGain": 0.7, "songUrl": "...", "positionSec": 0, "volumePercent": 100, "percent": 100 } }
+{ "type": "command", "cmdType": "CALL_STARTED|CALL_ENDED|ANSWER_CALL|DECLINE_CALL|GET_CALL_LOG|SEND_DTMF|START_SERVICE|STOP_SERVICE|START_TEST|STOP_TEST|SET_GAIN|MUSIC_PLAY|MUSIC_SEEK|MUSIC_PAUSE|MUSIC_VOLUME|MUSIC_STOP|SEND_SMS", "data": { "number": "...", "simAccountId": "...", "limit": 50, "playbackGain": 0.7, "songUrl": "...", "positionSec": 0, "volumePercent": 100, "percent": 100 } }
 ```
 
 ## Audio format
