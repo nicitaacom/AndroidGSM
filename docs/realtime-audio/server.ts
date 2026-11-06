@@ -9,8 +9,11 @@ import * as dotenv from 'dotenv'
 
 dotenv.config()
 
-const BACKEND_AUTH_KEY = process.env.BACKEND_BEARER
 const BACKEND_PORT = Number(process.env.BACKEND_PORT || 8080)
+
+// the user's own bearer, typed in outreach-tool's gear menu - his rule: "no validation except min 6 max 64 length"
+const BEARER_MIN_LENGTH = 6
+const BEARER_MAX_LENGTH = 64
 
 const FRONTEND_PORT = process.env.FRONTEND_PORT || 3000
 const FRONTEND_URL = process.env.NODE_ENV === 'production' ? process.env.FRONTEND_URL : `http://localhost:${FRONTEND_PORT}`
@@ -34,14 +37,16 @@ interface DeviceInfo {
 // connected with the same bearer, and 2 users with the same phone model stay apart
 const connectedDevices = new Map<string, DeviceInfo>()
 
-// Circular log buffer — last 200 lines, available via GET /api/logs
-const logBuffer: string[] = []
+// Circular log buffer per bearer — last 200 lines each, available via GET /api/logs with that bearer
+const logBuffers = new Map<string, string[]>()
 const MAX_LOG_LINES = 200
 
-function serverLog(...args: any[]) {
+function serverLog(bearer: string, ...args: any[]) {
   const line = `[${new Date().toISOString()}] ${args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ')}`
+  const logBuffer = logBuffers.get(bearer) ?? []
   logBuffer.push(line)
   if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift()
+  logBuffers.set(bearer, logBuffer)
   console.log(...args)
 }
 
@@ -81,7 +86,7 @@ function sendToBrowsers(bearer: string, deviceToken: string, frame: string) {
 // a phone -> browser event over the browser's own /ws/audio socket - the one road, the audio already runs on it
 function forwardToBrowser(bearer: string, deviceToken: string, type: BrowserEvent, data: object = {}) {
   const sent = sendToBrowsers(bearer, deviceToken, JSON.stringify({ type, deviceToken, ...data, timestamp: new Date().toISOString() }))
-  serverLog(`[ws/audio] ${type} forwarded to ${sent} browser socket(s) for ${deviceToken}`)
+  serverLog(bearer, `[ws/audio] ${type} forwarded to ${sent} browser socket(s) for ${deviceToken}`)
 }
 
 // SMS blast (outreach-tool /dbr): POST /api/sms/send waits for the phone's own SMS_SENT / SMS_FAILED for its requestId
@@ -144,11 +149,10 @@ function extractBearerToken(auth?: string): string {
   return (match?.[1] ?? auth).trim().replace(/\\\$/g, '$')
 }
 
-// the request's own bearer, or null
+// the request's own bearer, or null - any value of 6 to 64 chars is a user's bearer, the maps below split by it
 function authOk(auth?: string): string | null {
   const incoming = extractBearerToken(auth)
-  const expected = (BACKEND_AUTH_KEY || "").trim()
-  return !!incoming && !!expected && incoming === expected ? incoming : null
+  return incoming.length >= BEARER_MIN_LENGTH && incoming.length <= BEARER_MAX_LENGTH ? incoming : null
 }
 
 // one VPS, many users: a phone and its laptops meet on `${bearer}:${deviceToken}`
@@ -163,9 +167,10 @@ function deviceTokenOf(key: string, bearer: string) {
 // sendCommand is defined below after androidCmdByDevice is initialized
 
 app.get('/api/logs', (req, res) => {
-  if (!authOk(req.headers.authorization)) return res.status(401).json({ error: 'Unauthorized' })
+  const bearer = authOk(req.headers.authorization)
+  if (!bearer) return res.status(401).json({ error: 'Unauthorized' })
   const n = Math.min(Number((req.query as any).n ?? 50), 200)
-  res.json({ logs: logBuffer.slice(-n) })
+  res.json({ logs: (logBuffers.get(bearer) ?? []).slice(-n) })
 })
 
 app.get('/health', (_req, res) => {
@@ -248,7 +253,7 @@ app.post('/api/events', async (req, res) => {
   }
   const key = deviceKey(bearer, deviceToken)
 
-  if (type !== 'AUDIO_CHUNK' && type !== 'CONNECTED') serverLog(`📱 [api/events] ${type}`, { deviceToken })
+  if (type !== 'AUDIO_CHUNK' && type !== 'CONNECTED') serverLog(bearer, `📱 [api/events] ${type}`, { deviceToken })
 
   connectedDevices.set(key, { deviceToken, lastSeen: new Date() })
 
@@ -257,7 +262,7 @@ app.post('/api/events', async (req, res) => {
       // heartbeat — lastSeen already updated above, nothing goes to the browser
       break
     case 'CONNECTED_EXPLICIT':
-      serverLog(`✅ [api/events] device-connected: ${deviceToken}`)
+      serverLog(bearer, `✅ [api/events] device-connected: ${deviceToken}`)
       forwardToBrowser(bearer, deviceToken, 'gsm:device-connected')
       break
     case 'DISCONNECTED':
@@ -293,15 +298,15 @@ app.post('/api/events', async (req, res) => {
       break
     }
     case 'CALL_STARTED':
-      serverLog(`📞 [api/events] CALL_STARTED to ${data?.number}`)
+      serverLog(bearer, `📞 [api/events] CALL_STARTED to ${data?.number}`)
       forwardToBrowser(bearer, deviceToken, 'gsm:call-started', { number: data?.number })
       break
     case 'CALL_CONNECTED':
-      serverLog(`✅ [api/events] CALL_CONNECTED - call is being answered`)
+      serverLog(bearer, `✅ [api/events] CALL_CONNECTED - call is being answered`)
       forwardToBrowser(bearer, deviceToken, 'gsm:call-connected')
       break
     case 'CALL_ENDED':
-      serverLog(`❌ [api/events] CALL_ENDED`)
+      serverLog(bearer, `❌ [api/events] CALL_ENDED`)
       forwardToBrowser(bearer, deviceToken, 'gsm:call-ended')
       break
     case 'DTMF_SENT':
@@ -309,11 +314,11 @@ app.post('/api/events', async (req, res) => {
       sendCommand(bearer, deviceToken, 'SEND_DTMF', data)
       break
     case 'TEST_AUDIO_STARTED':
-      serverLog(`🎧 [api/events] TEST_AUDIO_STARTED device=${deviceToken}`)
+      serverLog(bearer, `🎧 [api/events] TEST_AUDIO_STARTED device=${deviceToken}`)
       forwardToBrowser(bearer, deviceToken, 'gsm:test-audio-started')
       break
     case 'TEST_AUDIO_STOPPED':
-      serverLog(`🛑 [api/events] TEST_AUDIO_STOPPED device=${deviceToken}`)
+      serverLog(bearer, `🛑 [api/events] TEST_AUDIO_STOPPED device=${deviceToken}`)
       forwardToBrowser(bearer, deviceToken, 'gsm:test-audio-stopped')
       break
     case 'SMS_SENT':
@@ -324,7 +329,7 @@ app.post('/api/events', async (req, res) => {
       break
     case 'SMS_OPT_OUT':
       // the phone's STOP receiver - outreach-tool /dbr (the browser) runs its opt-out route from this event
-      serverLog(`🛑 [api/events] SMS_OPT_OUT from ${data?.smsToNumber}`)
+      serverLog(bearer, `🛑 [api/events] SMS_OPT_OUT from ${data?.smsToNumber}`)
       forwardToBrowser(bearer, deviceToken, 'gsm:sms-opt-out', { smsToNumber: data?.smsToNumber, replyText: data?.replyText ?? '' })
       break
     case 'AUDIO_CHUNK': {
@@ -366,7 +371,7 @@ app.post('/api/commands', async (req, res) => {
     return res.status(400).json({ error: 'Missing deviceToken or commands.type' })
   }
 
-  if (commands.type !== 'SET_GAIN' && commands.type !== 'AUDIO_CHUNK') serverLog('ℹ️ [api/commands] accepted', { deviceToken, type: commands.type })
+  if (commands.type !== 'SET_GAIN' && commands.type !== 'AUDIO_CHUNK') serverLog(bearer, 'ℹ️ [api/commands] accepted', { deviceToken, type: commands.type })
 
   // the call state reaches the browser at once - no wait for the phone to echo the event back over /ws/cmd
   if (commands.type === 'CALL_ENDED') {
@@ -394,7 +399,7 @@ app.post('/api/sms/send', async (req, res) => {
 
   const cmdWs = androidCmdByDevice.get(key)
   if (cmdWs?.readyState !== WebSocket.OPEN) {
-    serverLog(`📴 [api/sms/send] ${requestId}: phone offline (${deviceToken})`)
+    serverLog(bearer, `📴 [api/sms/send] ${requestId}: phone offline (${deviceToken})`)
     const offline: SmsSendResult = { sent: false, reason: 'phone offline' }
     return res.json(offline)
   }
@@ -414,7 +419,7 @@ app.post('/api/sms/send', async (req, res) => {
     pendingSms.set(pendingKey, { resolve, timer })
     sendCommand(bearer, deviceToken, 'SEND_SMS', { requestId, smsToNumber, smsBody, simAccountId, simComponentName, simSlotIndex })
   })
-  serverLog(`📲 [api/sms/send] ${requestId} -> ${smsToNumber}: ${result.sent ? 'sent' : result.reason}`)
+  serverLog(bearer, `📲 [api/sms/send] ${requestId} -> ${smsToNumber}: ${result.sent ? 'sent' : result.reason}`)
   res.json(result)
 })
 
@@ -426,12 +431,12 @@ function sendCommand(bearer: string, deviceToken: string, type: string, data: an
   const isLogged = type !== 'AUDIO_CHUNK' && type !== 'SET_GAIN'
   const cmdWs = androidCmdByDevice.get(deviceKey(bearer, deviceToken))
   if (cmdWs?.readyState !== WebSocket.OPEN) {
-    if (isLogged) serverLog(`📴 [ws/cmd] no cmd socket for ${deviceToken}, ${type} dropped`)
+    if (isLogged) serverLog(bearer, `📴 [ws/cmd] no cmd socket for ${deviceToken}, ${type} dropped`)
     return
   }
   try {
     cmdWs.send(JSON.stringify({ type: 'command', cmdType: type, data, timestamp: new Date().toISOString() }))
-    if (isLogged) serverLog(`✅ [ws/cmd] command sent to android: ${type}`)
+    if (isLogged) serverLog(bearer, `✅ [ws/cmd] command sent to android: ${type}`)
   } catch (err) {
     console.error(`❌ [ws/cmd] failed to send command: ${err}`)
   }
@@ -558,7 +563,7 @@ wss.on('connection', (ws, req) => {
       if (v === ws) {
         androidByDevice.delete(k)
         const deviceToken = deviceTokenOf(k, bearer)
-        serverLog(`[ws/audio] android audio peer dropped, firing gsm:call-ended for ${deviceToken}`)
+        serverLog(bearer, `[ws/audio] android audio peer dropped, firing gsm:call-ended for ${deviceToken}`)
         forwardToBrowser(bearer, deviceToken, 'gsm:call-ended')
       }
     }
@@ -578,7 +583,7 @@ wsCmd.on('connection', (ws, req) => {
 
   androidCmdByDevice.set(key, ws)
   connectedDevices.set(key, { ...connectedDevices.get(key), deviceToken, lastSeen: new Date() })
-  serverLog(`✅ [ws/cmd] android connected: ${deviceToken}`)
+  serverLog(bearer, `✅ [ws/cmd] android connected: ${deviceToken}`)
 
   ws.on('message', (buf) => {
     try {
@@ -597,7 +602,7 @@ wsCmd.on('connection', (ws, req) => {
       connectedDevices.set(tokKey, updated)
 
       // CONNECTED is the 8s heartbeat — silence it to keep logs readable
-      if (eventType !== 'CONNECTED') serverLog(`📱 [ws/cmd] event: ${eventType} from ${tok}`)
+      if (eventType !== 'CONNECTED') serverLog(bearer, `📱 [ws/cmd] event: ${eventType} from ${tok}`)
 
       // only state-change events go to the browser — not heartbeats
       switch (eventType) {
@@ -605,47 +610,47 @@ wsCmd.on('connection', (ws, req) => {
           // the phone stopped the song on its own (slow_internet / error / service_restart) -
           // outreach-tool's useSubscribeToMusicStopped pauses the music site and shows the toast (plan-03)
           const reason = typeof data?.reason === 'string' ? data.reason : 'unknown'
-          serverLog(`🎵 [ws/cmd] MUSIC_STOPPED: ${tok} (${reason})`)
+          serverLog(bearer, `🎵 [ws/cmd] MUSIC_STOPPED: ${tok} (${reason})`)
           forwardToBrowser(bearer, tok, 'gsm:music-stopped', { reason })
           break
         }
         case 'MUSIC_DROPS':
           // the phone's Bluetooth keeps reporting link trouble while the song plays = 50-100 ms pauses on the
           // headphones; outreach-tool's /dialer shows "Experiencing interruptions? [reboot phone]" - over the audio WS only
-          serverLog(`🎧 [ws/cmd] MUSIC_DROPS: ${tok}`)
+          serverLog(bearer, `🎧 [ws/cmd] MUSIC_DROPS: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:music-drops')
           break
         case 'CONNECTED_EXPLICIT':
-          serverLog(`✅ [ws/cmd] device-connected: ${tok}`)
+          serverLog(bearer, `✅ [ws/cmd] device-connected: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:device-connected')
           break
         case 'CALL_CONNECTED':
-          serverLog(`📞 [ws/cmd] CALL_CONNECTED: ${tok}`)
+          serverLog(bearer, `📞 [ws/cmd] CALL_CONNECTED: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:call-connected')
           break
         case 'CALL_ENDED':
-          serverLog(`❌ [ws/cmd] CALL_ENDED: ${tok}`)
+          serverLog(bearer, `❌ [ws/cmd] CALL_ENDED: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:call-ended')
           break
         case 'TEST_AUDIO_STARTED': {
-          serverLog(`🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
+          serverLog(bearer, `🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
           const devTas = connectedDevices.get(tokKey); if (devTas) { devTas.isTestActive = true; devTas.isServiceActive = false }
           forwardToBrowser(bearer, tok, 'gsm:test-audio-started')
           break
         }
         case 'TEST_AUDIO_STOPPED': {
-          serverLog(`🛑 [ws/cmd] TEST_AUDIO_STOPPED: ${tok}`)
+          serverLog(bearer, `🛑 [ws/cmd] TEST_AUDIO_STOPPED: ${tok}`)
           const devTasp = connectedDevices.get(tokKey); if (devTasp) devTasp.isTestActive = false
           forwardToBrowser(bearer, tok, 'gsm:test-audio-stopped')
           break
         }
         case 'SERVICE_STARTED': {
-          serverLog(`▶️ [ws/cmd] SERVICE_STARTED: ${tok}`)
+          serverLog(bearer, `▶️ [ws/cmd] SERVICE_STARTED: ${tok}`)
           const devSs = connectedDevices.get(tokKey); if (devSs) { devSs.isServiceActive = true; devSs.isTestActive = false }
           break
         }
         case 'SERVICE_STOPPED': {
-          serverLog(`⏹️ [ws/cmd] SERVICE_STOPPED: ${tok}`)
+          serverLog(bearer, `⏹️ [ws/cmd] SERVICE_STOPPED: ${tok}`)
           const devSsp = connectedDevices.get(tokKey); if (devSsp) devSsp.isServiceActive = false
           break
         }
@@ -670,7 +675,7 @@ wsCmd.on('connection', (ws, req) => {
           resolvePendingSms(tokKey, data?.requestId, { sent: false, reason: String(data?.reason ?? 'failed') })
           break
         case 'SMS_OPT_OUT':
-          serverLog(`🛑 [ws/cmd] SMS_OPT_OUT from ${data?.smsToNumber}`)
+          serverLog(bearer, `🛑 [ws/cmd] SMS_OPT_OUT from ${data?.smsToNumber}`)
           forwardToBrowser(bearer, tok, 'gsm:sms-opt-out', { smsToNumber: data?.smsToNumber, replyText: data?.replyText ?? '' })
           break
         case 'CONNECTED':
