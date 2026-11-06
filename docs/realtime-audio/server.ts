@@ -62,6 +62,8 @@ type BrowserEvent =
   | 'gsm:call-started'
   | 'gsm:call-connected'
   | 'gsm:call-ended'
+  | 'gsm:incoming-call'
+  | 'gsm:incoming-call-ended'
   | 'gsm:test-audio-started'
   | 'gsm:test-audio-stopped'
   | 'gsm:music-stopped'
@@ -631,6 +633,17 @@ wsCmd.on('connection', (ws, req) => {
         case 'CALL_ENDED':
           serverLog(bearer, `❌ [ws/cmd] CALL_ENDED: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:call-ended')
+          break
+        case 'INCOMING_CALL':
+          // she rings on the phone (plan-05 task 7) - every tab of the user shows "Incoming · <number>" with
+          // [Answer] [Decline]; an empty number is a hidden one. The laptop answers with ANSWER_CALL / DECLINE_CALL
+          serverLog(bearer, `📲 [ws/cmd] INCOMING_CALL from ${data?.number || 'hidden number'}: ${tok}`)
+          forwardToBrowser(bearer, tok, 'gsm:incoming-call', { number: typeof data?.number === 'string' ? data.number : '' })
+          break
+        case 'INCOMING_CALL_ENDED':
+          // the call that rang next to an active one went away - the active call stays
+          serverLog(bearer, `📲 [ws/cmd] INCOMING_CALL_ENDED: ${tok}`)
+          forwardToBrowser(bearer, tok, 'gsm:incoming-call-ended')
           break
         case 'TEST_AUDIO_STARTED': {
           serverLog(bearer, `🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
