@@ -375,6 +375,24 @@ class CallController(
         }.start()
     }
 
+    // GET_CALL_LOG { limit } from the laptop when its socket opens (plan-05 task 9): the newest rows of the phone's own
+    // call log -> CALL_LOG { rows } - the calls made while no tab was open land in "Recent Calls" this way
+    fun handleGetCallLog(data: Map<String, Any>) {
+        val limit = ((data["limit"] as? Number)?.toInt() ?: CALL_LOG_DEFAULT_LIMIT).coerceIn(1, CALL_LOG_MAX_LIMIT)
+        Thread {
+            try {
+                val rows = CallLogReader.select(context, limit)
+                cmdWsClient()?.sendEvent("CALL_LOG", mapOf("rows" to rows.map { it.toMap() }))
+                log("📒 CALL_LOG sent: ${rows.size} rows")
+            } catch (error: SecurityException) {
+                cmdWsClient()?.sendEvent("CALL_LOG", mapOf("error" to "Phone has no call log access"))
+                log("📒 CALL_LOG: no READ_CALL_LOG - ${error.message}")
+            } catch (error: Exception) {
+                log("📒 CALL_LOG error: ${error.message}")
+            }
+        }.start()
+    }
+
     // A browser dial that never left the phone: undo handleCallStarted's pre-dial state and tell the
     // backend. Not teardownCall() — no audio path was opened yet. The unmute + volume matter: a
     // manual call stays audible by design now, so it must not inherit the quiet state armed here.
@@ -594,5 +612,8 @@ class CallController(
         // start may sit (the call log's DATE is the dial, Telecom's add comes a beat later)
         private const val CALL_LOG_WAIT_MS = 3000L
         private const val CALL_LOG_START_MARGIN_MS = 5000L
+        // handleGetCallLog: the rows one GET_CALL_LOG answers with
+        private const val CALL_LOG_DEFAULT_LIMIT = 50
+        private const val CALL_LOG_MAX_LIMIT = 300
     }
 }
