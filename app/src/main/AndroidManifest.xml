@@ -4,6 +4,8 @@
 
     <!-- Permissions for GSM calls -->
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <!-- the laptop's "Recent Calls" rows come from the phone's own call log (CallLogReader, plan-05 task 8) -->
+    <uses-permission android:name="android.permission.READ_CALL_LOG" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />

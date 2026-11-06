@@ -106,7 +106,36 @@ class CallController(
                 log("📴 Call removed (Telecom) — tearing down audio immediately")
                 teardownCall()
             }
+            reportCall()
         }
+    }
+
+    // the row of the call that just ended, from the phone's own call log, to the laptop's "Recent Calls" (plan-05
+    // task 8) - every call, a manual one too. Android inserts the row a moment after onCallRemoved, so this polls up
+    // to 3 s for a row started at or after Telecom added the call
+    private fun reportCall() {
+        val sinceMs = GsmInCallService.lastCallAddedAtMs - CALL_LOG_START_MARGIN_MS
+        Thread {
+            try {
+                val deadline = System.currentTimeMillis() + CALL_LOG_WAIT_MS
+                var row: CallLogRow? = null
+                while (row == null && System.currentTimeMillis() < deadline) {
+                    row = CallLogReader.select(context, 1, sinceMs).firstOrNull()
+                    if (row == null) Thread.sleep(300)
+                }
+                if (row == null) {
+                    log("📒 CALL_REPORT skipped: no call log row within ${CALL_LOG_WAIT_MS / 1000} s")
+                    return@Thread
+                }
+                cmdWsClient()?.sendEvent("CALL_REPORT", row.toMap())
+                log("📒 CALL_REPORT ${row.type} ${row.number.ifBlank { "hidden number" }} ${row.talkSec}s")
+            } catch (error: SecurityException) {
+                cmdWsClient()?.sendEvent("CALL_REPORT", mapOf("error" to "Phone has no call log access"))
+                log("📒 CALL_REPORT: no READ_CALL_LOG - ${error.message}")
+            } catch (error: Exception) {
+                log("📒 CALL_REPORT error: ${error.message}")
+            }
+        }.start()
     }
 
     // Sets up call audio exactly once per call, triggered by whichever signal fires first (OFFHOOK at
@@ -561,5 +590,9 @@ class CallController(
         // the two "call audio" signals - see callConnectedHandled / callAnsweredSent
         private const val SOURCE_OFFHOOK = "OFFHOOK"
         private const val SOURCE_ANSWERED = "STATE_ACTIVE"
+        // reportCall: how long the call log row may take to show up, and how far before the call was added the row's
+        // start may sit (the call log's DATE is the dial, Telecom's add comes a beat later)
+        private const val CALL_LOG_WAIT_MS = 3000L
+        private const val CALL_LOG_START_MARGIN_MS = 5000L
     }
 }

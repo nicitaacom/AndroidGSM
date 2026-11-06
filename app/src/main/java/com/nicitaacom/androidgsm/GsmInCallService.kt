@@ -140,6 +140,7 @@ class GsmInCallService : InCallService() {
         super.onCallAdded(call)
         val number = call.details?.handle?.schemeSpecificPart ?: ""
         val isRinging = call.state == Call.STATE_RINGING
+        lastCallAddedAtMs = System.currentTimeMillis()
         // a call that rings while another is on (call waiting) stays apart from the active one: its end must not
         // tear the active call's audio down (plan-05 task 7, edge case 5)
         if (isRinging && currentCall != null && currentCall !== call) ringingCall = call else currentCall = call
@@ -188,6 +189,8 @@ class GsmInCallService : InCallService() {
         // waiting call went away; the laptop's card follows both (plan-05 task 7)
         @Volatile var onIncomingCall: ((String) -> Unit)? = null
         @Volatile var onIncomingCallEnded: (() -> Unit)? = null
+        // when Telecom added the newest call - CallController.reportCall reads the call log row from then on
+        @Volatile var lastCallAddedAtMs = 0L
 
         private val ringingNow: Call? get() = (ringingCall ?: currentCall)?.takeIf { it.state == Call.STATE_RINGING }
         val hasRingingCall: Boolean get() = ringingNow != null
