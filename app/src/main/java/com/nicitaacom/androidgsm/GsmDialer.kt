@@ -22,6 +22,9 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
     private var telephonyCallback: TelephonyCallback? = null
     private var onCallEnded: (() -> Unit)? = null
     private var onCallConnected: (() -> Unit)? = null
+    // ICCID -> subscription id over su, kept once it holds a row: Telecom's account id is the ICCID on Android 10 and
+    // MIUI hands this app an empty SIM table
+    private var subscriptionIdByIccid: Map<String, Int> = emptyMap()
 
     init {
         telephonyManager = context.getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
@@ -105,7 +108,8 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
                         "componentName" to handle.componentName.flattenToString(),
                         "label" to label,
                         "simSlotIndex" to simSlot,
-                        "number" to (numberBySlot[simSlot]?.takeIf { it.isNotBlank() } ?: SimNumberReader.select(context, handle.id))
+                        "number" to (numberBySlot[simSlot]?.takeIf { it.isNotBlank() } ?: SimNumberReader.select(context, handle.id)),
+                        "countryIso" to selectCountryIso(handle.id)
                     )
                 } catch (e: Exception) { null }
             }
@@ -113,6 +117,19 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
             log("WARNING: Could not read SIM accounts: ${e.message}")
             emptyList()
         }
+    }
+
+    // the SIM's country ("de" for a German SIM) - the website shows "Ask first: I record this call, ok?" from it
+    // (outreach-tool dialer plan-06 task 6, his "+49" rule); "" when the phone has no answer
+    private fun selectCountryIso(simAccountId: String): String = try {
+        if (simAccountId.toIntOrNull() == null && subscriptionIdByIccid.isEmpty())
+            subscriptionIdByIccid = RootUtils.selectSubscriptionIdByIccid()
+        val subscriptionId = simAccountId.toIntOrNull() ?: subscriptionIdByIccid[simAccountId]
+        if (subscriptionId == null) ""
+        else (context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
+            .createForSubscriptionId(subscriptionId).simCountryIso.lowercase()
+    } catch (e: Exception) {
+        ""
     }
 
     // 5. initiate GSM call
