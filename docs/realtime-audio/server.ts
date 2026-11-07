@@ -25,6 +25,8 @@ interface SimAccount {
   simSlotIndex: number
   // the SIM's own number, '' when the phone sends none - the browser shows it under the carrier label
   number: string
+  // the SIM's country ('de'), '' when unknown - a German SIM shows the recording consent line (outreach-tool plan-06)
+  countryIso: string
 }
 
 interface DeviceInfo {
@@ -68,6 +70,8 @@ type BrowserEvent =
   | 'gsm:incoming-call-ended'
   | 'gsm:call-report'
   | 'gsm:call-log'
+  | 'gsm:recording-uploaded'
+  | 'gsm:recording-failed'
   | 'gsm:test-audio-started'
   | 'gsm:test-audio-stopped'
   | 'gsm:music-stopped'
@@ -294,6 +298,7 @@ app.post('/api/events', async (req, res) => {
             label: pairs.label ?? `SIM ${(Number(pairs.simSlotIndex) ?? 0) + 1}`,
             simSlotIndex: Number(pairs.simSlotIndex ?? 0),
             number: pairs.number ?? '',
+            countryIso: pairs.countryIso ?? '',
           }
         })
         const device = connectedDevices.get(key)
@@ -661,6 +666,16 @@ wsCmd.on('connection', (ws, req) => {
           serverLog(bearer, `📒 [ws/cmd] CALL_LOG ${Array.isArray(data?.rows) ? data.rows.length + ' rows' : data?.error ?? ''}: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:call-log', data ?? {})
           break
+        case 'RECORDING_UPLOADED':
+          // the phone PUT <callLogId>.m4a into the user's own bucket (outreach-tool dialer plan-06 task 3) - the file
+          // went straight to Supabase, only this answer passes here
+          serverLog(bearer, `🎙 [ws/cmd] RECORDING_UPLOADED ${data?.callLogId ?? ''}: ${tok}`)
+          forwardToBrowser(bearer, tok, 'gsm:recording-uploaded', { callLogId: data?.callLogId })
+          break
+        case 'RECORDING_FAILED':
+          serverLog(bearer, `🎙 [ws/cmd] RECORDING_FAILED ${data?.callLogId ?? ''} ${data?.reason ?? ''}: ${tok}`)
+          forwardToBrowser(bearer, tok, 'gsm:recording-failed', { callLogId: data?.callLogId, reason: String(data?.reason ?? 'failed') })
+          break
         case 'TEST_AUDIO_STARTED': {
           serverLog(bearer, `🎧 [ws/cmd] TEST_AUDIO_STARTED: ${tok}`)
           const devTas = connectedDevices.get(tokKey); if (devTas) { devTas.isTestActive = true; devTas.isServiceActive = false }
@@ -696,6 +711,7 @@ wsCmd.on('connection', (ws, req) => {
                 label: pairs.label ?? 'SIM',
                 simSlotIndex: Number(pairs.simSlotIndex ?? 0),
                 number: pairs.number ?? '',
+                countryIso: pairs.countryIso ?? '',
               }
             })
             const dev = connectedDevices.get(tokKey)
