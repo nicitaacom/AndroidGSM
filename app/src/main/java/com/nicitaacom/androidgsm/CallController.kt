@@ -76,8 +76,8 @@ class CallController(
     // this class may lift that around a clip — a clip started into the mute is just a click.
     private val callSounds = CallSounds(context, log)
 
-    // plan-06 task 1: records 10 s + 10 s of an answered call two ways, only while RUN_TEST is armed
-    private val recorderTest = CallRecorderTest(context, audioWsHandlerRef, log)
+    // plan-06 task 2: records every answered call while "record every call" is on
+    private val callRecorder = CallRecorder(context, audioWsHandlerRef, log)
 
     // Called from GsmService.onCreate to wire up the dialer + InCallService callbacks.
     fun wireDialerCallbacks(gsmDialer: GsmDialer) {
@@ -127,7 +127,8 @@ class CallController(
                     log("📒 CALL_REPORT skipped: no call log row within ${CALL_LOG_WAIT_MS / 1000} s")
                     return@Thread
                 }
-                cmdWsClient()?.sendEvent("CALL_REPORT", row.toMap())
+                val hasRecording = callRecorder.finish(row.id)
+                cmdWsClient()?.sendEvent("CALL_REPORT", row.toMap() + ("hasRecording" to hasRecording))
                 log("📒 CALL_REPORT ${row.type} ${row.number.ifBlank { "hidden number" }} ${row.talkSec}s")
             } catch (error: SecurityException) {
                 cmdWsClient()?.sendEvent("CALL_REPORT", mapOf("error" to "Phone has no call log access"))
@@ -219,7 +220,7 @@ class CallController(
         if (!callAnsweredSent.compareAndSet(false, true)) return
         cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
         log("📞 CALL_CONNECTED sent to backend ($source)")
-        recorderTest.runOnce()
+        callRecorder.start()
     }
 
     // Single teardown path for call end — called from GsmDialer callback only.
@@ -227,6 +228,8 @@ class CallController(
     // Marked internal so GsmService can call it from the PhoneStateListener safety net.
     internal fun teardownCall() {
         setCallActive(false)
+        // before the capture below stops - the recording ends with the call, not with the "call ended" cue
+        callRecorder.stop()
         // Cleared so the next call's connect signal is honored; the old value says whether this
         // call ever connected (busy / no answer never did).
         val wasConnected = callConnectedHandled.getAndSet(false)

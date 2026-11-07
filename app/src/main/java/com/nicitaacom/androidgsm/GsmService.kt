@@ -490,6 +490,12 @@ class GsmService : Service() {
                     // playbackGain - the website's "Playback Vol", or its "ringing while music plays" percent
                     if (playback != null) callController.onPlaybackGainChanged()
                 }
+                "SET_RECORDING" -> {
+                    // the website's "record every call" (plan-06 task 5) - sent when it changes and on connect
+                    val isRecordEveryCall = data["isRecordEveryCall"] as? Boolean ?: false
+                    CallRecorder.insertIsRecordEveryCall(this, isRecordEveryCall)
+                    log("🎙 Record every call: ${if (isRecordEveryCall) "on" else "off"}")
+                }
                 "SET_MIC_SOURCE" -> {
                     val source = data["source"] as? String
                     val useBrowser = source != "phone"
