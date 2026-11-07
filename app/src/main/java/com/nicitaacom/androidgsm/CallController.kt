@@ -400,6 +400,9 @@ class CallController(
         }.start()
     }
 
+    // SET_RECORDING's recordingDeleteAfterDays (plan-06 task 7) - the files no upload took within N days
+    fun deleteRecordingsOlderThan(days: Int) = callRecorder.deleteOlderThan(days)
+
     // UPLOAD_RECORDING { callLogId, url } (plan-06 task 3) - the website's one-time link to the user's "call-recordings"
     // bucket; RECORDING_UPLOADED / RECORDING_FAILED tell it how it went
     fun handleUploadRecording(data: Map<String, Any>) {

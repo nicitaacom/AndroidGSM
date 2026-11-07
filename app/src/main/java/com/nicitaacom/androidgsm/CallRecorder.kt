@@ -106,6 +106,15 @@ class CallRecorder(
         return isRenamed
     }
 
+    // SET_RECORDING's recordingDeleteAfterDays: a file no upload took within N days goes too, so the phone never fills up
+    // (outreach-tool plan-06 task 7) - 0 keeps them all
+    fun deleteOlderThan(days: Int) {
+        if (days <= 0) return
+        val cutoffMs = System.currentTimeMillis() - days * DAY_MS
+        dir.listFiles { file -> file.extension == "m4a" && file.name != pendingM4a.name && file.lastModified() < cutoffMs }
+            ?.forEach { file -> if (file.delete()) log("🎙 recording older than $days days deleted: ${file.name}") }
+    }
+
     // the recordings still on the phone (no upload yet) - CALL_LOG lists them, the website asks a link for each
     fun selectPendingIds(): List<String> =
         dir.listFiles { file -> file.extension == "m4a" && file.name != pendingM4a.name }?.map { it.nameWithoutExtension }
@@ -218,6 +227,7 @@ class CallRecorder(
         // a 30-minute call encodes in a few seconds on the Redmi Note 7 - reportCall waits this long at most
         private const val ENCODE_WAIT_MS = 30_000L
         private const val PENDING_MAX_AGE_MS = 60 * 60 * 1000L
+        private const val DAY_MS = 24 * 60 * 60 * 1000L
         // a 30-minute call is ~7 MB - a slow uplink still finishes inside 2 minutes
         private const val UPLOAD_CONNECT_TIMEOUT_MS = 15_000
         private const val UPLOAD_READ_TIMEOUT_MS = 120_000

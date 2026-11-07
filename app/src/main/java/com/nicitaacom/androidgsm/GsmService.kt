@@ -492,10 +492,12 @@ class GsmService : Service() {
                     if (playback != null) callController.onPlaybackGainChanged()
                 }
                 "SET_RECORDING" -> {
-                    // the website's "record every call" (plan-06 task 5) - sent when it changes and on connect
+                    // the website's "record every call" + "delete recordings older than N days" (plan-06 tasks 5 + 7) -
+                    // sent when either changes and on connect
                     val isRecordEveryCall = data["isRecordEveryCall"] as? Boolean ?: false
                     CallRecorder.insertIsRecordEveryCall(this, isRecordEveryCall)
                     log("🎙 Record every call: ${if (isRecordEveryCall) "on" else "off"}")
+                    (data["recordingDeleteAfterDays"] as? Number)?.toInt()?.let { callController.deleteRecordingsOlderThan(it) }
                 }
                 "SET_MIC_SOURCE" -> {
                     val source = data["source"] as? String
