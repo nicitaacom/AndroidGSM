@@ -619,6 +619,17 @@ Frontend fetchLogs():
 On startup, `GsmDialer.getSimAccounts()` queries `TelecomManager.callCapablePhoneAccounts`
 and sends the list to the backend via `CommandWebSocketClient.sendEvent("SIM_LIST", ...)`.
 
+Each SIM in that list holds `number` - the laptop shows it under the carrier label (two "Telekom.de" SIMs read the
+same without it):
+
+```
+SIM table number (SubscriptionManager)  ──empty (MIUI hands an empty list)──▶  SimNumberReader.select (SharedPreferences)
+                                                                                 ──empty──▶ ""
+on connect, no call active ──▶ SimNumberReader.readMissing ──▶ own-number USSD per SIM without a number,
+                               one SIM at a time (*135# Telekom, *#100# Vodafone, 20 s timeout)
+                           ──▶ digits in the reply ──▶ SharedPreferences by the SIM's account id ──▶ SIM_LIST again
+```
+
 The server stores SIMs per device and returns them in `/api/gsm/status`.
 The frontend (`useInitGSM.ts`) auto-selects the first SIM and exposes `simsRef`,
 `selectedSimRef`, `selectSim()` for a SIM picker UI.
