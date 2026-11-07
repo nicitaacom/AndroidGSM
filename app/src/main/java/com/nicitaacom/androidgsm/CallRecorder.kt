@@ -9,6 +9,9 @@ import androidx.core.content.edit
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 
 /**
  * plan-06 task 2 - every answered call is recorded on the phone while "record every call" is on (SET_RECORDING from
@@ -36,6 +39,7 @@ class CallRecorder(
     // true from the hang-up of a recorded call until reportCall picked its file up - a call that was not recorded
     // never takes the file of the one before it
     @Volatile private var isWaitingForCallLogId = false
+    private val uploadExecutor = Executors.newSingleThreadExecutor()
 
     init {
         // the phone restarted mid-call: a pending file without an end helps nobody
@@ -100,6 +104,47 @@ class CallRecorder(
         val isRenamed = pendingM4a.renameTo(file)
         if (isRenamed) log("🎙 recording kept: ${file.name}")
         return isRenamed
+    }
+
+    // the recordings still on the phone (no upload yet) - CALL_LOG lists them, the website asks a link for each
+    fun selectPendingIds(): List<String> =
+        dir.listFiles { file -> file.extension == "m4a" && file.name != pendingM4a.name }?.map { it.nameWithoutExtension }
+            ?: emptyList()
+
+    // UPLOAD_RECORDING: PUT <callLogId>.m4a to the one-time link of the user's private "call-recordings" bucket, the
+    // phone's copy goes on success. One upload at a time - the same id from 2 tabs uploads once, the 2nd finds no file
+    fun upload(callLogId: String, url: String, onUploaded: () -> Unit, onFailed: (String) -> Unit) {
+        uploadExecutor.execute {
+            val file = File(dir, "$callLogId.m4a")
+            if (!file.exists()) return@execute
+            var connection: HttpURLConnection? = null
+            try {
+                connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "PUT"
+                    doOutput = true
+                    connectTimeout = UPLOAD_CONNECT_TIMEOUT_MS
+                    readTimeout = UPLOAD_READ_TIMEOUT_MS
+                    setRequestProperty("Content-Type", "audio/mp4")
+                    setFixedLengthStreamingMode(file.length())
+                }
+                file.inputStream().use { input -> connection.outputStream.use { output -> input.copyTo(output) } }
+                val code = connection.responseCode
+                if (code in 200..299) {
+                    file.delete()
+                    log("🎙 recording uploaded: ${file.name}")
+                    onUploaded()
+                } else {
+                    val reason = connection.errorStream?.bufferedReader()?.use { it.readText() }?.take(200) ?: ""
+                    log("🎙 recording upload failed: ${file.name} HTTP $code $reason")
+                    onFailed("HTTP $code $reason".trim())
+                }
+            } catch (error: Exception) {
+                log("🎙 recording upload failed: ${file.name} ${error.message}")
+                onFailed(error.message ?: "upload failed")
+            } finally {
+                connection?.disconnect()
+            }
+        }
     }
 
     private fun encodeToM4a(pcm: File, m4a: File) {
@@ -173,6 +218,9 @@ class CallRecorder(
         // a 30-minute call encodes in a few seconds on the Redmi Note 7 - reportCall waits this long at most
         private const val ENCODE_WAIT_MS = 30_000L
         private const val PENDING_MAX_AGE_MS = 60 * 60 * 1000L
+        // a 30-minute call is ~7 MB - a slow uplink still finishes inside 2 minutes
+        private const val UPLOAD_CONNECT_TIMEOUT_MS = 15_000
+        private const val UPLOAD_READ_TIMEOUT_MS = 120_000
 
         // "record every call" from the website's gear menu (dialerConfig.isRecordEveryCall), kept so a phone
         // restart does not turn it off
