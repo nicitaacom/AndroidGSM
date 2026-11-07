@@ -250,7 +250,9 @@ class GsmService : Service() {
                     return@Thread
                 }
 
-                if (!safeConfig.BACKEND_BEARER.isNullOrBlank() && !safeConfig.BACKEND_URL.isNullOrBlank()) {
+                // onCreate and onStartCommand (the boot start) each run this on their own thread - without the lock both
+                // read cmdWsClient == null and 2 cmd sockets opened, every event went out twice (07.11.2026 boot log)
+                if (!safeConfig.BACKEND_BEARER.isNullOrBlank() && !safeConfig.BACKEND_URL.isNullOrBlank()) synchronized(this@GsmService) {
                     if (cmdWsClient == null) {
                         val wsUrl = safeConfig.BACKEND_URL
                             .replace("http://", "ws://")
