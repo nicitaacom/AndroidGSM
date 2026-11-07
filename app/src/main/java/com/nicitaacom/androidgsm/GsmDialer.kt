@@ -84,8 +84,9 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
         if (!hasPermission(Manifest.permission.READ_PHONE_STATE)) return emptyList()
         return try {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as TelecomManager
-            // the SIM's own number per slot ("" on a SIM that reports none) - the laptop shows it under the carrier label,
-            // two "Telekom.de" SIMs read the same without it (06.11.2026)
+            // the SIM's own number per slot - the laptop shows it under the carrier label, two "Telekom.de" SIMs read the
+            // same without it. The SIM table first, then the number SimNumberReader got over USSD (by the account id below -
+            // MIUI hands this app an empty SIM table), "" when neither has one
             val numberBySlot = try {
                 val subscriptionManager = context.getSystemService(Context.TELEPHONY_SUBSCRIPTION_SERVICE) as SubscriptionManager
                 subscriptionManager.activeSubscriptionInfoList?.associate { it.simSlotIndex to (it.number ?: "") } ?: emptyMap()
@@ -104,7 +105,7 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
                         "componentName" to handle.componentName.flattenToString(),
                         "label" to label,
                         "simSlotIndex" to simSlot,
-                        "number" to (numberBySlot[simSlot] ?: "")
+                        "number" to (numberBySlot[simSlot]?.takeIf { it.isNotBlank() } ?: SimNumberReader.select(context, handle.id))
                     )
                 } catch (e: Exception) { null }
             }

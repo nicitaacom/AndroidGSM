@@ -234,6 +234,14 @@ class GsmService : Service() {
         return START_NOT_STICKY
     }
 
+    // the SIM list the laptop's SIM pickers show - sent on connect, and again once SimNumberReader got a number over USSD
+    private fun sendSimList() {
+        val sims = gsmDialer?.getSimAccounts() ?: emptyList()
+        if (sims.isEmpty()) return
+        cmdWsClient?.sendEvent("SIM_LIST", mapOf("sims" to sims.toString()))
+        log("GsmService: SIM_LIST sent: ${sims.size} accounts")
+    }
+
     private fun ensureRealtimeClientsInitialized() {
         Thread {
             try {
@@ -252,10 +260,10 @@ class GsmService : Service() {
                             onCommand = { type, data -> handleWsCommand(type, data) },
                             stateProvider = { mapOf("isServiceActive" to isServiceAudioActive, "isTestActive" to isTestAudioActive) },
                             onConnected = {
-                                val sims = gsmDialer?.getSimAccounts() ?: emptyList()
-                                if (sims.isNotEmpty()) {
-                                    cmdWsClient?.sendEvent("SIM_LIST", mapOf("sims" to sims.toString()))
-                                    log("GsmService: SIM_LIST sent: ${sims.size} accounts")
+                                sendSimList()
+                                // a USSD session during a call would cut into it - a reconnect mid-call waits for the next connect
+                                if (!callController.isCallActive) {
+                                    SimNumberReader.readMissing(this, log, gsmDialer?.getSimAccounts().orEmpty()) { sendSimList() }
                                 }
                                 if (isServiceAudioActive) {
                                     // Reconnect: server lost in-memory state — re-announce without touching audio

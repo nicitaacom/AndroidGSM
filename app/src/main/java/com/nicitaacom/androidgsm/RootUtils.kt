@@ -119,6 +119,26 @@ object RootUtils {
         false
     }
 
+    // ICCID -> subscription id from the phone's own SIM table: MIUI hands this app an empty
+    // SubscriptionManager.activeSubscriptionInfoList, and Telecom's account id is the ICCID on Android 10
+    fun selectSubscriptionIdByIccid(): Map<String, Int> = try {
+        val (exitCode, output) = runSuCommand("content query --uri content://telephony/siminfo --projection _id:icc_id")
+        if (exitCode != 0) {
+            Log.e(TAG, "❌ SIM table query failed (exit=$exitCode, output=$output)")
+            emptyMap()
+        } else {
+            // a row: "Row: 0 _id=1, icc_id=89490240001956622364" - \b keeps "icc_id=" from matching as "_id="
+            output.lines().mapNotNull { row ->
+                val subscriptionId = Regex("""\b_id=(\d+)""").find(row)?.groupValues?.get(1)?.toIntOrNull()
+                val iccid = Regex("""icc_id=(\w+)""").find(row)?.groupValues?.get(1)
+                if (subscriptionId == null || iccid == null) null else iccid to subscriptionId
+            }.toMap()
+        }
+    } catch (exception: Exception) {
+        Log.e(TAG, "❌ SIM table query error: ${exception.message}")
+        emptyMap()
+    }
+
     fun grantAudioOutputCapture(context: Context): Boolean =
         grantPermission(context.packageName, "android.permission.CAPTURE_AUDIO_OUTPUT")
 
