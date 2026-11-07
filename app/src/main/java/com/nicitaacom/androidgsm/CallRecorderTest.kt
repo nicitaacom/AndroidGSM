@@ -12,7 +12,7 @@ import java.nio.ByteOrder
  * plan-06 task 1 - the recording test: can the phone record BOTH sides of an answered call while the
  * headset is paired over Bluetooth? Runs on the answer, only while the marker file RUN_TEST sits in
  * <external files>/recordings/ (adb shell touch ...) - one shot, the marker is deleted at the start.
- * Two ways, 10 s each, one after the other, on their own thread:
+ * Two ways, 30 s each, one after the other, on their own thread:
  *   A. MediaRecorder with AudioSource.VOICE_CALL                      -> recordings/test-voice-call.m4a
  *   B. the running tinycap stream + VOC_REC_UL on top of VOC_REC_DL  -> recordings/test-tinycap.wav
  * The result is in logcat (GsmGateway, "🧪" lines) and in the 2 files; nothing else of the call changes.
@@ -64,7 +64,7 @@ class CallRecorderTest(
     }
 
     // The browser's own downlink stream (tinycap on MultiMedia1) is teed into a file; VOC_REC_UL adds
-    // the uplink (his voice) to that same stream for these 10 s, so the browser hears him too meanwhile.
+    // the uplink (his voice) to that same stream for these 30 s, so the browser hears him too meanwhile.
     private fun recordTinycapTee(file: File) {
         val handler = audioWsHandlerRef.handler
         if (handler == null) {
@@ -105,7 +105,7 @@ class CallRecorderTest(
     }
 
     companion object {
-        private const val TEST_SECONDS = 10
+        private const val TEST_SECONDS = 30
         private const val SAMPLE_RATE = 16000
         private const val WAV_HEADER_BYTES = 44
     }
