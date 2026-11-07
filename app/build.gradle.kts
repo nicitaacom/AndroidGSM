@@ -57,7 +57,9 @@ android {
         minSdk = 23
         targetSdk = 36
 
-        versionCode = todayCommitCount + 300
+        // yyMMdd + today's commit count (26-11-07, 1st commit -> 26110701): grows every day - "commits + 300" restarted
+        // each morning, so `adb install -r` refused a new day's build with INSTALL_FAILED_VERSION_DOWNGRADE
+        versionCode = todayDate.replace("-", "").toInt() * 100 + todayCommitCount
         versionName = versionNameComputed
 
         buildConfigField("String", "VERSION_NAME", "\"$versionNameComputed\"")
