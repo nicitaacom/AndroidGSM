@@ -183,6 +183,20 @@ app.get('/api/logs', (req, res) => {
   res.json({ logs: (logBuffers.get(bearer) ?? []).slice(-n) })
 })
 
+// the phone's upload test when its music stops for slow internet (outreach-tool plan-03 task 12, his words: "it should
+// show internet on a laptop and on a phone") - the body is octet-stream zeros, so bodyParser.json leaves it alone and the
+// stream is counted here as it arrives
+app.post('/api/speed-test', (req, res) => {
+  const bearer = authOk(req.headers.authorization)
+  if (!bearer) return res.status(401).json({ error: 'Unauthorized' })
+  let bytes = 0
+  req.on('data', (chunk: Buffer) => {
+    bytes += chunk.length
+  })
+  req.on('end', () => res.json({ bytes }))
+  req.on('error', error => res.status(400).json({ error: error.message }))
+})
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -622,8 +636,12 @@ wsCmd.on('connection', (ws, req) => {
           // the phone stopped the song on its own (slow_internet / error / service_restart) -
           // outreach-tool's useSubscribeToMusicStopped pauses the music site and shows the toast (plan-03)
           const reason = typeof data?.reason === 'string' ? data.reason : 'unknown'
-          serverLog(bearer, `🎵 [ws/cmd] MUSIC_STOPPED: ${tok} (${reason})`)
-          forwardToBrowser(bearer, tok, 'gsm:music-stopped', { reason })
+          // slow_internet holds the phone's own speed in Mbit/s (plan-03 task 12) - a half the phone could not
+          // measure is left out, the toast shows "not measured" for it
+          const downloadMbps = typeof data?.downloadMbps === 'number' ? data.downloadMbps : undefined
+          const uploadMbps = typeof data?.uploadMbps === 'number' ? data.uploadMbps : undefined
+          serverLog(bearer, `🎵 [ws/cmd] MUSIC_STOPPED: ${tok} (${reason}, ⬇️ ${downloadMbps ?? '-'} ⬆️ ${uploadMbps ?? '-'} Mbit/s)`)
+          forwardToBrowser(bearer, tok, 'gsm:music-stopped', { reason, downloadMbps, uploadMbps })
           break
         }
         case 'MUSIC_DROPS':
