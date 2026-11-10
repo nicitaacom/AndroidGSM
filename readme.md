@@ -519,7 +519,9 @@ nextPlayTime += chunkDuration
    Answered on the phone itself → a manual, audible call (browserDrivenCall stays false)
 
 3. [Decline] → DECLINE_CALL → handleDeclineCall → GsmInCallService.rejectRingingCall (Call.reject)
-   → onCallRemoved → CALL_ENDED + CALL_REPORT type "rejected"; she gives up first → the same road, type "missed"
+   → onCallRemoved → INCOMING_CALL_ENDED + CALL_REPORT type "rejected"; she gives up first or the ring times out →
+   the same road, type "missed". The ring set up no audio, so teardownCall's CALL_ENDED never comes for it.
+   [Answer] after the ring went away → handleAnswerCall sends CALL_ENDED, the laptop drops "Answering..."
 
 4. She rings while a call is on (call waiting): onCallAdded keeps the active call as currentCall and holds the new one
    as ringingCall; its end sends INCOMING_CALL_ENDED (never CALL_ENDED) so the active call's audio stays up.
