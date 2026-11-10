@@ -122,14 +122,19 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
     // the SIM's country ("de" for a German SIM) - the website shows "Ask first: I record this call, ok?" from it
     // (outreach-tool dialer plan-06 task 6, his "+49" rule); "" when the phone has no answer
     private fun selectCountryIso(simAccountId: String): String = try {
-        if (simAccountId.toIntOrNull() == null && subscriptionIdByIccid.isEmpty())
-            subscriptionIdByIccid = RootUtils.selectSubscriptionIdByIccid()
-        val subscriptionId = simAccountId.toIntOrNull() ?: subscriptionIdByIccid[simAccountId]
+        val subscriptionId = selectSubscriptionId(simAccountId)
         if (subscriptionId == null) ""
         else (context.getSystemService(Context.TELEPHONY_SERVICE) as TelephonyManager)
             .createForSubscriptionId(subscriptionId).simCountryIso.lowercase()
     } catch (e: Exception) {
         ""
+    }
+
+    // a SIM_LIST account id -> its subscription id (the country above, DialQualityLog's signal of the dialing SIM)
+    fun selectSubscriptionId(simAccountId: String): Int? {
+        if (simAccountId.toIntOrNull() == null && subscriptionIdByIccid.isEmpty())
+            subscriptionIdByIccid = RootUtils.selectSubscriptionIdByIccid()
+        return simAccountId.toIntOrNull() ?: subscriptionIdByIccid[simAccountId]
     }
 
     // 5. initiate GSM call

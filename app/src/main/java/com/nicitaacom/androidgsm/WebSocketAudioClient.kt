@@ -26,6 +26,13 @@ class WebSocketAudioClient(
     var isConnected = false
         private set
 
+    // DialQualityLog's phone internet half: the most bytes OkHttp held back for the VPS at once (a slow upload grows
+    // it, a fast one keeps it near 0) and how often this socket failed and reconnected
+    @Volatile var maxQueuedBytes = 0L
+        private set
+    @Volatile var failureCount = 0
+        private set
+
     companion object {
         private const val TAG = "WebSocketAudio"
     }
@@ -88,6 +95,7 @@ class WebSocketAudioClient(
 
     override fun onFailure(webSocket: WebSocket, t: Throwable, response: okhttp3.Response?) {
         isConnected = false
+        failureCount++
         Log.e(TAG, "❌ WebSocket failure: ${t.message}")
         MainActivity.log("ERROR: WebSocket failed: ${t.message}")
         
@@ -136,6 +144,8 @@ class WebSocketAudioClient(
             }
 
             ws?.send(packet.toString())
+            val queuedBytes = ws?.queueSize() ?: 0L
+            if (queuedBytes > maxQueuedBytes) maxQueuedBytes = queuedBytes
             // every 500th chunk - one line per chunk made this uid logd's chattiest and its lines the first pruned
             if (seq % 500L == 0L) Log.d(TAG, "📤 Sent chunk seq=$seq, size=${audio.length}")
 

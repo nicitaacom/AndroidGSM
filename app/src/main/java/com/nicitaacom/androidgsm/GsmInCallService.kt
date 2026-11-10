@@ -82,14 +82,6 @@ class GsmInCallService : InCallService() {
         }
     }
 
-    private fun routeName(route: Int): String = when (route) {
-        CallAudioState.ROUTE_EARPIECE -> "EARPIECE"
-        CallAudioState.ROUTE_SPEAKER -> "SPEAKER"
-        CallAudioState.ROUTE_BLUETOOTH -> "BLUETOOTH"
-        CallAudioState.ROUTE_WIRED_HEADSET -> "WIRED_HEADSET"
-        else -> "route=$route"
-    }
-
     // In-call screen toggles. Both go through Telecom so the system stays the source of truth and
     // onCallAudioStateChanged() redraws the buttons from the real state.
     private fun setMicMuted(muted: Boolean) {
@@ -223,6 +215,14 @@ class GsmInCallService : InCallService() {
 
         val isMuted: Boolean get() = currentAudioState?.isMuted == true
         val isSpeakerOn: Boolean get() = currentAudioState?.isSpeakerRoute == true
+
+        fun routeName(route: Int): String = when (route) {
+            CallAudioState.ROUTE_EARPIECE -> "EARPIECE"
+            CallAudioState.ROUTE_SPEAKER -> "SPEAKER"
+            CallAudioState.ROUTE_BLUETOOTH -> "BLUETOOTH"
+            CallAudioState.ROUTE_WIRED_HEADSET -> "WIRED_HEADSET"
+            else -> "route=$route"
+        }
 
         // false = InCallService not bound (no live call) — nothing to toggle.
         fun toggleMute(): Boolean {

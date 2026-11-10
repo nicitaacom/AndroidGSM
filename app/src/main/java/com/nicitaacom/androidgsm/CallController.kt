@@ -83,6 +83,12 @@ class CallController(
     // plan-06 task 2: records every answered call while "record every call" is on
     private val callRecorder = CallRecorder(context, audioWsHandlerRef, log)
 
+    // every answered call's 📶 lead side + 🌐 phone internet lines for the website's Logs box
+    private val dialQualityLog = DialQualityLog(context, cmdWsClient, audioWsHandlerRef, log)
+
+    // the SIM the laptop dialed with - DialQualityLog reads its signal; null for a call that rang in
+    @Volatile private var dialSubscriptionId: Int? = null
+
     // Called from GsmService.onCreate to wire up the dialer + InCallService callbacks.
     fun wireDialerCallbacks(gsmDialer: GsmDialer) {
         // Single call-ended callback set once. Owns all teardown.
@@ -231,6 +237,7 @@ class CallController(
         cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
         log("📞 CALL_CONNECTED sent to backend ($source)")
         callRecorder.start()
+        dialQualityLog.start(dialSubscriptionId)
     }
 
     // Single teardown path for call end — called from GsmDialer callback only.
@@ -240,6 +247,9 @@ class CallController(
         setCallActive(false)
         // before the capture below stops - the recording ends with the call, not with the "call ended" cue
         callRecorder.stop()
+        // before the audio socket below is dropped - its upload backlog is part of the line
+        dialQualityLog.stop()
+        dialSubscriptionId = null
         // Cleared so the next call's connect signal is honored; the old value says whether this
         // call ever connected (busy / no answer never did).
         val wasConnected = callConnectedHandled.getAndSet(false)
@@ -306,6 +316,7 @@ class CallController(
             val simAccountId = data["simAccountId"] as? String
             val simComponentName = data["simComponentName"] as? String
             log("Starting call to: $number (sim=$simAccountId)")
+            dialSubscriptionId = simAccountId?.let { runCatching { gsmDialer?.selectSubscriptionId(it) }.getOrNull() }
             voiceVolumeBeforeCall = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
             isAnswerAfterEnd = false
             // Quiet from before the dial. Not enough on its own: the HAL rewrites the EAR_S/SPK mixer
@@ -622,6 +633,7 @@ class CallController(
     // more in case the HAL was slower. Each pass reads the live route, so a quick on-off-on settles
     // on the real one.
     private fun onPhoneRouteChanged() {
+        dialQualityLog.onRouteChanged()
         if (!browserDrivenCall) return
         Thread {
             try {

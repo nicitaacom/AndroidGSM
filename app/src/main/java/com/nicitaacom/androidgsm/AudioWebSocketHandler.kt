@@ -89,6 +89,10 @@ class AudioWebSocketHandler(
 
     val isWsConnected: Boolean get() = wsConnection?.isConnected ?: false
 
+    // DialQualityLog reads both at the hang-up, before disconnect() drops the socket
+    val maxQueuedBytes: Long get() = wsConnection?.maxQueuedBytes ?: 0L
+    val wsFailureCount: Int get() = wsConnection?.failureCount ?: 0
+
     fun connect(wsUrl: String, bearerToken: String, deviceToken: String) {
         log("🔌 WebSocket Audio: Connecting to $wsUrl")
         seqRx = -1L

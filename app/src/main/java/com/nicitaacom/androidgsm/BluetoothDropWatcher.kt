@@ -11,9 +11,14 @@ class BluetoothDropWatcher(private val log: GsmLogger, private val onDrops: () -
     private var process: Process? = null
     private var reader: Thread? = null
 
+    // link reports since start() - DialQualityLog shows it for a dial (it stops growing once onDrops fired)
+    @Volatile var reportCount = 0
+        private set
+
     @Synchronized
     fun start() {
         stop()
+        reportCount = 0
         try {
             // -T 1: from the newest line on, not the whole buffer; only the Bluetooth stack's warnings
             val logcat = Runtime.getRuntime().exec(arrayOf("su", "-c", "logcat -T 1 bt_btif:W *:S"))
@@ -23,6 +28,7 @@ class BluetoothDropWatcher(private val log: GsmLogger, private val onDrops: () -
                 try {
                     logcat.inputStream.bufferedReader().forEachLine { line ->
                         if (!line.contains(LINK_REPORT)) return@forEachLine
+                        reportCount++
                         val now = System.currentTimeMillis()
                         reportTimesMs.addLast(now)
                         while (now - reportTimesMs.first() > DROP_WINDOW_MS) reportTimesMs.removeFirst()
