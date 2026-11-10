@@ -525,7 +525,9 @@ nextPlayTime += chunkDuration
 
 4. She rings while a call is on (call waiting): onCallAdded keeps the active call as currentCall and holds the new one
    as ringingCall; its end sends INCOMING_CALL_ENDED (never CALL_ENDED) so the active call's audio stays up.
-   The laptop offers [Decline] only - no hold / switch in plan-05.
+   The active call ends first → onCallRemoved moves ringingCall into currentCall, so it ends / answers like a lone ring.
+   [Answer] on the laptop (plan-05 task 19) → CALL_ENDED + ANSWER_CALL → isAnswerAfterEnd → once Telecom removed the
+   active call, onCallEnded runs handleAnswerCall. No hold.
 ```
 
 ## Call log on open (plan-05 task 9)
