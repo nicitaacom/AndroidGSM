@@ -167,7 +167,12 @@ class GsmInCallService : InCallService() {
             MainActivity.log("GsmInCallService: the waiting call detached")
             return
         }
-        if (currentCall === call) currentCall = null
+        // the active call ended while another one rang next to it: that one is the phone's only call now, so its answer,
+        // its end and its call log row take the same path as a plain incoming call's
+        if (currentCall === call) {
+            currentCall = ringingCall
+            ringingCall = null
+        }
         // Drop the last call's mute/route so the next call's screen does not open with stale
         // toggles and its first audio state is reported as the fresh route it is.
         currentAudioState = null
