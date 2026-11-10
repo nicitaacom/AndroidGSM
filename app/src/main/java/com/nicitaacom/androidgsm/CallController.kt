@@ -101,11 +101,13 @@ class CallController(
         // ends — far faster/more reliable than MIUI's PhoneStateListener IDLE (which can lag ~10s
         // on this build, leaving downlink audio playing after hang-up). teardownCall() self-guards
         // against double-run, so the later IDLE event is a harmless no-op.
+        // A ring nobody answered (she gave up, the ring timed out, a decline) set up no audio, so teardownCall's
+        // CALL_ENDED never comes for it - INCOMING_CALL_ENDED is the laptop's one sign that nothing rings any more.
         GsmInCallService.onCallEnded = {
             if (isCallActive || audioWsHandlerRef.handler != null) {
                 log("📴 Call removed (Telecom) — tearing down audio immediately")
                 teardownCall()
-            }
+            } else onIncomingCallEnded()
             reportCall()
         }
     }
@@ -336,9 +338,10 @@ class CallController(
         cmdWsClient()?.sendEvent("INCOMING_CALL", mapOf("number" to number))
     }
 
-    // the call that rang next to an active one went away - the laptop drops its "Incoming" line, the active call stays
+    // the ringing call went away unanswered, alone or next to an active one - the laptop drops its "Incoming" card or
+    // line, an active call stays
     private fun onIncomingCallEnded() {
-        log("📲 The waiting call went away")
+        log("📲 The ringing call went away")
         cmdWsClient()?.sendEvent("INCOMING_CALL_ENDED", emptyMap())
     }
 
