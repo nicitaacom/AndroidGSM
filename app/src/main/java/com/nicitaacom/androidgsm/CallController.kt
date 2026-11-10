@@ -353,8 +353,10 @@ class CallController(
             log("ANSWER_CALL ignored: a call is on - the laptop offers [Decline] only for a waiting call")
             return
         }
+        // the ring ended a moment before [Answer] - the laptop shows "Answering..." already, CALL_ENDED takes it back
         if (!GsmInCallService.hasRingingCall) {
-            log("ANSWER_CALL ignored: no ringing call")
+            log("ANSWER_CALL: no ringing call - syncing CALL_ENDED state")
+            cmdWsClient()?.sendEvent("CALL_ENDED", emptyMap())
             return
         }
         voiceVolumeBeforeCall = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
