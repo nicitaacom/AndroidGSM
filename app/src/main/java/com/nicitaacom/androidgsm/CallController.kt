@@ -64,6 +64,10 @@ class CallController(
     // -1 = nothing captured (manual call).
     @Volatile private var voiceVolumeBeforeCall = -1
 
+    // ANSWER_CALL came while a call was on and another one rang next to it (outreach-tool plan-05 task 19): the laptop
+    // hangs the active call up first, and the ringing one is answered once Telecom removed the active one
+    @Volatile private var isAnswerAfterEnd = false
+
     private val audioManager: AudioManager by lazy {
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     }
@@ -109,6 +113,10 @@ class CallController(
                 teardownCall()
             } else onIncomingCallEnded()
             reportCall()
+            if (isAnswerAfterEnd) {
+                isAnswerAfterEnd = false
+                handleAnswerCall()
+            }
         }
     }
 
@@ -299,6 +307,7 @@ class CallController(
             val simComponentName = data["simComponentName"] as? String
             log("Starting call to: $number (sim=$simAccountId)")
             voiceVolumeBeforeCall = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
+            isAnswerAfterEnd = false
             // Quiet from before the dial. Not enough on its own: the HAL rewrites the EAR_S/SPK mixer
             // when it brings up the voice path for the route a moment later, which is how the phone
             // rang along with the browser for the whole ringing phase — onPhoneRouteChanged() applies
@@ -350,7 +359,12 @@ class CallController(
     // Answered on the phone itself it stays a manual, audible call (edge case 7)
     fun handleAnswerCall() {
         if (isCallActive) {
-            log("ANSWER_CALL ignored: a call is on - the laptop offers [Decline] only for a waiting call")
+            if (!GsmInCallService.hasRingingCall) {
+                log("ANSWER_CALL ignored: a call is on and nothing else rings")
+                return
+            }
+            log("📲 ANSWER_CALL: the waiting call is answered once the active call ends")
+            isAnswerAfterEnd = true
             return
         }
         // the ring ended a moment before [Answer] - the laptop shows "Answering..." already, CALL_ENDED takes it back
