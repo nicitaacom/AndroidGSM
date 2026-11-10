@@ -49,11 +49,27 @@ class GsmService : Service() {
     private val musicPlayerLazy = lazy {
         MusicPlayer(
             log,
-            onStopped = { reason -> cmdWsClient?.sendEvent("MUSIC_STOPPED", mapOf("reason" to reason)) },
+            onStopped = { reason, songUrl -> sendMusicStopped(reason, songUrl) },
             onDrops = { cmdWsClient?.sendEvent("MUSIC_DROPS", emptyMap()) },
         )
     }
     private val musicPlayer: MusicPlayer by musicPlayerLazy
+
+    // slow_internet waits for the phone's own speed (SpeedTest, up to ~8 s) so the website shows it next to the
+    // laptop's; a half that failed is left out of the event
+    private fun sendMusicStopped(reason: String, songUrl: String?) {
+        val currentConfig = config
+        if (reason != "slow_internet" || currentConfig == null) {
+            cmdWsClient?.sendEvent("MUSIC_STOPPED", mapOf("reason" to reason))
+            return
+        }
+        SpeedTest.measure(songUrl, currentConfig.BACKEND_URL, currentConfig.BACKEND_BEARER, log) { downloadMbps, uploadMbps ->
+            val data = mutableMapOf<String, Any>("reason" to reason)
+            downloadMbps?.let { data["downloadMbps"] = it }
+            uploadMbps?.let { data["uploadMbps"] = it }
+            cmdWsClient?.sendEvent("MUSIC_STOPPED", data)
+        }
+    }
 
     companion object {
         private const val NOTIFICATION_ID = 1

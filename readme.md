@@ -581,7 +581,10 @@ The browser's music site plays muted inside outreach-tool and the phone plays th
 paired to it: `MusicPlayer.kt`, an Android `MediaPlayer` streaming the song's signed link. Commands over `/ws/cmd`:
 `MUSIC_PLAY { songUrl, positionSec, volumePercent, title }` / `MUSIC_SEEK` / `MUSIC_PAUSE` / `MUSIC_VOLUME { percent }`
 / `MUSIC_STOP`; the phone reports `MUSIC_STOPPED { reason }` when it stops on its own (no start in 5 s, 3 buffering
-stalls in 60 s, an error, a service restart) and never resumes by itself.
+stalls in 60 s, an error, a service restart) and never resumes by itself. On `slow_internet` it first measures its own
+speed (`SpeedTest.kt`, up to 4 s each half): download on the song link itself, upload to the VPS's `/api/speed-test`,
+and sends `MUSIC_STOPPED { reason, downloadMbps?, uploadMbps? }` - a half that failed is left out (outreach-tool
+plan-03 task 12: speedtest.net was fine while the phone kept stopping, so the website shows the phone's own numbers).
 
 What a call does to the song, all confirmed on the Redmi with a Bluetooth headset:
 

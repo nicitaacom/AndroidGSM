@@ -19,10 +19,12 @@ import android.os.Looper
  */
 class MusicPlayer(
     private val log: GsmLogger,
-    private val onStopped: (reason: String) -> Unit,
+    // songUrl: the link that was playing - slow_internet measures the phone's download on it (SpeedTest)
+    private val onStopped: (reason: String, songUrl: String?) -> Unit,
     onDrops: () -> Unit,
 ) {
     private var player: MediaPlayer? = null
+    private var songUrl: String? = null
     private val dropWatcher = BluetoothDropWatcher(log, onDrops)
     private val mainHandler = Handler(Looper.getMainLooper())
     private val stallTimesMs = ArrayDeque<Long>()
@@ -43,6 +45,7 @@ class MusicPlayer(
     @Synchronized
     fun play(songUrl: String, positionSec: Double, volumePercent: Int, title: String) {
         releasePlayer()
+        this.songUrl = songUrl
         volume = volumePercent.coerceIn(0, 100) / 100f
         try {
             val mp = MediaPlayer()
@@ -118,7 +121,7 @@ class MusicPlayer(
             return
         }
         log("🎵 MusicPlayer: stopped - $reason")
-        onStopped(reason)
+        onStopped(reason, songUrl)
     }
 
     private fun onStall() {
