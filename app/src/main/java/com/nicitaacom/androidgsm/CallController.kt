@@ -111,7 +111,7 @@ class CallController(
         // ends — far faster/more reliable than MIUI's PhoneStateListener IDLE (which can lag ~10s
         // on this build, leaving downlink audio playing after hang-up). teardownCall() self-guards
         // against double-run, so the later IDLE event is a harmless no-op.
-        // A ring nobody answered (she gave up, the ring timed out, a decline) set up no audio, so teardownCall's
+        // A ring nobody answered (she gave up, the ring timed out after [Ignore]) set up no audio, so teardownCall's
         // CALL_ENDED never comes for it - INCOMING_CALL_ENDED is the laptop's one sign that nothing rings any more.
         GsmInCallService.onCallEnded = {
             if (isCallActive || audioWsHandlerRef.handler != null) {
@@ -352,7 +352,7 @@ class CallController(
         }
     }
 
-    // an incoming call rings - the laptop's card shows "Incoming · <number>" with [Answer] [Decline] (plan-05 task 7)
+    // an incoming call rings - the laptop's card shows "Incoming · <number>" with [Ignore] [Answer] (plan-05 task 7)
     private fun onIncomingCall(number: String) {
         log("📲 Incoming call from ${number.ifBlank { "hidden number" }}")
         cmdWsClient()?.sendEvent("INCOMING_CALL", mapOf("number" to number))
@@ -400,12 +400,13 @@ class CallController(
         }.start()
     }
 
-    // [Decline] on the laptop - the ringing call, alone or waiting next to an active one
-    fun handleDeclineCall() {
-        Thread {
-            val rejected = GsmInCallService.rejectRingingCall()
-            log(if (rejected) "📲 Incoming call declined from the laptop" else "DECLINE_CALL ignored: no ringing call")
-        }.start()
+    // IGNORE_CALL from the laptop ([Ignore] on the card, the ringing call alone or waiting next to an active one): the
+    // phone stops ringing, the caller keeps hearing it ring - his "for that person that is calling that person should
+    // still hear "tyyy" sounds". Her own hang-up (or the network's ring timeout) ends it later through onCallEnded ->
+    // INCOMING_CALL_ENDED, like any unanswered ring
+    fun handleIgnoreCall() {
+        val ignored = GsmInCallService.ignoreRingingCall(context)
+        log(if (ignored) "🔕 Incoming call ignored from the laptop - it rings on for the caller" else "IGNORE_CALL: nothing rings")
     }
 
     // GET_CALL_LOG { limit } from the laptop when its socket opens (plan-05 task 9): the newest rows of the phone's own
@@ -627,7 +628,7 @@ class CallController(
     // onCallRemoved). A manual call is audible as-is, so its "call ended" cue plays right here,
     // still on the call route like any dialer's end tone. A browser-driven call is muted at this
     // point — its cue plays in teardownCall() once the phone is unmuted. A call that never
-    // connected (missed or declined incoming) gets no cue: no "started" means no "ended".
+    // connected (missed or rejected incoming) gets no cue: no "started" means no "ended".
     private fun onCallDisconnected() {
         if (browserDrivenCall || !callConnectedHandled.get()) return
         callSounds.play(R.raw.end_call)

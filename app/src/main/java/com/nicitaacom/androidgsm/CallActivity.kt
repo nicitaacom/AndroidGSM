@@ -26,7 +26,7 @@ class CallActivity : AppCompatActivity() {
     private lateinit var micLabel: TextView
     private lateinit var callerInitialText: TextView
     private lateinit var answerButton: ImageButton
-    private lateinit var declineButton: ImageButton
+    private lateinit var ignoreButton: TextView
     private lateinit var hangUpButton: ImageButton
     private lateinit var muteButton: ImageButton
     private lateinit var speakerButton: ImageButton
@@ -100,7 +100,7 @@ class CallActivity : AppCompatActivity() {
         micLabel = findViewById(R.id.micSourceLabel)
         callerInitialText = findViewById(R.id.callerInitialText)
         answerButton = findViewById(R.id.answerButton)
-        declineButton = findViewById(R.id.declineButton)
+        ignoreButton = findViewById(R.id.ignoreButton)
         hangUpButton = findViewById(R.id.hangUpButton)
         muteButton = findViewById(R.id.muteButton)
         speakerButton = findViewById(R.id.speakerButton)
@@ -132,12 +132,13 @@ class CallActivity : AppCompatActivity() {
             }
         }
 
-        declineButton.setOnClickListener {
-            declineOrDisconnect()
+        // the same ignore as the laptop's [Ignore] - this screen closes, the caller keeps hearing it ring
+        ignoreButton.setOnClickListener {
+            if (!GsmInCallService.ignoreRingingCall(this)) MainActivity.log("CallActivity: ignore - nothing rings")
         }
 
         hangUpButton.setOnClickListener {
-            declineOrDisconnect()
+            endCall()
             finish()
         }
 
@@ -204,11 +205,11 @@ class CallActivity : AppCompatActivity() {
         }
     }
 
-    // Incoming: answer + decline. Otherwise: hang-up, plus the mute / loudspeaker row while the
+    // Incoming: ignore + answer. Otherwise: hang-up, plus the mute / loudspeaker row while the
     // call is live (not while it is being torn down).
     private fun showActions(incoming: Boolean, controls: Boolean) {
         answerButton.visibility = if (incoming) View.VISIBLE else View.GONE
-        declineButton.visibility = if (incoming) View.VISIBLE else View.GONE
+        ignoreButton.visibility = if (incoming) View.VISIBLE else View.GONE
         hangUpButton.visibility = if (incoming) View.GONE else View.VISIBLE
         inCallControls.visibility = if (controls) View.VISIBLE else View.GONE
     }
@@ -219,16 +220,12 @@ class CallActivity : AppCompatActivity() {
         speakerButton.isSelected = state.isSpeakerRoute
     }
 
-    private fun declineOrDisconnect() {
+    // [hang up] - only shown once the call is no longer ringing in, so there is no reject here (his "only ignore call")
+    private fun endCall() {
         val call = activeCall ?: GsmInCallService.currentCall
         if (call != null) {
-            if (call.state == Call.STATE_RINGING) {
-                call.reject(false, null)
-                MainActivity.log("CallActivity: declined incoming call")
-            } else {
-                call.disconnect()
-                MainActivity.log("CallActivity: disconnected call")
-            }
+            call.disconnect()
+            MainActivity.log("CallActivity: disconnected call")
         } else {
             MainActivity.log("CallActivity: no Call object — nothing to hang up")
         }

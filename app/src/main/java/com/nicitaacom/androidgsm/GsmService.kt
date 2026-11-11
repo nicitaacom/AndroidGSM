@@ -476,7 +476,7 @@ class GsmService : Service() {
                 "CALL_STARTED" -> callController.handleCallStarted(data, gsmDialer)
                 "CALL_ENDED" -> callController.handleCallEnded(gsmDialer)
                 "ANSWER_CALL" -> callController.handleAnswerCall()
-                "DECLINE_CALL" -> callController.handleDeclineCall()
+                "IGNORE_CALL" -> callController.handleIgnoreCall()
                 "GET_CALL_LOG" -> callController.handleGetCallLog(data)
                 "UPLOAD_RECORDING" -> callController.handleUploadRecording(data)
                 "SEND_DTMF" -> callController.handleSendDtmf(data)

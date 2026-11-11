@@ -1,9 +1,11 @@
 package com.nicitaacom.androidgsm
 
+import android.content.Context
 import android.content.Intent
 import android.telecom.Call
 import android.telecom.CallAudioState
 import android.telecom.InCallService
+import android.telecom.TelecomManager
 import android.telecom.VideoProfile
 
 // The one "is the loudspeaker on" check, shared by the service, the controller and the call screen.
@@ -146,7 +148,7 @@ class GsmInCallService : InCallService() {
             return
         }
         MainActivity.log("GsmInCallService: Call attached — DTMF available")
-        // the laptop shows "Incoming · <number>" with [Answer] [Decline] (plan-05 task 7)
+        // the laptop shows "Incoming · <number>" with [Ignore] [Answer] (plan-05 task 7)
         if (isRinging) onIncomingCall?.invoke(number)
 
         // Launch call screen — system requires default dialer to show call UI
@@ -160,7 +162,7 @@ class GsmInCallService : InCallService() {
     override fun onCallRemoved(call: Call) {
         super.onCallRemoved(call)
         call.unregisterCallback(callCallback)
-        // the waiting call went away (she gave up, or DECLINE_CALL) - the active call is untouched
+        // the waiting call went away (she gave up, or the network's ring timeout) - the active call is untouched
         if (ringingCall === call) {
             ringingCall = null
             onIncomingCallEnded?.invoke()
@@ -205,9 +207,25 @@ class GsmInCallService : InCallService() {
 
         private val ringingNow: Call? get() = (ringingCall ?: currentCall)?.takeIf { it.state == Call.STATE_RINGING }
         val hasRingingCall: Boolean get() = ringingNow != null
-        // ANSWER_CALL / DECLINE_CALL from the laptop - false = nothing rings any more
+        // ANSWER_CALL from the laptop - false = nothing rings any more
         fun answerRingingCall(): Boolean = ringingNow?.let { it.answer(VideoProfile.STATE_AUDIO_ONLY); true } ?: false
-        fun rejectRingingCall(): Boolean = ringingNow?.let { it.reject(false, null); true } ?: false
+        // [Ignore] on the laptop (IGNORE_CALL) or on CallActivity - the ringtone stops here, the call rings on for the
+        // caller until she gives up or the network ends it (a reject gives her "busy" at once). For him the ring is
+        // over: a lone ring's screen closes and the laptop's card hides. silenceRinger is open to the default dialer,
+        // this app
+        fun ignoreRingingCall(context: Context): Boolean {
+            val call = ringingNow ?: return false
+            try {
+                context.getSystemService(TelecomManager::class.java).silenceRinger()
+            } catch (error: SecurityException) {
+                MainActivity.log("❌ Ignore: silenceRinger refused - is AndroidGSM still the default dialer? $error")
+                return false
+            }
+            // a waiting call next to an active one leaves the active call's screen open
+            if (call === currentCall) CallActivity.notifyEnded()
+            onIncomingCallEnded?.invoke()
+            return true
+        }
         // Latest CallAudioState from Telecom (mute flag + route) so the call screen can draw its
         // toggles from the real state, including a route change made elsewhere (headset plugged in).
         @Volatile var currentAudioState: CallAudioState? = null

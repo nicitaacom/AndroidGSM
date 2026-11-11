@@ -100,16 +100,19 @@
         android:paddingEnd="40dp"
         android:paddingBottom="34dp">
 
-        <ImageButton
-            android:id="@+id/declineButton"
+        <!-- his gray "Ignore" (11.11.2026): the phone stops ringing, the caller keeps hearing it ring - a TextView, since
+             the MaterialComponents theme turns a <Button> into a MaterialButton that skips this oval background -->
+        <TextView
+            android:id="@+id/ignoreButton"
             android:layout_width="76dp"
             android:layout_height="76dp"
-            android:background="@drawable/action_decline_background"
-            android:contentDescription="@string/decline_call"
-            android:padding="20dp"
-            android:scaleType="center"
-            android:src="@drawable/ic_call_end"
-            android:tint="@color/white" />
+            android:background="@drawable/action_ignore_background"
+            android:clickable="true"
+            android:focusable="true"
+            android:gravity="center"
+            android:text="@string/ignore_call"
+            android:textColor="@color/white"
+            android:textSize="14sp" />
 
         <Space
             android:layout_width="52dp"
@@ -201,7 +204,7 @@
         android:layout_height="76dp"
         android:layout_gravity="bottom|center_horizontal"
         android:layout_marginBottom="34dp"
-        android:background="@drawable/action_decline_background"
+        android:background="@drawable/action_end_call_background"
         android:contentDescription="@string/end_call"
         android:padding="20dp"
         android:scaleType="center"
