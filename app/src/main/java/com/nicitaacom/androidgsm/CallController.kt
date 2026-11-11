@@ -498,6 +498,13 @@ class CallController(
         // Do NOT send CALL_ENDED here directly; teardownCall() does it, preventing double-send.
         try {
             log("Ending call (frontend request)")
+            // the hang-up came before Telecom added this phone's own dial (currentCall still null): Call.disconnect() has
+            // nothing to act on and TelecomManager.endCall() no-ops while dialing on MIUI, so the dial went on with no
+            // card on the laptop. The dial ends the moment Telecom adds it instead
+            if (isCallActive && GsmInCallService.currentCall == null) {
+                GsmInCallService.endNextOutgoingCall(DIAL_PLACE_WAIT_MS)
+                log("📴 Hang-up before the dial was placed - it ends the moment Telecom adds it")
+            }
             Thread {
                 try {
                     gsmDialer?.endCall()
@@ -673,5 +680,8 @@ class CallController(
         // handleGetCallLog: the rows one GET_CALL_LOG answers with
         private const val CALL_LOG_DEFAULT_LIMIT = 50
         private const val CALL_LOG_MAX_LIMIT = 300
+        // handleCallEnded: how long a hang-up that came before Telecom added the dial waits for that dial (the dial
+        // took 3 s to go OFFHOOK on 11.11.2026)
+        private const val DIAL_PLACE_WAIT_MS = 10_000L
     }
 }

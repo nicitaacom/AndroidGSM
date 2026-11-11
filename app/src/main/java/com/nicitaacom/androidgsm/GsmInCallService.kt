@@ -137,6 +137,14 @@ class GsmInCallService : InCallService() {
         // tear the active call's audio down (plan-05 task 7, edge case 5)
         if (isRinging && currentCall != null && currentCall !== call) ringingCall = call else currentCall = call
         call.registerCallback(callCallback)
+        // the laptop hung up before Telecom added this dial - it ends here, before it rings anyone (onCallRemoved then
+        // tears it down and sends CALL_ENDED like any other end)
+        if (!isRinging && System.currentTimeMillis() < endOutgoingCallUntilMs) {
+            endOutgoingCallUntilMs = 0L
+            call.disconnect()
+            MainActivity.log("📴 The laptop hung up before this dial was placed - disconnected at once")
+            return
+        }
         MainActivity.log("GsmInCallService: Call attached — DTMF available")
         // the laptop shows "Incoming · <number>" with [Answer] [Decline] (plan-05 task 7)
         if (isRinging) onIncomingCall?.invoke(number)
@@ -188,6 +196,12 @@ class GsmInCallService : InCallService() {
         @Volatile var onIncomingCallEnded: (() -> Unit)? = null
         // when Telecom added the newest call - CallController.reportCall reads the call log row from then on
         @Volatile var lastCallAddedAtMs = 0L
+        // ms until which the next outgoing call gets disconnected the moment Telecom adds it - set by a laptop hang-up
+        // that came while this phone's own dial was still being placed (CallController.handleCallEnded)
+        @Volatile private var endOutgoingCallUntilMs = 0L
+        fun endNextOutgoingCall(withinMs: Long) {
+            endOutgoingCallUntilMs = System.currentTimeMillis() + withinMs
+        }
 
         private val ringingNow: Call? get() = (ringingCall ?: currentCall)?.takeIf { it.state == Call.STATE_RINGING }
         val hasRingingCall: Boolean get() = ringingNow != null
