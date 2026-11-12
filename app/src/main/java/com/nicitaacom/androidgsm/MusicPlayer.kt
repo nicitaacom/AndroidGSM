@@ -30,6 +30,8 @@ class MusicPlayer(
     private val stallTimesMs = ArrayDeque<Long>()
     private var startTimeout: Runnable? = null
     private var volume = 1f
+    // ms of the last seek - the buffering right after it is the seek itself, not slow internet
+    private var seekAtMs = 0L
 
     // Not USAGE_MEDIA: AudioService mutes every MEDIA / GAME player for the whole call, from Telecom's
     // MODE_IN_CALL at the dial until MODE_NORMAL ("PlaybackActivityMonitor: call: muting piid" in the
@@ -54,7 +56,10 @@ class MusicPlayer(
             mp.setOnPreparedListener { prepared ->
                 cancelStartTimeout()
                 val startMs = (positionSec * 1000).toInt()
-                if (startMs > 0) prepared.seekTo(startMs)
+                if (startMs > 0) {
+                    seekAtMs = System.currentTimeMillis()
+                    prepared.seekTo(startMs)
+                }
                 prepared.setVolume(volume, volume)
                 prepared.start()
                 dropWatcher.start()
@@ -95,6 +100,7 @@ class MusicPlayer(
     @Synchronized
     fun seek(positionSec: Double) {
         try {
+            seekAtMs = System.currentTimeMillis()
             player?.seekTo((positionSec * 1000).toInt())
         } catch (e: IllegalStateException) {
             log("🎵 MusicPlayer: seek ignored: ${e.message}")
@@ -126,6 +132,12 @@ class MusicPlayer(
 
     private fun onStall() {
         val now = System.currentTimeMillis()
+        // A seek empties the player's buffer, so it buffers once right after - counted as a stall, 3 clicks on a
+        // recording's waveform within a minute stop it as "slow internet" on a fast line
+        if (now - seekAtMs < SEEK_BUFFERING_MS) {
+            log("🎵 MusicPlayer: buffering after a seek - no stall")
+            return
+        }
         stallTimesMs.addLast(now)
         while (stallTimesMs.isNotEmpty() && now - stallTimesMs.first() > STALL_WINDOW_MS) stallTimesMs.removeFirst()
         log("🎵 MusicPlayer: buffering stall ${stallTimesMs.size}/$MAX_STALLS in the last ${STALL_WINDOW_MS / 1000} s")
@@ -159,5 +171,6 @@ class MusicPlayer(
         const val START_TIMEOUT_MS = 5_000L
         const val STALL_WINDOW_MS = 60_000L
         const val MAX_STALLS = 3
+        const val SEEK_BUFFERING_MS = 3_000L
     }
 }
