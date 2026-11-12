@@ -19,9 +19,12 @@ import android.os.Looper
  */
 class MusicPlayer(
     private val log: GsmLogger,
-    // songUrl: the link that was playing - slow_internet measures the phone's download on it (SpeedTest)
-    private val onStopped: (reason: String, songUrl: String?) -> Unit,
+    // songUrl: the link that was playing - slow_internet measures the phone's download on it (SpeedTest).
+    // why: slow_internet's own line for the toast - the waits and the phone's radios at the last one, null otherwise
+    private val onStopped: (reason: String, songUrl: String?, why: String?) -> Unit,
     onDrops: () -> Unit,
+    // PhoneRadioState.describe - Wi-Fi band / dBm / link, Bluetooth, a call, the screen
+    private val radioState: () -> String,
 ) {
     private var player: MediaPlayer? = null
     private var songUrl: String? = null
@@ -120,14 +123,14 @@ class MusicPlayer(
 
     /** Drops the player. A reason means the phone stopped on its own and the browser must hear about it. */
     @Synchronized
-    fun stop(reason: String?) {
+    fun stop(reason: String?, why: String? = null) {
         releasePlayer()
         if (reason == null) {
             log("🎵 MusicPlayer: stopped by the browser")
             return
         }
-        log("🎵 MusicPlayer: stopped - $reason")
-        onStopped(reason, songUrl)
+        log("🎵 MusicPlayer: stopped - $reason${why?.let { " · $it" } ?: ""}")
+        onStopped(reason, songUrl, why)
     }
 
     private fun onStall() {
@@ -140,15 +143,20 @@ class MusicPlayer(
         }
         stallTimesMs.addLast(now)
         while (stallTimesMs.isNotEmpty() && now - stallTimesMs.first() > STALL_WINDOW_MS) stallTimesMs.removeFirst()
-        log("🎵 MusicPlayer: buffering stall ${stallTimesMs.size}/$MAX_STALLS in the last ${STALL_WINDOW_MS / 1000} s")
-        if (stallTimesMs.size >= MAX_STALLS) stop("slow_internet")
+        // every wait with the radios at that moment - 3 waits with the same "Wi-Fi 2.4 GHz · Bluetooth music on"
+        // point at the shared radio, 3 different ones at the line
+        val radio = radioState()
+        log("🎵 MusicPlayer: buffering stall ${stallTimesMs.size}/$MAX_STALLS in the last ${STALL_WINDOW_MS / 1000} s · $radio")
+        if (stallTimesMs.size < MAX_STALLS) return
+        val waitsSec = (now - stallTimesMs.first()) / 1000
+        stop("slow_internet", "$MAX_STALLS waits for the song in $waitsSec s · at the last one: $radio")
     }
 
     private fun scheduleStartTimeout() {
         cancelStartTimeout()
         val timeout = Runnable {
             log("🎵 MusicPlayer: no start within ${START_TIMEOUT_MS / 1000} s")
-            stop("slow_internet")
+            stop("slow_internet", "the song did not start within ${START_TIMEOUT_MS / 1000} s · ${radioState()}")
         }
         startTimeout = timeout
         mainHandler.postDelayed(timeout, START_TIMEOUT_MS)

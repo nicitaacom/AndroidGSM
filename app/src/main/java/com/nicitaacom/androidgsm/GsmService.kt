@@ -49,15 +49,16 @@ class GsmService : Service() {
     private val musicPlayerLazy = lazy {
         MusicPlayer(
             log,
-            onStopped = { reason, songUrl -> sendMusicStopped(reason, songUrl) },
+            onStopped = { reason, songUrl, why -> sendMusicStopped(reason, songUrl, why) },
             onDrops = { cmdWsClient?.sendEvent("MUSIC_DROPS", emptyMap()) },
+            radioState = { PhoneRadioState.describe(this) },
         )
     }
     private val musicPlayer: MusicPlayer by musicPlayerLazy
 
     // slow_internet waits for the phone's own speed (SpeedTest, up to ~8 s) so the website shows it next to the
-    // laptop's; a half that failed is left out of the event
-    private fun sendMusicStopped(reason: String, songUrl: String?) {
+    // laptop's; a half that failed is left out of the event. why = the waits + the radios, the toast's own line
+    private fun sendMusicStopped(reason: String, songUrl: String?, why: String?) {
         val currentConfig = config
         if (reason != "slow_internet" || currentConfig == null) {
             cmdWsClient?.sendEvent("MUSIC_STOPPED", mapOf("reason" to reason))
@@ -67,6 +68,7 @@ class GsmService : Service() {
             val data = mutableMapOf<String, Any>("reason" to reason)
             downloadMbps?.let { data["downloadMbps"] = it }
             uploadMbps?.let { data["uploadMbps"] = it }
+            why?.let { data["why"] = it }
             cmdWsClient?.sendEvent("MUSIC_STOPPED", data)
         }
     }
