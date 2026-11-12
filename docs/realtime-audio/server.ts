@@ -1,5 +1,5 @@
-// Note: this is from backend gsm-outreach-tool github repository - this file exist only for context for AI
-// this code hosted on VPS which allows bypass Vercel 60s API request timeout limit
+// the VPS between the phone (AndroidGSM) and the browser (outreach-tool /dialer): commands to the phone, the phone's
+// events and the call audio to the browser. AndroidGSM/docs/realtime-audio/server.ts is a copy of this file
 import express from 'express'
 import cors from 'cors'
 import bodyParser from 'body-parser'
@@ -29,12 +29,31 @@ interface SimAccount {
   countryIso: string
 }
 
+// the phone's own Telecom state, sent with every heartbeat and at once on every change (CALL_STATE) - the browser's
+// status poll reads it, so its card follows the phone even when a CALL_ENDED / CALL_CONNECTED event went missing
+interface PhoneCall {
+  callState: 'idle' | 'dialing' | 'active' | 'ringing'
+  // the number of the call that is on ('' at idle or for a hidden number)
+  callNumber: string
+  // the browser's own id of that dial / answer ('' for a call started on the phone itself)
+  callDialId: string
+  // a call rings right now - alone, or waiting next to an active one
+  isRinging: boolean
+  ringingNumber: string
+  // what is paired to the phone - it is the call's output and mic: 'bluetooth' | 'wired' | 'none'
+  headset: string
+  // where the browser's "Mic vol" stands on this call: 'bluetooth' | 'codec' | 'none' | ''
+  micVol: string
+}
+
 interface DeviceInfo {
   deviceToken: string
   lastSeen: Date
   sims?: SimAccount[]
   isServiceActive?: boolean
   isTestActive?: boolean
+  // undefined = a phone build that sends no call state
+  call?: PhoneCall
 }
 
 // every map below keys on deviceKey(bearer, deviceToken) - one VPS, many users: a laptop reaches only the phones that
@@ -60,6 +79,14 @@ const androidByDevice = new Map<string, WebSocket>()
 // the one browser socket that gets the call audio - the tab that sent { type: "audio-owner" } on Call / Answer;
 // no owner = every browser socket of the phone gets it
 const audioOwnerByDevice = new Map<string, WebSocket>()
+// the call audio the phone sent while no browser socket of the phone was open (the laptop's Wi-Fi dropped): the newest
+// HELD_CHUNKS_MAX chunks (20 ms each = 2 s), sent to the first socket that is back - it plays them at double speed and
+// is on live sound again (outreach-tool useInitGSM drainAndSchedule)
+type HeldChunk = { frame: string; heldAt: number }
+const heldChunksByDevice = new Map<string, HeldChunk[]>()
+const HELD_CHUNKS_MAX = 100
+// a chunk that waited longer than this is the end of a call that is over, never a drop
+const HELD_CHUNK_MAX_AGE_MS = 5000
 
 type BrowserEvent =
   | 'gsm:device-connected'
@@ -68,7 +95,7 @@ type BrowserEvent =
   | 'gsm:call-ended'
   | 'gsm:incoming-call'
   | 'gsm:incoming-call-ended'
-  | 'gsm:call-report'
+  | 'gsm:call-log-row'
   | 'gsm:call-log'
   | 'gsm:recording-uploaded'
   | 'gsm:recording-failed'
@@ -77,6 +104,44 @@ type BrowserEvent =
   | 'gsm:music-stopped'
   | 'gsm:music-drops'
   | 'gsm:sms-opt-out'
+
+// the VPS's part of a dial's quality log (outreach-tool dialer, 10.11.2026): the lead's voice from the answer to the
+// hang-up - a long gap between 2 phone chunks = the phone's upload stalled, a browser socket backlog = the laptop's
+// download lags. The phone's 📶 / 🌐 lines (DIAL_QUALITY) and the laptop's 💻 line (dial-quality) land next to it
+type RelayStats = { startedAt: number; lastChunkAt: number; chunks: number; maxGapMs: number; slowGaps: number; maxBacklogBytes: number }
+const relayStatsByDevice = new Map<string, RelayStats>()
+const SLOW_GAP_MS = 300
+// the phone sends 20 ms chunks - 50 a second is real time
+const CHUNKS_PER_SECOND = 50
+const MAX_DIAL_QUALITY_LINE = 2000
+
+function countRelayedChunk(key: string, receivers: WebSocket[]) {
+  const stats = relayStatsByDevice.get(key)
+  if (!stats) return
+  const now = Date.now()
+  if (stats.lastChunkAt) {
+    const gapMs = now - stats.lastChunkAt
+    stats.maxGapMs = Math.max(stats.maxGapMs, gapMs)
+    if (gapMs > SLOW_GAP_MS) stats.slowGaps++
+  }
+  stats.lastChunkAt = now
+  stats.chunks++
+  for (const receiver of receivers) stats.maxBacklogBytes = Math.max(stats.maxBacklogBytes, receiver.bufferedAmount)
+}
+
+function logRelayStats(bearer: string, key: string) {
+  const stats = relayStatsByDevice.get(key)
+  if (!stats) return
+  relayStatsByDevice.delete(key)
+  const durationSec = Math.max(1, Math.round((Date.now() - stats.startedAt) / 1000))
+  const clock = `${Math.floor(durationSec / 60)}:${String(durationSec % 60).padStart(2, '0')}`
+  serverLog(
+    bearer,
+    `🌐 DIAL ${clock} VPS relay · ${stats.chunks} chunks from the phone, ${(stats.chunks / durationSec).toFixed(1)}/s (${CHUNKS_PER_SECOND} = real time)` +
+      ` · phone->VPS gaps over ${SLOW_GAP_MS} ms: ${stats.slowGaps}, longest ${stats.maxGapMs} ms` +
+      ` · VPS->laptop backlog max ${Math.round(stats.maxBacklogBytes / 1024)} KB`,
+  )
+}
 
 // one frame to every open browser socket of the phone - returns how many got it
 function sendToBrowsers(bearer: string, deviceToken: string, frame: string) {
@@ -93,10 +158,36 @@ function sendToBrowsers(bearer: string, deviceToken: string, frame: string) {
   return sent
 }
 
-// a phone -> browser event over the browser's own /ws/audio socket - the one road, the audio already runs on it
+// a phone -> browser event over the browser's own /ws/audio socket - the one road, the audio already runs on it.
+// The frame's own keys come last: an event's data with a `type` of its own (CALL_REPORT's "outgoing") in front of them
+// takes the frame type's place, and the browser finds no handler for the frame
 function forwardToBrowser(bearer: string, deviceToken: string, type: BrowserEvent, data: object = {}) {
-  const sent = sendToBrowsers(bearer, deviceToken, JSON.stringify({ type, deviceToken, ...data, timestamp: new Date().toISOString() }))
+  const sent = sendToBrowsers(bearer, deviceToken, JSON.stringify({ ...data, type, deviceToken, timestamp: new Date().toISOString() }))
   serverLog(bearer, `[ws/audio] ${type} forwarded to ${sent} browser socket(s) for ${deviceToken}`)
+}
+
+function holdChunk(key: string, frame: string) {
+  const heldChunks = heldChunksByDevice.get(key) ?? []
+  heldChunks.push({ frame, heldAt: Date.now() })
+  if (heldChunks.length > HELD_CHUNKS_MAX) heldChunks.shift()
+  heldChunksByDevice.set(key, heldChunks)
+}
+
+// the browser socket that is back gets what it missed, in the order the phone sent it
+function sendHeldChunks(bearer: string, key: string, receiver: WebSocket) {
+  const heldChunks = heldChunksByDevice.get(key)
+  if (!heldChunks) return
+  heldChunksByDevice.delete(key)
+  const now = Date.now()
+  const frames = heldChunks.filter(({ heldAt }) => now - heldAt <= HELD_CHUNK_MAX_AGE_MS).map(({ frame }) => frame)
+  if (!frames.length) return
+  try {
+    for (const frame of frames) receiver.send(frame)
+    const heldMs = Math.round((frames.length * 1000) / CHUNKS_PER_SECOND)
+    serverLog(bearer, `⏩ [ws/audio] ${frames.length} held chunks (${heldMs} ms) sent to the browser socket that is back`)
+  } catch (err) {
+    console.error('❌ [ws/audio] failed to send the held chunks', { err: String(err) })
+  }
 }
 
 // SMS blast (outreach-tool /dbr): POST /api/sms/send waits for the phone's own SMS_SENT / SMS_FAILED for its requestId
@@ -260,6 +351,8 @@ app.get('/api/device-status/:deviceToken', (req, res) => {
     sims: device.sims ?? [],
     isServiceActive: device.isServiceActive ?? false,
     isTestActive: device.isTestActive ?? false,
+    // null = this phone's build sends no call state yet
+    call: device.call ?? null,
   })
 })
 
@@ -400,10 +493,11 @@ app.post('/api/commands', async (req, res) => {
   if (commands.type !== 'SET_GAIN' && commands.type !== 'AUDIO_CHUNK') serverLog(bearer, 'ℹ️ [api/commands] accepted', { deviceToken, type: commands.type })
 
   // the call state reaches the browser at once - no wait for the phone to echo the event back over /ws/cmd
+  // dialId = the browser's own id of the dial it starts / ends - a frame of the dial before never ends the new one
   if (commands.type === 'CALL_ENDED') {
-    forwardToBrowser(bearer, deviceToken, 'gsm:call-ended')
+    forwardToBrowser(bearer, deviceToken, 'gsm:call-ended', { dialId: commands.data?.dialId })
   } else if (commands.type === 'CALL_STARTED' || commands.type === 'MAKE_CALL') {
-    forwardToBrowser(bearer, deviceToken, 'gsm:call-started', { number: commands.data?.number })
+    forwardToBrowser(bearer, deviceToken, 'gsm:call-started', { number: commands.data?.number, dialId: commands.data?.dialId })
   }
 
   sendCommand(bearer, deviceToken, commands.type, commands.data || {})
@@ -530,6 +624,12 @@ wss.on('connection', (ws, req) => {
         return
       }
 
+      // the laptop's 💻 line of a dial that just ended (outreach-tool useInitGSM) - into the Logs box
+      if (msg.type === 'dial-quality' && typeof msg.line === 'string') {
+        serverLog(bearer, msg.line.slice(0, MAX_DIAL_QUALITY_LINE))
+        return
+      }
+
       const { role, deviceToken, dir } = msg
       if (!role || !deviceToken || !dir) return
       const key = deviceKey(bearer, deviceToken)
@@ -543,6 +643,7 @@ wss.on('connection', (ws, req) => {
         const peers = browserByDevice.get(key) ?? new Set<WebSocket>()
         peers.add(ws)
         browserByDevice.set(key, peers)
+        sendHeldChunks(bearer, key, ws)
       }
       if (role === 'android') androidByDevice.set(key, ws)
 
@@ -559,15 +660,20 @@ wss.on('connection', (ws, req) => {
         // No android peer → silently drop. Browser is told via gsm:call-ended to stop the mic.
       } else if (dir === 'toBrowser') {
         // the tab that claimed the audio gets it; no claim = every browser socket of the phone (1 tab on /dialer today)
+        const frame = JSON.stringify(msg)
         const owner = audioOwnerByDevice.get(key)
         if (owner?.readyState === WebSocket.OPEN) {
           try {
-            owner.send(JSON.stringify(msg))
+            owner.send(frame)
           } catch (err) {
             console.error('❌ [ws/audio] failed to send to the audio-owner peer', { deviceToken, err: String(err) })
           }
+          countRelayedChunk(key, [owner])
         } else {
-          sendToBrowsers(bearer, deviceToken, JSON.stringify(msg))
+          // no open browser socket = the laptop's internet dropped - the audio waits for the socket that comes back
+          const sentCount = sendToBrowsers(bearer, deviceToken, frame)
+          if (!sentCount && msg.audio !== undefined) holdChunk(key, frame)
+          countRelayedChunk(key, [...(browserByDevice.get(key) ?? [])])
         }
       }
     } catch (err) {
@@ -582,13 +688,20 @@ wss.on('connection', (ws, req) => {
       if (!peers.size) browserByDevice.delete(k)
     }
     for (const [k, owner] of audioOwnerByDevice) if (owner === ws) audioOwnerByDevice.delete(k)
-    // When the Android audio peer drops, the call audio path is gone — the browser gets gsm:call-ended
-    // so the UI exits the in-call state even if the cmd-WS CALL_ENDED event was lost
-    // (MIUI stopping the cmd thread, etc).
+    // The Android audio peer dropped. The audio socket runs over the phone's internet, the call over the SIM - a
+    // Wi-Fi drop ends the socket and never the call, and gsm:call-ended here leaves the browser on "Ready" with the
+    // lead still on the line. A phone that reports its call state ends its calls itself (CALL_ENDED with the dialId,
+    // callState idle in the status poll); only a build that reports none still gets this frame
     for (const [k, v] of androidByDevice) {
       if (v === ws) {
         androidByDevice.delete(k)
         const deviceToken = deviceTokenOf(k, bearer)
+        logRelayStats(bearer, k)
+        const call = connectedDevices.get(k)?.call
+        if (call) {
+          serverLog(bearer, `[ws/audio] android audio peer dropped for ${deviceToken}, the phone's call state: ${call.callState}`)
+          continue
+        }
         serverLog(bearer, `[ws/audio] android audio peer dropped, firing gsm:call-ended for ${deviceToken}`)
         forwardToBrowser(bearer, deviceToken, 'gsm:call-ended')
       }
@@ -625,10 +738,24 @@ wsCmd.on('connection', (ws, req) => {
       // Heartbeat and explicit-connect hold the current service/test state from Android
       if (data?.isServiceActive !== undefined) updated.isServiceActive = !!data.isServiceActive
       if (data?.isTestActive !== undefined) updated.isTestActive = !!data.isTestActive
+      // the heartbeat, the explicit connect and CALL_STATE all hold the phone's own call state
+      if (typeof data?.callState === 'string') {
+        updated.call = {
+          callState: data.callState,
+          callNumber: typeof data.callNumber === 'string' ? data.callNumber : '',
+          callDialId: typeof data.callDialId === 'string' ? data.callDialId : '',
+          isRinging: data.isRinging === true,
+          ringingNumber: typeof data.ringingNumber === 'string' ? data.ringingNumber : '',
+          headset: typeof data.headset === 'string' ? data.headset : 'none',
+          micVol: typeof data.micVol === 'string' ? data.micVol : '',
+        }
+      }
       connectedDevices.set(tokKey, updated)
 
-      // CONNECTED is the 8s heartbeat — silence it to keep logs readable
-      if (eventType !== 'CONNECTED') serverLog(bearer, `📱 [ws/cmd] event: ${eventType} from ${tok}`)
+      // CONNECTED is the 8s heartbeat — silence it to keep logs readable; DIAL_QUALITY and CALL_STATE have their own line
+      if (eventType !== 'CONNECTED' && eventType !== 'DIAL_QUALITY' && eventType !== 'CALL_STATE') {
+        serverLog(bearer, `📱 [ws/cmd] event: ${eventType} from ${tok}`)
+      }
 
       // only state-change events go to the browser — not heartbeats
       switch (eventType) {
@@ -654,17 +781,28 @@ wsCmd.on('connection', (ws, req) => {
           serverLog(bearer, `✅ [ws/cmd] device-connected: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:device-connected')
           break
+        case 'CALL_STATE':
+          // kept above (updated.call) - the browser reads it with its status poll; one line per change in the Logs box
+          serverLog(bearer, `📱 [ws/cmd] CALL_STATE ${data?.callState ?? '?'}${data?.isRinging ? ' + a ring' : ''}: ${tok}`)
+          break
         case 'CALL_CONNECTED':
           serverLog(bearer, `📞 [ws/cmd] CALL_CONNECTED: ${tok}`)
-          forwardToBrowser(bearer, tok, 'gsm:call-connected')
+          relayStatsByDevice.set(tokKey, { startedAt: Date.now(), lastChunkAt: 0, chunks: 0, maxGapMs: 0, slowGaps: 0, maxBacklogBytes: 0 })
+          forwardToBrowser(bearer, tok, 'gsm:call-connected', { dialId: data?.dialId })
           break
         case 'CALL_ENDED':
           serverLog(bearer, `❌ [ws/cmd] CALL_ENDED: ${tok}`)
-          forwardToBrowser(bearer, tok, 'gsm:call-ended')
+          heldChunksByDevice.delete(tokKey)
+          logRelayStats(bearer, tokKey)
+          forwardToBrowser(bearer, tok, 'gsm:call-ended', { dialId: data?.dialId })
+          break
+        case 'DIAL_QUALITY':
+          // the phone's 📶 lead side + 🌐 phone internet lines of the dial that just ended (DialQualityLog.kt)
+          if (typeof data?.line === 'string') serverLog(bearer, data.line.slice(0, MAX_DIAL_QUALITY_LINE))
           break
         case 'INCOMING_CALL':
           // she rings on the phone (plan-05 task 7) - every tab of the user shows "Incoming · <number>" with
-          // [Answer] [Decline]; an empty number is a hidden one. The laptop answers with ANSWER_CALL / DECLINE_CALL
+          // [Ignore] [Answer]; an empty number is a hidden one. The laptop answers with ANSWER_CALL / IGNORE_CALL
           serverLog(bearer, `📲 [ws/cmd] INCOMING_CALL from ${data?.number || 'hidden number'}: ${tok}`)
           forwardToBrowser(bearer, tok, 'gsm:incoming-call', { number: typeof data?.number === 'string' ? data.number : '' })
           break
@@ -675,9 +813,10 @@ wsCmd.on('connection', (ws, req) => {
           break
         case 'CALL_REPORT':
           // the row of the call that just ended, from the phone's own call log (plan-05 task 8):
-          // { id, number, type, startedAt, talkSec } - or { error } when the phone has no call log access
+          // { id, number, type, startedAt, talkSec, hasRecording } - or { error } when the phone has no call log access.
+          // The row goes under `row`, so its own `type` ("outgoing") stays apart from the frame's type
           serverLog(bearer, `📒 [ws/cmd] CALL_REPORT ${data?.type ?? ''} ${data?.number || data?.error || ''}: ${tok}`)
-          forwardToBrowser(bearer, tok, 'gsm:call-report', data ?? {})
+          forwardToBrowser(bearer, tok, 'gsm:call-log-row', typeof data?.error === 'string' ? { error: data.error } : { row: data ?? {} })
           break
         case 'CALL_LOG':
           // the phone's newest call log rows, the answer to the laptop's GET_CALL_LOG (plan-05 task 9): { rows } or { error }

@@ -330,6 +330,10 @@ AudioWebSocketHandler   WS duplex audio (/ws/audio).
 
 WebSocketAudioClient    OkHttp WS; sends registration packet on open; routes command
                         messages (type="command") to onCommand callback.
+                        While its socket is down (a Wi-Fi drop) sendAudioChunk keeps the newest
+                          100 chunks (2 s) in heldChunks; the socket is back after 0.5 s, then
+                          1 s / 2 s / 4 s / 5 s, and onOpen sends the held chunks in order - the
+                          website plays them at double speed (outreach-tool Dialer plan-09 task 15).
 
 RootUtils               su -c with 3s timeout + stream-draining threads.
                         Uses set_mixer_ctl native binary (assets/set_mixer_ctl, arm64 ELF)
@@ -500,7 +504,8 @@ nextPlayTime += chunkDuration
    → server: gsm:call-ended frame over the browser's /ws/audio → browser (stops playout)
    → CallController.reportCall (every call, a manual one too): polls the phone's own call log up to 3 s for the
      row started at or after Telecom added the call → CALL_REPORT { id, number, type, startedAt, talkSec }
-     → server: gsm:call-report → the browser's "Recent Calls" row (her number, the talk time) - plan-05 task 8
+     → server: gsm:call-log-row { row } → the browser's "Recent Calls" row (her number, the talk time) - plan-05
+       task 8 (gsm:call-report until 12.11.2026 - the row's own `type` replaced the frame's and no row arrived)
 ```
 
 ## Incoming call (plan-05 task 7, 06.11.2026)
@@ -563,18 +568,61 @@ Frontend clicks STOP TEST:
 
 ## Gain control
 
-Playback volume is controlled from the frontend — no phone UI sliders. There is no mic gain any more (2026-11-02):
-the browser mic never reaches the remote party on a GSM call (the firmware wall above), so it had nothing to act on.
+Both volumes are set from the frontend's gear menu — no phone UI sliders (outreach-tool Dialer plan-09 task 6,
+12.11.2026). The browser mic never reaches the remote party on a GSM call (the firmware wall above), so "Mic vol" acts
+on the phone's side.
 
 ```
-Frontend setPlaybackGain(value)   ("Playback Vol", 0.7 by default)
-  → POST /api/gsm/commands { type: "SET_GAIN", data: { playbackGain: value } }
-  → server sends SET_GAIN command over /ws/cmd
+"Output vol" - how loud the operator hears the lead (useGSMStore.outputVol, 0..4 = 0..400%, 70% by default)
+  → POST /api/gsm/commands { type: "SET_GAIN", data: { playbackGain } }  (250 ms after the last move of the slider)
   → GsmService.handleWsCommand("SET_GAIN") → AudioWebSocketHandler.playbackGain
-  → CallController.onPlaybackGainChanged() → applyPhoneAudibility(): on a Bluetooth / wired headset the voice volume
-    follows it (1.0 and above = max, never under step 1) - the headset is the call's output on a browser-driven call
+  → CallController.onPlaybackGainChanged() → applyPhoneAudibility() → setHeadsetCallVolume():
+      a Bluetooth headset → STREAM_BLUETOOTH_SCO (stream 6): 100% and above = its max, 0% = its lowest step
+      a wired headset     → STREAM_VOICE_CALL, never under step 1
+      no headset          → nothing on the phone: the website plays the call at that gain
+  Until 12.11.2026 both headsets got STREAM_VOICE_CALL. While a call is on a Bluetooth headset Android drops every
+  change of that stream (AudioPolicyManager "do not change in call volume if bluetooth is connected") - the slider
+  changed nothing in the headset.
 While it rings with music on, the frontend lowers the gain to its "ringing while music plays" percent and sends it
 again on the answer (useInitGSM effect 5b) - the ringback sits under the music in the headset.
+
+"Mic vol" - how loud the lead hears the operator (useGSMStore.micVol, 0..4, 100% = the phone's own level)
+  → SET_GAIN { micGain } → AudioWebSocketHandler.micGain → CallController.onMicGainChanged() → applyMicGain():
+      the phone's own mic / a wired headset's mic → RootUtils.updateMicVolume: the codec's "DEC1..5 Volume" controls
+        (1 dB a step), each one's own step + 20·log10(micGain) dB; teardownCall sets every step back
+      a Bluetooth headset's mic → nothing: its sound goes from the Bluetooth radio straight into the voice DSP, no
+        mixer control of the phone sits on that road. micVol = "bluetooth" goes to the website, its slider is off
+  100% with nothing changed before is left alone - a call that never touched the slider executes no root command.
+  "DEC1..5 Volume" are the sdm660 internal codec's names (the same codec "EAR_S" / "SPK" belong to); a phone without
+  them answers micVol = "none" and the website shows that under the slider.
+```
+
+## One output for the call's sound (outreach-tool Dialer plan-09 task 5, 12.11.2026)
+
+```
+a headset paired to the phone (Telecom route BLUETOOTH / WIRED_HEADSET; before the call has a route: a headset is
+connected) → the headset plays the call: the network's own ringback, then the lead's voice
+  → AudioWebSocketHandler.isAudioToBrowserOn = false: no generated ringback, no downlink chunk goes to the website
+  → tinycap keeps going - CallRecorder's tee still gets every chunk
+no headset → the website is the output: the generated ringback while it rings, the downlink after the answer
+```
+
+Both outputs at once were the operator's double "tyyy": the headset played the network's ringback, the laptop the
+generated one. The stream to the website also went over the phone's 2.4 GHz Wi-Fi, the radio its Bluetooth call link
+shares - for the same reason a recording's upload waits for a free line (`CallRecorder.upload`).
+
+## The phone's own call state + dialId (outreach-tool Dialer plan-09 task 8, 12.11.2026)
+
+```
+CALL_STARTED { number, dialId } / ANSWER_CALL { dialId } - the laptop's own id of the call
+  → GsmInCallService keeps it per Telecom Call (onCallAdded for a dial, setRingingDialId for an answer)
+  → CALL_CONNECTED { dialId } / CALL_ENDED { dialId } name the call they are about - the laptop skips the end of
+    another call than the one on its card (a late CALL_ENDED of the call before ended the next dial's card)
+CALL_STATE { callState: "idle" | "dialing" | "active" | "ringing", callNumber, callDialId, isRinging, ringingNumber,
+             headset: "bluetooth" | "wired" | "none", micVol } - on every Telecom change, and inside every heartbeat
+  → the server keeps it, the laptop's status poll reads it: its card ends up on the phone's state even when 1 event
+    went missing (a call still on with "Ready" on the laptop, 09.11.2026)
+SET_MIC_MUTED { isMuted } - the laptop's [Mute]: Telecom's own mute of the call's mic (the phone's / the headset's)
 ```
 
 ---
