@@ -232,6 +232,12 @@ class GsmDialer(private val context: Context, private val log: GsmLogger = { Mai
         } else {
             log("⚠️ No Call object — falling back to TelecomManager.endCall()")
         }
+        // TelecomManager.endCall() rejects a ringing call before it ends anything else - a hang-up of the laptop's own
+        // dial must never take a ring away (outreach-tool plan-09 task 9)
+        if (GsmInCallService.hasRingingCall) {
+            log("⚠️ TelecomManager.endCall() skipped: a call rings and this hang-up is not for it")
+            return
+        }
         try {
             val telecomManager = context.getSystemService(Context.TELECOM_SERVICE) as? TelecomManager
             @Suppress("MissingPermission")
