@@ -228,6 +228,43 @@ object RootUtils {
         Log.d(TAG, "✅ Incall injection disabled")
     }
 
+    // The codec's 5 mic volume controls (1 dB a step, 84 = 0 dB, 0..124): the phone's own mics and a wired headset's
+    // mic run through them on their way into the call. A Bluetooth headset's mic never does.
+    private val MIC_VOLUME_CONTROLS = (1..5).map { "DEC$it Volume" }
+    private const val MIC_VOLUME_MAX_STEP = 124
+    // each control's step before the website's "Mic vol" changed it - restoreMicVolume sets it back
+    private val micVolumeStepsBefore = mutableMapOf<String, Int>()
+
+    // "DEC1 Volume: 84 (range 0->124)" -> 84; null = this phone has no such control
+    private fun selectMixerStep(control: String): Int? {
+        val (_, output) = runSuCommand("tinymix '$control'")
+        return Regex(""":\s*(-?\d+)""").find(output)?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    // The website's "Mic vol" (SET_GAIN micGain) on the codec's mic volume: 1.0 = the step the phone itself set,
+    // 2.0 = +6 dB, 0.5 = -6 dB, 0 = the lowest step. true = at least 1 control took it.
+    @Synchronized
+    fun updateMicVolume(micGain: Float): Boolean {
+        val gainDb = if (micGain <= 0f) -MIC_VOLUME_MAX_STEP else Math.round(20 * Math.log10(micGain.toDouble())).toInt()
+        var isApplied = false
+        for (control in MIC_VOLUME_CONTROLS) {
+            val stepBefore = micVolumeStepsBefore[control] ?: selectMixerStep(control) ?: continue
+            micVolumeStepsBefore[control] = stepBefore
+            val step = (stepBefore + gainDb).coerceIn(0, MIC_VOLUME_MAX_STEP)
+            val (exit, output) = runSuCommand("tinymix '$control' $step")
+            if (exit == 0) isApplied = true
+            else Log.w(TAG, "⚠️ could not set $control to $step (exit=$exit): $output")
+        }
+        return isApplied
+    }
+
+    // the call ended - every mic volume control goes back to the step the phone itself set
+    @Synchronized
+    fun restoreMicVolume() {
+        for ((control, step) in micVolumeStepsBefore) runSuCommand("tinymix '$control' $step")
+        micVolumeStepsBefore.clear()
+    }
+
     // Mute earpiece + speaker output so call audio is inaudible on the phone.
     fun mutePhoneSpeaker(): Boolean {
         var ok = true

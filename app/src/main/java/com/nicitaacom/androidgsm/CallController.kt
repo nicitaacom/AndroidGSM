@@ -1,8 +1,10 @@
 package com.nicitaacom.androidgsm
 
 import android.content.Context
+import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import android.telecom.Call
 import android.telecom.CallAudioState
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.roundToInt
@@ -64,9 +66,23 @@ class CallController(
     // -1 = nothing captured (manual call).
     @Volatile private var voiceVolumeBeforeCall = -1
 
+    // The same for a Bluetooth headset: its call volume is a stream of its own (STREAM_BLUETOOTH_SCO), captured the
+    // first time the website's "Output vol" sets it. -1 = this call never touched it.
+    @Volatile private var scoVolumeBeforeCall = -1
+
     // ANSWER_CALL came while a call was on and another one rang next to it (outreach-tool plan-05 task 19): the laptop
     // hangs the active call up first, and the ringing one is answered once Telecom removed the active one
     @Volatile private var isAnswerAfterEnd = false
+    // that ANSWER_CALL's dialId - the waiting call gets it once it is answered
+    @Volatile private var answerAfterEndDialId: String? = null
+
+    // ms of the laptop's last CALL_STARTED - callStateMap counts the dial as on until Telecom has added its call
+    @Volatile private var browserCallStartedAtMs = 0L
+
+    // "bluetooth" | "codec" | "none" | "" - where the website's "Mic vol" stands on this call: a Bluetooth headset's
+    // mic has no volume on the phone, the phone's own mic / a wired mic took it ("codec"), no mixer control took it
+    // ("none"), nothing was asked yet (""). Goes out with the call state, the website's gear menu shows it
+    @Volatile private var micVolStatus = ""
 
     private val audioManager: AudioManager by lazy {
         context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
@@ -81,7 +97,7 @@ class CallController(
     private val callSounds = CallSounds(context, log)
 
     // plan-06 task 2: records every answered call while "record every call" is on
-    private val callRecorder = CallRecorder(context, audioWsHandlerRef, log)
+    private val callRecorder = CallRecorder(context, audioWsHandlerRef, log, isCallOn = { isCallActive })
 
     // every answered call's 📶 lead side + 🌐 phone internet lines for the website's Logs box
     private val dialQualityLog = DialQualityLog(context, cmdWsClient, audioWsHandlerRef, log)
@@ -106,6 +122,8 @@ class CallController(
         GsmInCallService.onCallDisconnected = { onCallDisconnected() }
         GsmInCallService.onIncomingCall = { number -> onIncomingCall(number) }
         GsmInCallService.onIncomingCallEnded = { onIncomingCallEnded() }
+        // every Telecom change at once - the VPS keeps it, the laptop's status poll reads it (plan-09 task 8)
+        GsmInCallService.onCallStateChanged = { cmdWsClient()?.sendEvent("CALL_STATE", callStateMap()) }
 
         // Authoritative "call ended" signal. Telecom's onCallRemoved fires the INSTANT the call
         // ends — far faster/more reliable than MIUI's PhoneStateListener IDLE (which can lag ~10s
@@ -113,18 +131,35 @@ class CallController(
         // against double-run, so the later IDLE event is a harmless no-op.
         // A ring nobody answered (she gave up, the ring timed out after [Ignore]) set up no audio, so teardownCall's
         // CALL_ENDED never comes for it - INCOMING_CALL_ENDED is the laptop's one sign that nothing rings any more.
-        GsmInCallService.onCallEnded = {
+        GsmInCallService.onCallEnded = { endedDialId ->
             if (isCallActive || audioWsHandlerRef.handler != null) {
                 log("📴 Call removed (Telecom) — tearing down audio immediately")
-                teardownCall()
+                teardownCall(endedDialId)
             } else onIncomingCallEnded()
             reportCall()
             if (isAnswerAfterEnd) {
                 isAnswerAfterEnd = false
-                handleAnswerCall()
+                val dialId = answerAfterEndDialId
+                answerAfterEndDialId = null
+                handleAnswerCall(dialIdData(dialId))
             }
         }
     }
+
+    // the phone's own call state for the heartbeat and CALL_STATE: Telecom's state + what is paired to the phone (the
+    // call's output and mic) + where "Mic vol" stands. The laptop's dial counts as "dialing" from CALL_STARTED on -
+    // Telecom adds its call up to DIAL_PLACE_WAIT_MS later, and "idle" in that gap would read as "the dial is gone"
+    fun callStateMap(): Map<String, Any> {
+        val telecomState = GsmInCallService.callStateMap()
+        val isDialBeingPlaced = telecomState["callState"] == "idle" && isCallActive && browserDrivenCall &&
+            System.currentTimeMillis() - browserCallStartedAtMs < DIAL_PLACE_WAIT_MS
+        return telecomState +
+            (if (isDialBeingPlaced) mapOf("callState" to "dialing") else emptyMap()) +
+            mapOf("headset" to headsetName(), "micVol" to micVolStatus)
+    }
+
+    private fun dialIdData(dialId: String?): Map<String, Any> =
+        if (dialId.isNullOrBlank()) emptyMap() else mapOf("dialId" to dialId)
 
     // the row of the call that just ended, from the phone's own call log, to the laptop's "Recent Calls" (plan-05
     // task 8) - every call, a manual one too. Android inserts the row a moment after onCallRemoved, so this polls up
@@ -219,6 +254,8 @@ class CallController(
                 audioWsHandlerRef.handler?.setCallActive(true)
                 audioWsHandlerRef.handler?.startAudioCapture()
                 applyPhoneAudibility()
+                applyAudioToBrowser()
+                applyMicGain()
                 // Uplink injection via Incall_Music mixer is NOT used — MIUI CAF kernel
                 // blocks slot 1 (VoiceMMode2) ELEM_WRITE silently. Instead, startAudioPlayback()
                 // writes browser mic PCM directly to /dev/snd/pcmC0D19p (VoiceMMode2 TX PCM device).
@@ -234,7 +271,7 @@ class CallController(
     private fun sendCallConnectedIfAnswered(source: String) {
         if (source != SOURCE_ANSWERED) return
         if (!callAnsweredSent.compareAndSet(false, true)) return
-        cmdWsClient()?.sendEvent("CALL_CONNECTED", emptyMap())
+        cmdWsClient()?.sendEvent("CALL_CONNECTED", dialIdData(GsmInCallService.currentDialId))
         log("📞 CALL_CONNECTED sent to backend ($source)")
         callRecorder.start()
         dialQualityLog.start(dialSubscriptionId)
@@ -243,12 +280,18 @@ class CallController(
     // Single teardown path for call end — called from GsmDialer callback only.
     // PhoneStateListener IDLE is a safety net that calls this too, but only if still active.
     // Marked internal so GsmService can call it from the PhoneStateListener safety net.
-    internal fun teardownCall() {
+    // endedDialId: the laptop's id of the call that ended (GsmInCallService.onCallRemoved knows it per call); the IDLE
+    // paths have no call at hand and take the one still current.
+    internal fun teardownCall(endedDialId: String? = GsmInCallService.currentDialId) {
         setCallActive(false)
         // before the capture below stops - the recording ends with the call, not with the "call ended" cue
         callRecorder.stop()
         // before the audio socket below is dropped - its upload backlog is part of the line
         dialQualityLog.stop()
+        // The laptop may dial again while this teardown still waits for the end cue (up to 1.5 s): this call's handler
+        // is taken here, so the socket the next dial opens for itself is never the one dropped below
+        val handler = audioWsHandlerRef.handler
+        audioWsHandlerRef.handler = null
         dialSubscriptionId = null
         // Cleared so the next call's connect signal is honored; the old value says whether this
         // call ever connected (busy / no answer never did).
@@ -277,31 +320,38 @@ class CallController(
             // Every call: a manual call's cue (started in onCallDisconnected) may still be sounding
             // too, and the mode reset below would re-route it mid-clip. No-op when nothing plays.
             callSounds.awaitFinished()
-            // The cue is over — the operator's own voice volume comes back, not the cue's max, so
-            // the next call (manual, or this gateway's next ring) does not start at full blast.
-            restoreVoiceVolume()
-            am.isSpeakerphoneOn = false
-            am.mode = AudioManager.MODE_NORMAL
+            // the mic level the website's "Mic vol" changed goes back to the phone's own
+            if (micVolStatus == MIC_VOL_CODEC) RootUtils.restoreMicVolume()
+            micVolStatus = ""
+            // The laptop dialed again while the cue played - the volume and the mode are that call's now
+            if (!isCallActive) {
+                // The cue is over — the operator's own voice volume comes back, not the cue's max, so
+                // the next call (manual, or this gateway's next ring) does not start at full blast.
+                restoreVoiceVolume()
+                am.isSpeakerphoneOn = false
+                am.mode = AudioManager.MODE_NORMAL
+            }
         } catch (_: Exception) {}
         try {
-            audioWsHandlerRef.handler?.setCallActive(false)
-            audioWsHandlerRef.handler?.stopAudioCapture()
-            audioWsHandlerRef.handler?.stopAudioPlayback()
-            audioWsHandlerRef.handler?.disconnect()
-            audioWsHandlerRef.handler = null
+            handler?.setCallActive(false)
+            handler?.stopAudioCapture()
+            handler?.stopAudioPlayback()
+            handler?.disconnect()
         } catch (_: Exception) {}
+        // dialId: the laptop ends the card of this call only - a later dial's card stays (plan-09 task 8)
+        val endedData = dialIdData(endedDialId)
         Thread {
             repeat(3) { attempt ->
                 val client = cmdWsClient()
                 if (client?.isConnected == true) {
-                    client.sendEvent("CALL_ENDED", emptyMap())
+                    client.sendEvent("CALL_ENDED", endedData)
                     log("📴 CALL_ENDED sent (attempt ${attempt + 1})")
                     return@Thread
                 }
                 log("📴 CALL_ENDED attempt ${attempt + 1} — WS not ready, retrying...")
                 Thread.sleep(500)
             }
-            cmdWsClient()?.sendEvent("CALL_ENDED", emptyMap())
+            cmdWsClient()?.sendEvent("CALL_ENDED", endedData)
             log("📴 CALL_ENDED final attempt sent")
         }.start()
     }
@@ -315,10 +365,15 @@ class CallController(
             }
             val simAccountId = data["simAccountId"] as? String
             val simComponentName = data["simComponentName"] as? String
+            // the laptop's own id of this dial - Telecom's next outgoing call gets it, CALL_CONNECTED / CALL_ENDED send it back
+            val dialId = data["dialId"] as? String
             log("Starting call to: $number (sim=$simAccountId)")
             dialSubscriptionId = simAccountId?.let { runCatching { gsmDialer?.selectSubscriptionId(it) }.getOrNull() }
             voiceVolumeBeforeCall = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
             isAnswerAfterEnd = false
+            answerAfterEndDialId = null
+            GsmInCallService.setNextOutgoingDialId(dialId)
+            browserCallStartedAtMs = System.currentTimeMillis()
             // Quiet from before the dial. Not enough on its own: the HAL rewrites the EAR_S/SPK mixer
             // when it brings up the voice path for the route a moment later, which is how the phone
             // rang along with the browser for the whole ringing phase — onPhoneRouteChanged() applies
@@ -328,6 +383,8 @@ class CallController(
             callAnsweredSent.set(false)
             browserDrivenCall = true
             setCallActive(true)
+            // "dialing" for the laptop's status poll right away, before Telecom has added the call
+            cmdWsClient()?.sendEvent("CALL_STATE", callStateMap())
             // GsmDialer callbacks (set once in wireDialerCallbacks) handle OFFHOOK and IDLE — do NOT
             // override setCallConnectedCallback here; doing so per-call created duplicate
             // teardown paths that fired triple CALL_ENDED events.
@@ -340,10 +397,10 @@ class CallController(
                     // and sent over /ws/audio, exactly like downlink call audio.
                     startRingbackToWebsite()
                 } else {
-                    abortBrowserCall("Call start failed - syncing CALL_ENDED state")
+                    abortBrowserCall("Call start failed - syncing CALL_ENDED state", dialId)
                 }
             } catch (error: Exception) {
-                abortBrowserCall("ERROR starting call: ${error.message}")
+                abortBrowserCall("ERROR starting call: ${error.message}", dialId)
                 error.printStackTrace()
             }
         } catch (e: Exception) {
@@ -368,22 +425,26 @@ class CallController(
     // [Answer] on the laptop: the ringing call becomes a browser-driven one - the phone stays quiet and the audio goes
     // to the laptop like an outgoing call's; Telecom's STATE_ACTIVE then runs onCallConnected(SOURCE_ANSWERED).
     // Answered on the phone itself it stays a manual, audible call (edge case 7)
-    fun handleAnswerCall() {
+    fun handleAnswerCall(data: Map<String, Any> = emptyMap()) {
+        // the laptop's own id of this answer - CALL_CONNECTED / CALL_ENDED send it back
+        val dialId = data["dialId"] as? String
         if (isCallActive) {
             if (!GsmInCallService.hasRingingCall) {
                 log("ANSWER_CALL ignored: a call is on and nothing else rings")
                 return
             }
             log("📲 ANSWER_CALL: the waiting call is answered once the active call ends")
+            answerAfterEndDialId = dialId
             isAnswerAfterEnd = true
             return
         }
         // the ring ended a moment before [Answer] - the laptop shows "Answering..." already, CALL_ENDED takes it back
         if (!GsmInCallService.hasRingingCall) {
             log("ANSWER_CALL: no ringing call - syncing CALL_ENDED state")
-            cmdWsClient()?.sendEvent("CALL_ENDED", emptyMap())
+            cmdWsClient()?.sendEvent("CALL_ENDED", dialIdData(dialId))
             return
         }
+        GsmInCallService.setRingingDialId(dialId)
         voiceVolumeBeforeCall = audioManager.getStreamVolume(AudioManager.STREAM_VOICE_CALL)
         callConnectedHandled.set(false)
         callAnsweredSent.set(false)
@@ -393,11 +454,19 @@ class CallController(
             try {
                 setPhoneQuiet()
                 if (GsmInCallService.answerRingingCall()) log("📲 Incoming call answered from the laptop")
-                else abortBrowserCall("ANSWER_CALL: the ringing call went away - syncing CALL_ENDED state")
+                else abortBrowserCall("ANSWER_CALL: the ringing call went away - syncing CALL_ENDED state", dialId)
             } catch (error: Exception) {
-                abortBrowserCall("ERROR answering the call: ${error.message}")
+                abortBrowserCall("ERROR answering the call: ${error.message}", dialId)
             }
         }.start()
+    }
+
+    // SET_MIC_MUTED from the laptop's [Mute]: the call's uplink is the phone's own mic / the headset's mic (the
+    // laptop's mic never reaches a GSM call), so the mute is Telecom's own
+    fun handleSetMicMuted(data: Map<String, Any>) {
+        val isMuted = data["isMuted"] as? Boolean ?: return
+        val isSet = GsmInCallService.updateMicMuted(isMuted)
+        log(if (isSet) "🎙️ SET_MIC_MUTED $isMuted" else "SET_MIC_MUTED ignored: no live call")
     }
 
     // IGNORE_CALL from the laptop ([Ignore] on the card, the ringing call alone or waiting next to an active one): the
@@ -454,14 +523,15 @@ class CallController(
     // A browser dial that never left the phone: undo handleCallStarted's pre-dial state and tell the
     // backend. Not teardownCall() — no audio path was opened yet. The unmute + volume matter: a
     // manual call stays audible by design now, so it must not inherit the quiet state armed here.
-    private fun abortBrowserCall(reason: String) {
+    private fun abortBrowserCall(reason: String, dialId: String?) {
         log(reason)
         browserDrivenCall = false
         setCallActive(false)
+        GsmInCallService.setNextOutgoingDialId(null)
         RootUtils.unmutePhoneSpeaker()
         restoreVoiceVolume()
         audioWsHandlerRef.handler?.disconnect()
-        cmdWsClient()?.sendEvent("CALL_ENDED", emptyMap())
+        cmdWsClient()?.sendEvent("CALL_ENDED", dialIdData(dialId))
     }
 
     // Opens the audio WS (if needed) during dialing and streams a ringback tone to the website.
@@ -481,12 +551,10 @@ class CallController(
                 while (handler.isWsConnected != true && System.currentTimeMillis() < deadline) {
                     Thread.sleep(100)
                 }
-                // Only start the tone if the call is still on and not yet answered (race with a fast answer).
-                if (handler.isWsConnected && isCallActive && !callAnsweredSent.get()) {
-                    handler.startRingback()
-                } else {
-                    log("⚠️ Ringback skipped (wsConnected=${handler.isWsConnected}, callActive=$isCallActive, answered=${callAnsweredSent.get()})")
-                }
+                // The tone starts only while the dial still rings out (race with a fast answer) and only when the
+                // website is the call's output - a headset paired to the phone plays the network's own ringback
+                if (handler.isWsConnected) applyAudioToBrowser()
+                else log("⚠️ Ringback skipped: the audio socket did not open in 5 s")
             } catch (e: Exception) {
                 log("ERROR starting ringback to website: ${e.message}")
             }
@@ -571,17 +639,35 @@ class CallController(
     }
 
     private fun restoreVoiceVolume() {
+        if (scoVolumeBeforeCall >= 0) {
+            audioManager.setStreamVolume(STREAM_BLUETOOTH_SCO, scoVolumeBeforeCall, 0)
+            scoVolumeBeforeCall = -1
+        }
         if (voiceVolumeBeforeCall < 0) return
         setVoiceVolume(voiceVolumeBeforeCall)
         voiceVolumeBeforeCall = -1
     }
 
-    // SET_GAIN playbackGain (the website's slider, 0..4, 0.7 by default) as a voice volume step: 1.0 and above
-    // is the max, never below step 1 so a headset is not left silent by a slider at 0.
-    private fun headsetVoiceVolume(playbackGain: Float): Int =
-        (maxVoiceVolume * playbackGain.coerceIn(0f, 1f)).roundToInt().coerceAtLeast(1)
+    // SET_GAIN playbackGain (the website's "Output vol", 0..4 = 0..400%) as the headset's call volume: 100% and
+    // above is the max. A Bluetooth headset has a volume stream of its own - while the call is on its link, Android
+    // drops every STREAM_VOICE_CALL change (AudioPolicyManager "do not change in call volume if bluetooth is
+    // connected"), so that stream changes nothing in the headset. 0% = the Bluetooth stream's lowest step.
+    private fun setHeadsetCallVolume(isBluetooth: Boolean): String {
+        val gain = AudioWebSocketHandler.playbackGain.coerceIn(0f, 1f)
+        if (isBluetooth) {
+            val max = audioManager.getStreamMaxVolume(STREAM_BLUETOOTH_SCO)
+            if (scoVolumeBeforeCall < 0) scoVolumeBeforeCall = audioManager.getStreamVolume(STREAM_BLUETOOTH_SCO)
+            val level = (max * gain).roundToInt()
+            audioManager.setStreamVolume(STREAM_BLUETOOTH_SCO, level, 0)
+            return "Bluetooth call volume $level/$max"
+        }
+        // a wired headset plays the voice-call stream; Android keeps it at step 1 or above
+        val level = (maxVoiceVolume * gain).roundToInt().coerceAtLeast(1)
+        setVoiceVolume(level)
+        return "voice volume $level/$maxVoiceVolume"
+    }
 
-    // Wired to GsmService's SET_GAIN: the website moved "Playback Vol", or its ringing percent kicked in, during a
+    // Wired to GsmService's SET_GAIN: the website moved "Output vol", or its ringing percent kicked in, during a
     // browser-driven call - the headset level follows at once. Blocks on su - its own thread.
     fun onPlaybackGainChanged() {
         if (!browserDrivenCall) return
@@ -594,6 +680,83 @@ class CallController(
         }.start()
     }
 
+    // Wired to GsmService's SET_GAIN micGain: the website moved "Mic vol" - how loud the lead hears him. Blocks on
+    // su - its own thread. Between calls there is no mic path to set, the next call's connect applies it.
+    fun onMicGainChanged() {
+        if (!isCallActive) return
+        Thread {
+            try {
+                applyMicGain()
+                cmdWsClient()?.sendEvent("CALL_STATE", callStateMap())
+            } catch (e: Exception) {
+                log("ERROR applying the mic gain: ${e.message}")
+            }
+        }.start()
+    }
+
+    // "Mic vol" (SET_GAIN micGain, 1.0 = the phone's own level): the mic the call uses right now, by Telecom's route.
+    //  - the phone's own mic / a wired headset's mic run through the codec - its mic volume controls take the gain
+    //  - a Bluetooth headset's mic comes from the Bluetooth radio straight into the voice DSP: no control on the phone
+    //    sits on that road, the headset sets its own level
+    // 1.0 with nothing changed before is left alone, so a call that never touched the slider runs no root command.
+    private fun applyMicGain() {
+        val micGain = AudioWebSocketHandler.micGain
+        if (GsmInCallService.currentAudioState?.route == CallAudioState.ROUTE_BLUETOOTH) {
+            micVolStatus = MIC_VOL_BLUETOOTH
+            if (micGain != 1f) log("🎙️ Mic vol not applied: a Bluetooth headset sets its own mic level")
+            return
+        }
+        if (micGain == 1f && micVolStatus != MIC_VOL_CODEC) return
+        val isApplied = RootUtils.updateMicVolume(micGain)
+        micVolStatus = if (isApplied) MIC_VOL_CODEC else MIC_VOL_NONE
+        log(if (isApplied) "🎙️ Mic vol x$micGain applied to the codec's mic volume" else "🎙️ Mic vol not applied: no mic volume control on this phone")
+    }
+
+    // What is paired / plugged into the phone right now - the call's output and its mic: "bluetooth" (a headset with
+    // a call link), "wired", or "none" (the phone's own earpiece + mic)
+    private fun headsetName(): String {
+        val outputs = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+        return when {
+            outputs.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } -> HEADSET_BLUETOOTH
+            outputs.any { it.type == AudioDeviceInfo.TYPE_WIRED_HEADSET || it.type == AudioDeviceInfo.TYPE_WIRED_HEADPHONES } -> HEADSET_WIRED
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && outputs.any { it.type == AudioDeviceInfo.TYPE_USB_HEADSET } -> HEADSET_WIRED
+            else -> HEADSET_NONE
+        }
+    }
+
+    // A headset paired to the phone is the call's one output. Telecom's route once the call has one; in the dial's
+    // first moment (no route yet) what is connected right now - Telecom picks a connected headset by itself.
+    private fun isHeadsetCarryingCall(): Boolean = when (GsmInCallService.currentAudioState?.route) {
+        CallAudioState.ROUTE_BLUETOOTH, CallAudioState.ROUTE_WIRED_HEADSET -> true
+        null -> headsetName() != HEADSET_NONE
+        else -> false
+    }
+
+    // The dial is out and nobody answered yet - the only time the generated ringback may play.
+    private fun isDialRingingOut(): Boolean {
+        if (!isCallActive || !browserDrivenCall || callAnsweredSent.get()) return false
+        val state = GsmInCallService.currentCall?.state ?: return true
+        return state != Call.STATE_ACTIVE && state != Call.STATE_HOLDING && state != Call.STATE_RINGING &&
+            state != Call.STATE_DISCONNECTED && state != Call.STATE_DISCONNECTING
+    }
+
+    // One output for the call's sound (outreach-tool plan-09 task 5). A headset that carries the call plays the
+    // network's own ringback and the lead's voice - the website then gets neither: both outputs at once were the
+    // 2nd, quieter "tyyy", and the stream ran over the same 2.4 GHz radio as the Bluetooth call link. No headset =
+    // the website is the output: the generated ringback while it rings, the downlink after. tinycap keeps running
+    // either way (CallRecorder's tee).
+    private fun applyAudioToBrowser() {
+        val handler = audioWsHandlerRef.handler ?: return
+        val isHeadset = isHeadsetCarryingCall()
+        handler.isAudioToBrowserOn = !isHeadset
+        if (isHeadset) {
+            handler.stopRingback()
+            log("🎧 Call sound: the headset paired to the phone - nothing goes to the website")
+        } else if (isDialRingingOut() && handler.isWsConnected) {
+            handler.startRingback()
+        }
+    }
+
     // Phone-side audibility of a browser-driven call, from Telecom's real route, not a mirror flag:
     //  - loudspeaker: the operator turned it on — fully audible
     //  - a headset paired to the phone (Bluetooth / wired): it carries the call at the website's
@@ -603,19 +766,18 @@ class CallController(
     // su — call from a background thread.
     private fun applyPhoneAudibility() {
         if (!browserDrivenCall) return
-        when (GsmInCallService.currentAudioState?.route) {
+        when (val route = GsmInCallService.currentAudioState?.route) {
             CallAudioState.ROUTE_SPEAKER -> {
                 liftQuietState()
                 log("🔊 Phone audible — loudspeaker on during a browser-driven call")
             }
             CallAudioState.ROUTE_BLUETOOTH, CallAudioState.ROUTE_WIRED_HEADSET -> {
-                // the headset's call volume follows the website's "Playback Vol" (SET_GAIN playbackGain); while
+                // the headset's call volume follows the website's "Output vol" (SET_GAIN playbackGain); while
                 // it rings with music on, the website lowers that gain to its "ringing while music plays" percent
-                val level = headsetVoiceVolume(AudioWebSocketHandler.playbackGain)
-                setVoiceVolume(level)
+                val volumeText = setHeadsetCallVolume(isBluetooth = route == CallAudioState.ROUTE_BLUETOOTH)
                 liftMusicOnCallLink()
                 RootUtils.mutePhoneSpeaker()
-                log("🎧 Headset carries the browser-driven call at voice volume $level/$maxVoiceVolume — phone itself quiet")
+                log("🎧 Headset carries the browser-driven call at $volumeText — phone itself quiet")
             }
             else -> {
                 setPhoneQuiet()
@@ -649,7 +811,13 @@ class CallController(
                     Thread.sleep(delayMs)
                     if (!browserDrivenCall) return@Thread
                     applyPhoneAudibility()
+                    // the route decides the call's one output and which mic "Mic vol" acts on - the HAL sets its own
+                    // mic volume again for the new route
+                    applyAudioToBrowser()
+                    applyMicGain()
                 }
+                // the headset / the mic of the new route - the website's gear menu shows both
+                cmdWsClient()?.sendEvent("CALL_STATE", callStateMap())
             } catch (e: Exception) {
                 log("ERROR applying the call route: ${e.message}")
             }
@@ -674,6 +842,16 @@ class CallController(
         // the two "call audio" signals - see callConnectedHandled / callAnsweredSent
         private const val SOURCE_OFFHOOK = "OFFHOOK"
         private const val SOURCE_ANSWERED = "STATE_ACTIVE"
+        // AudioManager.STREAM_BLUETOOTH_SCO - hidden in the SDK, its value is part of the platform since API 1
+        private const val STREAM_BLUETOOTH_SCO = 6
+        // headsetName()
+        private const val HEADSET_BLUETOOTH = "bluetooth"
+        private const val HEADSET_WIRED = "wired"
+        private const val HEADSET_NONE = "none"
+        // micVolStatus
+        private const val MIC_VOL_BLUETOOTH = "bluetooth"
+        private const val MIC_VOL_CODEC = "codec"
+        private const val MIC_VOL_NONE = "none"
         // reportCall: how long the call log row may take to show up, and how far before the call was added the row's
         // start may sit (the call log's DATE is the dial, Telecom's add comes a beat later)
         private const val CALL_LOG_WAIT_MS = 3000L

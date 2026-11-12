@@ -276,7 +276,12 @@ class GsmService : Service() {
                             .removeSuffix("/") + "/ws/audio"
                         cmdWsClient = CommandWebSocketClient(wsUrl, safeConfig.BACKEND_BEARER, safeConfig.DEVICE_TOKEN,
                             onCommand = { type, data -> handleWsCommand(type, data) },
-                            stateProvider = { mapOf("isServiceActive" to isServiceAudioActive, "isTestActive" to isTestAudioActive) },
+                            // + the phone's own call state: the VPS keeps it, the laptop's status poll reads it, so
+                            // its card follows the phone even when one CALL_ENDED / CALL_CONNECTED event went missing
+                            stateProvider = {
+                                mapOf("isServiceActive" to isServiceAudioActive, "isTestActive" to isTestAudioActive) +
+                                    callController.callStateMap()
+                            },
                             onConnected = {
                                 sendSimList()
                                 // a USSD session during a call would cut into it - a reconnect mid-call waits for the next connect
@@ -475,8 +480,9 @@ class GsmService : Service() {
             when (normalizedType) {
                 "CALL_STARTED" -> callController.handleCallStarted(data, gsmDialer)
                 "CALL_ENDED" -> callController.handleCallEnded(gsmDialer)
-                "ANSWER_CALL" -> callController.handleAnswerCall()
+                "ANSWER_CALL" -> callController.handleAnswerCall(data)
                 "IGNORE_CALL" -> callController.handleIgnoreCall()
+                "SET_MIC_MUTED" -> callController.handleSetMicMuted(data)
                 "GET_CALL_LOG" -> callController.handleGetCallLog(data)
                 "UPLOAD_RECORDING" -> callController.handleUploadRecording(data)
                 "SEND_DTMF" -> callController.handleSendDtmf(data)
@@ -504,8 +510,10 @@ class GsmService : Service() {
                     if (playback != null) AudioWebSocketHandler.playbackGain = playback.coerceIn(0f, 4f)
                     log("🎚️ Gain: mic=${mic} playback=${playback}")
                     // on a browser-driven call a headset paired to the phone takes its call volume from
-                    // playbackGain - the website's "Playback Vol", or its "ringing while music plays" percent
+                    // playbackGain - the website's "Output vol", or its "ringing while music plays" percent
                     if (playback != null) callController.onPlaybackGainChanged()
+                    // micGain - the website's "Mic vol": the mic the call uses right now
+                    if (mic != null) callController.onMicGainChanged()
                 }
                 "SET_RECORDING" -> {
                     // the website's "record every call" + "delete recordings older than N days" (plan-06 tasks 5 + 7) -

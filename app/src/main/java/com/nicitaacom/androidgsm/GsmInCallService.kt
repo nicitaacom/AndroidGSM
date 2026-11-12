@@ -19,6 +19,10 @@ class GsmInCallService : InCallService() {
     private val callCallback = object : Call.Callback() {
         override fun onStateChanged(call: Call, state: Int) {
             MainActivity.log("GsmInCallService: call state → $state")
+            // an ignored ring that got answered on the phone after all is a call again
+            if (state != Call.STATE_RINGING && ignoredCall === call) ignoredCall = null
+            // before the callbacks below: the VPS holds the new state by the time CALL_CONNECTED reaches the laptop
+            onCallStateChanged?.invoke()
             when (state) {
                 Call.STATE_ACTIVE -> {
                     // The answer. TelephonyManager's OFFHOOK is the dial of an outgoing call (and
@@ -138,7 +142,13 @@ class GsmInCallService : InCallService() {
         // a call that rings while another is on (call waiting) stays apart from the active one: its end must not
         // tear the active call's audio down (plan-05 task 7, edge case 5)
         if (isRinging && currentCall != null && currentCall !== call) ringingCall = call else currentCall = call
+        // the laptop's id of this dial (CALL_STARTED's dialId) belongs to the outgoing call Telecom adds next
+        if (!isRinging) nextOutgoingDialId?.let { dialId ->
+            dialIdByCall[call] = dialId
+            nextOutgoingDialId = null
+        }
         call.registerCallback(callCallback)
+        onCallStateChanged?.invoke()
         // the laptop hung up before Telecom added this dial - it ends here, before it rings anyone (onCallRemoved then
         // tears it down and sends CALL_ENDED like any other end)
         if (!isRinging && System.currentTimeMillis() < endOutgoingCallUntilMs) {
@@ -162,9 +172,13 @@ class GsmInCallService : InCallService() {
     override fun onCallRemoved(call: Call) {
         super.onCallRemoved(call)
         call.unregisterCallback(callCallback)
+        // the id of the call that ended, not of whichever call is current by now - CALL_ENDED names it for the laptop
+        val endedDialId = dialIdByCall.remove(call)
+        if (ignoredCall === call) ignoredCall = null
         // the waiting call went away (she gave up, or the network's ring timeout) - the active call is untouched
         if (ringingCall === call) {
             ringingCall = null
+            onCallStateChanged?.invoke()
             onIncomingCallEnded?.invoke()
             MainActivity.log("GsmInCallService: the waiting call detached")
             return
@@ -179,10 +193,12 @@ class GsmInCallService : InCallService() {
         // toggles and its first audio state is reported as the fresh route it is.
         currentAudioState = null
         CallActivity.notifyEnded()
+        // before CALL_ENDED below: the VPS holds "idle" by the time the audio socket drops
+        onCallStateChanged?.invoke()
         // Authoritative, immediate "call ended" — tear audio down NOW instead of waiting for
         // MIUI's laggy PhoneStateListener IDLE (which left the downlink robot voice playing
         // ~10s after hang-up). See CallController.wireDialerCallbacks / teardownCall.
-        onCallEnded?.invoke()
+        onCallEnded?.invoke(endedDialId)
         MainActivity.log("GsmInCallService: Call detached")
     }
 
@@ -205,6 +221,51 @@ class GsmInCallService : InCallService() {
             endOutgoingCallUntilMs = System.currentTimeMillis() + withinMs
         }
 
+        // The laptop's own id of each call it dialed or answered (CALL_STARTED / ANSWER_CALL dialId). CALL_CONNECTED and
+        // CALL_ENDED send it back, so a late end of the call before never ends the laptop's card of the next dial
+        // (outreach-tool plan-09 task 8). A call made on the phone itself has none
+        private val dialIdByCall = java.util.concurrent.ConcurrentHashMap<Call, String>()
+        @Volatile private var nextOutgoingDialId: String? = null
+        // CallController.handleCallStarted, right before placeCall - null for a laptop that sends no dialId yet
+        fun setNextOutgoingDialId(dialId: String?) {
+            nextOutgoingDialId = dialId
+        }
+        val currentDialId: String? get() = currentCall?.let { dialIdByCall[it] }
+        // ANSWER_CALL - the ringing call becomes the laptop's call
+        fun setRingingDialId(dialId: String?) {
+            val call = ringingNow ?: return
+            if (dialId.isNullOrBlank()) dialIdByCall.remove(call) else dialIdByCall[call] = dialId
+        }
+
+        // Set by CallController.wireDialerCallbacks() - a call was added, changed its state or went away. The phone's
+        // own state goes to the VPS at once (CALL_STATE) and with every heartbeat, the laptop's status poll reads it
+        @Volatile var onCallStateChanged: (() -> Unit)? = null
+
+        private fun numberOf(call: Call): String = call.details?.handle?.schemeSpecificPart ?: ""
+
+        // the ring [Ignore] silenced - for Telecom it still rings (the caller keeps hearing it), for the laptop's card
+        // it is over: callStateMap leaves it out, or the card would show it again from the status poll
+        @Volatile private var ignoredCall: Call? = null
+
+        // "idle" | "dialing" | "active" | "ringing" + the numbers - what the laptop's card has to show right now
+        fun callStateMap(): Map<String, Any> {
+            val call = currentCall?.takeIf { it !== ignoredCall }
+            val ringing = ringingNow?.takeIf { it !== ignoredCall }
+            val callState = when (call?.state) {
+                null, Call.STATE_DISCONNECTED, Call.STATE_DISCONNECTING -> "idle"
+                Call.STATE_RINGING -> "ringing"
+                Call.STATE_ACTIVE, Call.STATE_HOLDING -> "active"
+                else -> "dialing"
+            }
+            return mapOf(
+                "callState" to callState,
+                "callNumber" to (if (call == null || callState == "idle") "" else numberOf(call)),
+                "callDialId" to (currentDialId ?: ""),
+                "isRinging" to (ringing != null),
+                "ringingNumber" to (ringing?.let { numberOf(it) } ?: "")
+            )
+        }
+
         private val ringingNow: Call? get() = (ringingCall ?: currentCall)?.takeIf { it.state == Call.STATE_RINGING }
         val hasRingingCall: Boolean get() = ringingNow != null
         // ANSWER_CALL from the laptop - false = nothing rings any more
@@ -223,6 +284,8 @@ class GsmInCallService : InCallService() {
             }
             // a waiting call next to an active one leaves the active call's screen open
             if (call === currentCall) CallActivity.notifyEnded()
+            ignoredCall = call
+            onCallStateChanged?.invoke()
             onIncomingCallEnded?.invoke()
             return true
         }
@@ -243,9 +306,18 @@ class GsmInCallService : InCallService() {
         @Volatile var onCallDisconnected: (() -> Unit)? = null
         // Invoked on onCallRemoved — the fast/reliable "call ended" signal (Telecom), used to
         // trigger immediate audio teardown instead of relying on the slow MIUI IDLE callback.
-        @Volatile var onCallEnded: (() -> Unit)? = null
+        // dialId: the laptop's id of the call that ended, null for a call it did not start
+        @Volatile var onCallEnded: ((dialId: String?) -> Unit)? = null
 
         val isMuted: Boolean get() = currentAudioState?.isMuted == true
+
+        // SET_MIC_MUTED from the laptop's [Mute] - the phone's own mic / the headset's mic, the call's one uplink.
+        // false = no live call
+        fun updateMicMuted(muted: Boolean): Boolean {
+            val service = instance ?: return false
+            service.setMicMuted(muted)
+            return true
+        }
         val isSpeakerOn: Boolean get() = currentAudioState?.isSpeakerRoute == true
 
         fun routeName(route: Int): String = when (route) {

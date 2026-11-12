@@ -40,6 +40,11 @@ class AudioWebSocketHandler(
     // plan-06: a copy of every tinycap chunk goes here while set (CallRecorder, answer to hang-up); a write
     // error on it is swallowed so the browser's stream never stops because of the file
     @Volatile var teeSink: java.io.OutputStream? = null
+
+    // false while a headset paired to the phone carries the call (CallController.applyAudioToBrowser): the headset is
+    // the call's one output, so neither the generated ringback nor the downlink goes to the website. tinycap keeps
+    // running for teeSink
+    @Volatile var isAudioToBrowserOn = true
     private var uplinkPcmProcess: Process? = null
     @Volatile private var ringbackJob: Job? = null
     @Volatile private var audioTrack: AudioTrack? = null
@@ -315,8 +320,9 @@ class AudioWebSocketHandler(
                 teeSink?.let { sink -> runCatching { sink.write(buffer, 0, offset) } }
 
                 // while the generated ringback plays, the downlink (the network's own ringback at the quiet
-                // voice volume) stays on the phone - one "tyyy" reaches the website, not two
-                if (ringbackJob?.isActive == true) continue
+                // voice volume) stays on the phone - one "tyyy" reaches the website, not two. A headset that
+                // carries the call plays the downlink itself - the website gets none of it
+                if (ringbackJob?.isActive == true || !isAudioToBrowserOn) continue
 
                 // Send raw PCM bytes — no HPF/gain processing for downlink voice
                 val base64Audio = Base64.encodeToString(buffer, 0, offset, Base64.NO_WRAP)

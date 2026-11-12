@@ -23,7 +23,9 @@ import java.util.concurrent.Executors
 class CallRecorder(
     private val context: Context,
     private val audioWsHandlerRef: AudioWsHandlerRef,
-    private val log: GsmLogger
+    private val log: GsmLogger,
+    // a call is on right now - an upload waits for the line to be free
+    private val isCallOn: () -> Boolean
 ) {
     private val dir: File
         get() = File(context.filesDir, "recordings").also { it.mkdirs() }
@@ -126,6 +128,11 @@ class CallRecorder(
         uploadExecutor.execute {
             val file = File(dir, "$callLogId.m4a")
             if (!file.exists()) return@execute
+            // The file goes out over the same 2.4 GHz radio the Bluetooth call link uses - an upload in the middle of
+            // a talk can break up his voice for the lead. It waits for a free line (auto dial leaves a few seconds
+            // between 2 dials); the link the website made is good for 2 hours.
+            val waitUntil = System.currentTimeMillis() + UPLOAD_FREE_LINE_WAIT_MS
+            while (isCallOn() && System.currentTimeMillis() < waitUntil) Thread.sleep(UPLOAD_FREE_LINE_POLL_MS)
             var connection: HttpURLConnection? = null
             try {
                 connection = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -231,6 +238,9 @@ class CallRecorder(
         // a 30-minute call is ~7 MB - a slow uplink still finishes inside 2 minutes
         private const val UPLOAD_CONNECT_TIMEOUT_MS = 15_000
         private const val UPLOAD_READ_TIMEOUT_MS = 120_000
+        // upload(): how long a recording waits for a free line, and how often it looks
+        private const val UPLOAD_FREE_LINE_WAIT_MS = 30 * 60 * 1000L
+        private const val UPLOAD_FREE_LINE_POLL_MS = 1000L
 
         // "record every call" from the website's gear menu (dialerConfig.isRecordEveryCall), kept so a phone
         // restart does not turn it off
